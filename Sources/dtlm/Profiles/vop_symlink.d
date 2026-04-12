@@ -3,7 +3,7 @@
 vfs::vop_symlink:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_symlink", execname, pid);
+    printf("%s[%d]: vop_symlink\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

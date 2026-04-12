@@ -3,5 +3,5 @@
 sched:::enqueue
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched enqueue", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched enqueue\n", execname, pid, tid);
 }

@@ -192,3 +192,37 @@ struct StackOptions: ParsableArguments {
     )
     var withUstack: Bool = false
 }
+
+// MARK: - FormatOption
+
+/// Output format selection. dtlm v1 ships text (Phase 1), json
+/// (Phase 2), and otel (Phase 3). Only the first two are wired up
+/// today; `otel` will refuse to run until Phase 3 lands the
+/// OTLP/HTTP+JSON exporter.
+enum OutputFormat: String, ExpressibleByArgument, Sendable {
+    /// Line-oriented dwatch-style stdout. Each probe firing prints
+    /// the script's `printf` body verbatim.
+    case text
+
+    /// JSONL — one JSON object per probe firing. The script's
+    /// `printf` body lands in the `body` field, alongside `time`
+    /// and `profile`. Pipe-friendly for `jq`, Loki, Vector, Splunk.
+    case json
+}
+
+struct FormatOption: ParsableArguments {
+
+    @Option(
+        name: .customLong("format"),
+        help: ArgumentHelp(
+            "Output format: text (default, dwatch-style) or json (JSONL).",
+            discussion: """
+                'text' streams libdtrace's formatted output directly \
+                to stdout, including aggregation tables. 'json' wraps \
+                each line as a JSONL record with time/profile/body \
+                fields, suitable for piping to jq, Loki, Vector, etc.
+                """
+        )
+    )
+    var format: OutputFormat = .text
+}

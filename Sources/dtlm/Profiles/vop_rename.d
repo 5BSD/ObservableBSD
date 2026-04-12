@@ -3,7 +3,7 @@
 vfs::vop_rename:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_rename", execname, pid);
+    printf("%s[%d]: vop_rename\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

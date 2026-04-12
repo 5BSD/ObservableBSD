@@ -10,7 +10,7 @@
 tcp:::state-change
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp state %d -> %d",
+    printf("%s[%d]: tcp state %d -> %d\n",
            execname, pid, args[5]->tcps_state, args[3]->tcps_state);
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -19,7 +19,7 @@ tcp:::state-change
 tcp:::send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp send len=%d", execname, pid, args[2]->ip_plength);
+    printf("%s[%d]: tcp send len=%d\n", execname, pid, args[2]->ip_plength);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -27,7 +27,7 @@ tcp:::send
 tcp:::receive
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp recv len=%d", execname, pid, args[2]->ip_plength);
+    printf("%s[%d]: tcp recv len=%d\n", execname, pid, args[2]->ip_plength);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -35,7 +35,7 @@ tcp:::receive
 udp:::send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: udp send len=%d", execname, pid, args[2]->ip_plength);
+    printf("%s[%d]: udp send len=%d\n", execname, pid, args[2]->ip_plength);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -43,7 +43,7 @@ udp:::send
 udp:::receive
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: udp recv len=%d", execname, pid, args[2]->ip_plength);
+    printf("%s[%d]: udp recv len=%d\n", execname, pid, args[2]->ip_plength);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

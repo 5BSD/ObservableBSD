@@ -3,7 +3,7 @@
 proc:::signal-send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc signal-send", execname, pid);
+    printf("%s[%d]: proc signal-send\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

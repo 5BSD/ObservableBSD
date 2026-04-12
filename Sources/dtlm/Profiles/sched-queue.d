@@ -5,5 +5,5 @@ sched:::enqueue,
 sched:::load-change
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched %s", execname, pid, tid, probename);
+    printf("%s[%d/tid %d]: sched %s\n", execname, pid, tid, probename);
 }

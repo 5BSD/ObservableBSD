@@ -3,7 +3,7 @@
 syscall::chmod:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: chmod(\"%s\", 0%o)",
+    printf("%s[%d]: chmod(\"%s\", 0%o)\n",
            execname, pid, copyinstr(arg0), (mode_t)arg1);
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -12,7 +12,7 @@ syscall::chmod:entry
 syscall::lchmod:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: lchmod(\"%s\", 0%o)",
+    printf("%s[%d]: lchmod(\"%s\", 0%o)\n",
            execname, pid, copyinstr(arg0), (mode_t)arg1);
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -21,7 +21,7 @@ syscall::lchmod:entry
 syscall::fchmod:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: fchmod(%d, 0%o)",
+    printf("%s[%d]: fchmod(%d, 0%o)\n",
            execname, pid, (int)arg0, (mode_t)arg1);
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -30,7 +30,7 @@ syscall::fchmod:entry
 syscall::fchmodat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: fchmodat(_, \"%s\", 0%o)",
+    printf("%s[%d]: fchmodat(_, \"%s\", 0%o)\n",
            execname, pid, copyinstr(arg1), (mode_t)arg2);
     /* @dtlm-stack */
     /* @dtlm-ustack */

@@ -4,7 +4,7 @@
 kinst::${func}:${offset}
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: ${func}+${offset}", execname, pid);
+    printf("%s[%d]: ${func}+${offset}\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

@@ -3,7 +3,7 @@
 vfs::vop_mknod:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_mknod", execname, pid);
+    printf("%s[%d]: vop_mknod\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

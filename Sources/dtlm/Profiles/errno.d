@@ -3,7 +3,7 @@
 syscall:::return
 /errno != 0 /* @dtlm-predicate-and */ /
 {
-    printf("%s[%d]: %s -> errno %d", execname, pid, probefunc, errno);
+    printf("%s[%d]: %s -> errno %d\n", execname, pid, probefunc, errno);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

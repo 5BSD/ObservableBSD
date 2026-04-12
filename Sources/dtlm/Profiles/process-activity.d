@@ -9,32 +9,32 @@
 proc:::create
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: create", execname, pid);
+    printf("%s[%d]: create\n", execname, pid);
     /* @dtlm-ustack */
 }
 
 proc:::exec-success
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: exec-success", execname, pid);
+    printf("%s[%d]: exec-success\n", execname, pid);
     /* @dtlm-ustack */
 }
 
 proc:::exec-failure
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: exec-failure", execname, pid);
+    printf("%s[%d]: exec-failure\n", execname, pid);
 }
 
 proc:::exit
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: exit", execname, pid);
+    printf("%s[%d]: exit\n", execname, pid);
     /* @dtlm-ustack */
 }
 
 proc:::signal-send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: signal-send", execname, pid);
+    printf("%s[%d]: signal-send\n", execname, pid);
 }

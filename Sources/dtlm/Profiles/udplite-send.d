@@ -3,7 +3,7 @@
 udplite:::send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: udplite send", execname, pid);
+    printf("%s[%d]: udplite send\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

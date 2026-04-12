@@ -3,7 +3,7 @@
 proc:::create
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc create", execname, pid);
+    printf("%s[%d]: proc create\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

@@ -3,7 +3,7 @@
 tcp:::connect-established
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp connect-established", execname, pid);
+    printf("%s[%d]: tcp connect-established\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

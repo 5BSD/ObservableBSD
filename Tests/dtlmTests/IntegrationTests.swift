@@ -26,27 +26,50 @@ import Foundation
 /// catches every invented probe name in one shot.
 final class IntegrationTests: XCTestCase {
 
-    /// Path to the dtlm binary built by `swift build` in `.build/debug/`.
-    /// Computed relative to the test bundle's location, since
-    /// `swift test` cwd isn't always the project root.
+    /// Path to the dtlm binary that was built alongside this test
+    /// bundle. The test bundle and the executable are siblings inside
+    /// the SwiftPM build directory's `<triple>/debug/` directory:
+    ///
+    ///   <build-path>/x86_64-unknown-freebsd/debug/dtlmPackageTests.xctest   ← test bundle
+    ///   <build-path>/x86_64-unknown-freebsd/debug/dtlm                      ← executable
+    ///
+    /// `Bundle(for:).bundleURL` points to different things on
+    /// different platforms — sometimes the `.xctest` file, sometimes
+    /// the `debug/` directory itself, sometimes a shared library
+    /// inside the bundle. Rather than assume one shape, try a list
+    /// of candidates and return the first one that exists. The
+    /// fallback path lets `skipIfBinaryMissing` produce a useful
+    /// error message if none match.
     private var dtlmBinaryPath: String {
-        // Find the .build/debug directory by walking up from the test
-        // bundle's URL until we find Package.swift.
-        var dir = Bundle(for: type(of: self)).bundleURL
-            .deletingLastPathComponent()  // strip the .xctest dir
-        while dir.path != "/" {
-            let pkg = dir.appendingPathComponent("Package.swift")
-            if FileManager.default.fileExists(atPath: pkg.path) {
-                return dir
-                    .appendingPathComponent(".build")
-                    .appendingPathComponent("debug")
-                    .appendingPathComponent("dtlm")
-                    .path
+        let fm = FileManager.default
+        let bundleURL = Bundle(for: type(of: self)).bundleURL
+
+        // Candidate 1: bundleURL IS the debug directory (FreeBSD swift test).
+        let candidate1 = bundleURL.appendingPathComponent("dtlm").path
+
+        // Candidate 2: bundleURL is the .xctest sibling, debug/ is the parent.
+        let candidate2 = bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("dtlm")
+            .path
+
+        // Candidate 3: bundleURL is inside debug/<bundle>/Contents/MacOS,
+        // walk up two more levels (mac-style nested xctest bundles).
+        let candidate3 = bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("dtlm")
+            .path
+
+        for candidate in [candidate1, candidate2, candidate3] {
+            if fm.fileExists(atPath: candidate) {
+                return candidate
             }
-            dir = dir.deletingLastPathComponent()
         }
-        // Fallback: assume cwd is project root
-        return ".build/debug/dtlm"
+        // Best-effort fallback so the failure message points at the
+        // expected layout the test was originally built against.
+        return candidate1
     }
 
     /// Run the dtlm binary with the given args, capture stdout +
@@ -58,6 +81,15 @@ final class IntegrationTests: XCTestCase {
     /// returned `stderr` is prefixed with `[TIMEOUT]` so the caller
     /// can recognize the failure mode. Without this, a single hung
     /// profile would stall the entire integration suite.
+    ///
+    /// **Pipe draining is critical.** dtlm's text-mode profiles (and
+    /// json mode for high-rate ones like sched-on-cpu) can produce
+    /// megabytes of stdout per second. The kernel pipe buffer is
+    /// ~64KB on FreeBSD; if we don't drain it concurrently with the
+    /// run, the child blocks on `write(2)` and looks hung. We use
+    /// `readabilityHandler` to accumulate bytes into thread-safe
+    /// buffers as they arrive, and only stop reading after the child
+    /// has signaled EOF (which happens when it exits or is killed).
     private func runDtlm(
         _ args: [String],
         asRoot: Bool = false,
@@ -86,6 +118,31 @@ final class IntegrationTests: XCTestCase {
         process.standardOutput = outPipe
         process.standardError = errPipe
 
+        // Background drain. readabilityHandler is invoked from a
+        // private dispatch queue every time the file descriptor has
+        // bytes available, so we don't need to spin our own thread.
+        // The byte accumulators live inside a tiny ref-typed box so
+        // the @Sendable closure can mutate through it under a lock.
+        let outBuf = ByteBuffer()
+        let errBuf = ByteBuffer()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                // EOF — clear the handler so the FileHandle can close.
+                handle.readabilityHandler = nil
+                return
+            }
+            outBuf.append(chunk)
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            errBuf.append(chunk)
+        }
+
         do {
             try process.run()
         } catch {
@@ -95,19 +152,17 @@ final class IntegrationTests: XCTestCase {
 
         // Wait with timeout. We poll process.isRunning rather than
         // sitting in waitUntilExit so we can SIGTERM after `timeout`
-        // seconds.
+        // seconds. The pipe drain runs concurrently on its own queue.
         let deadline = Date(timeIntervalSinceNow: timeout)
         var timedOut = false
         while process.isRunning {
             if Date() >= deadline {
                 timedOut = true
                 process.terminate()
-                // Give it a grace period to clean up via SIGTERM.
                 let graceDeadline = Date(timeIntervalSinceNow: 1.0)
                 while process.isRunning && Date() < graceDeadline {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
-                // If it's still alive, forcibly kill it.
                 if process.isRunning {
                     kill(process.processIdentifier, SIGKILL)
                     process.waitUntilExit()
@@ -117,14 +172,32 @@ final class IntegrationTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
 
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        var stderr = String(data: errData, encoding: .utf8) ?? ""
+        // After the child exits, the kernel writes EOF to the pipe.
+        // The readabilityHandler will fire one last time with an
+        // empty Data and clear itself. Synchronously drain whatever
+        // is still buffered before reading the final values.
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        while true {
+            let chunk = outPipe.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            outBuf.append(chunk)
+        }
+        while true {
+            let chunk = errPipe.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            errBuf.append(chunk)
+        }
+
+        let finalOut = outBuf.snapshot()
+        let finalErr = errBuf.snapshot()
+
+        var stderr = String(data: finalErr, encoding: .utf8) ?? ""
         if timedOut {
             stderr = "[TIMEOUT after \(timeout)s] " + stderr
         }
         return (
-            String(data: outData, encoding: .utf8) ?? "",
+            String(data: finalOut, encoding: .utf8) ?? "",
             stderr,
             process.terminationStatus
         )
@@ -355,6 +428,114 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: - Root tier: --format json end-to-end (Phase 2)
+
+    /// Run a high-frequency `printf`-based profile in
+    /// `--format json --duration 1` and assert every output line is
+    /// valid JSONL with the expected fields (`time`, `profile`, `body`).
+    ///
+    /// Uses `sched-on-cpu` because it (a) fires constantly on any
+    /// running system (every CPU schedule decision), (b) uses
+    /// `printf` not `printa`, so the data flows through libdtrace's
+    /// `dtrace_fprintf` path — which the structured backend captures
+    /// via a pipe and turns into one ProbeEvent per line.
+    ///
+    /// Aggregation rows from `printa()` flow through the same pipe
+    /// (`aggregatePrint(to: writeFP)` runs after the poll loop), so
+    /// each row becomes a ProbeEvent with the rendered text in
+    /// `body` rather than a typed `AggregationSnapshot`. Phase 3's
+    /// typed aggregation walker will replace that.
+    func testJsonFormatProducesValidJSONL() throws {
+        try XCTSkipUnless(isRoot,
+            "json format runs libdtrace; requires root. Run with `sudo swift test`.")
+        try skipIfBinaryMissing()
+
+        guard let result = runDtlm(
+            ["watch", "sched-on-cpu", "--format", "json", "--duration", "1"],
+            timeout: 15.0
+        ) else {
+            XCTFail("could not run dtlm")
+            return
+        }
+        XCTAssertEqual(result.exitCode, 0,
+            "dtlm watch --format json should exit 0; stderr: \(result.stderr)")
+        XCTAssertFalse(result.stdout.isEmpty,
+            "json format should produce at least one line of output")
+
+        // Every non-empty line must parse as a JSON object.
+        let lines = result.stdout
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        XCTAssertGreaterThan(lines.count, 0,
+            "json output should contain at least one record")
+
+        var validRecords = 0
+        var invalidLines: [String] = []
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                invalidLines.append(line)
+                continue
+            }
+            // Required fields per the JSONLExporter contract.
+            XCTAssertNotNil(obj["time"] as? String, "missing 'time' in: \(line)")
+            XCTAssertNotNil(obj["profile"] as? String, "missing 'profile' in: \(line)")
+            XCTAssertNotNil(obj["body"] as? String, "missing 'body' in: \(line)")
+            XCTAssertEqual(obj["profile"] as? String, "sched-on-cpu")
+            validRecords += 1
+        }
+
+        if !invalidLines.isEmpty {
+            XCTFail("\(invalidLines.count) line(s) failed JSON parse, e.g.: \(invalidLines.first ?? "")")
+        }
+        XCTAssertGreaterThan(validRecords, 0,
+            "expected at least one valid JSONL record")
+    }
+
+    /// Run a per-event probe in `--format json` and assert each
+    /// record's `body` field contains the printf body shape.
+    func testJsonFormatPreservesPrintfBody() throws {
+        try XCTSkipUnless(isRoot, "requires root")
+        try skipIfBinaryMissing()
+
+        guard let result = runDtlm(
+            ["watch", "proc-exec-success", "--format", "json", "--duration", "2"],
+            timeout: 15.0
+        ) else {
+            XCTFail("could not run dtlm")
+            return
+        }
+        XCTAssertEqual(result.exitCode, 0,
+            "stderr: \(result.stderr)")
+
+        let lines = result.stdout
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        // On a quiet system there might be no exec events. Skip
+        // rather than fail in that case.
+        try XCTSkipIf(lines.isEmpty,
+            "no proc-exec-success events fired during the test window — system was idle")
+
+        guard let data = lines[0].data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            XCTFail("first record is not valid JSON: \(lines[0])")
+            return
+        }
+        XCTAssertEqual(obj["profile"] as? String, "proc-exec-success")
+        guard let body = obj["body"] as? String else {
+            XCTFail("missing body field")
+            return
+        }
+        XCTAssertTrue(body.contains("proc"),
+            "body should contain a proc-shaped printf, got: \(body)")
+    }
+
     // MARK: - Root tier: probes subcommand
 
     func testProbesSubcommandLightSmokeTest() throws {
@@ -368,5 +549,28 @@ final class IntegrationTests: XCTestCase {
             "dtlm probes --provider proc should succeed; stderr: \(result.stderr)")
         XCTAssertTrue(result.stdout.contains("proc:"),
             "should list at least one proc probe")
+    }
+}
+
+/// Locked byte accumulator used by `runDtlm`'s background pipe drain.
+/// Foundation's `FileHandle.readabilityHandler` is invoked from a
+/// private dispatch queue concurrently with the test thread, so the
+/// closure can't capture a `var Data` directly under Swift 6 strict
+/// concurrency. Wrapping the bytes in a final class with internal
+/// locking gives the closure a stable reference to mutate.
+private final class ByteBuffer: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
     }
 }

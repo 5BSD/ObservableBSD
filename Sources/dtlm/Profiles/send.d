@@ -5,7 +5,7 @@
 syscall::sendto:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: send(fd=%d, %d)",
+    printf("%s[%d]: send(fd=%d, %d)\n",
            execname, pid, (int)arg0, (size_t)arg2);
     /* @dtlm-stack */
     /* @dtlm-ustack */

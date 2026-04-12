@@ -3,7 +3,7 @@
 syscall::write:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: write(fd=%d, %d)",
+    printf("%s[%d]: write(fd=%d, %d)\n",
            execname, pid, (int)arg0, (size_t)arg2);
     /* @dtlm-stack */
     /* @dtlm-ustack */

@@ -3,5 +3,5 @@
 sched:::preempt
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched preempt", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched preempt\n", execname, pid, tid);
 }

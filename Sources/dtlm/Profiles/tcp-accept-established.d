@@ -3,7 +3,7 @@
 tcp:::accept-established
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp accept-established", execname, pid);
+    printf("%s[%d]: tcp accept-established\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

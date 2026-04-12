@@ -3,7 +3,7 @@
 vfs::vop_lookup:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_lookup", execname, pid);
+    printf("%s[%d]: vop_lookup\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

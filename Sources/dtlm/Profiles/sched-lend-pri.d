@@ -3,5 +3,5 @@
 sched:::lend-pri
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched lend-pri", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched lend-pri\n", execname, pid, tid);
 }

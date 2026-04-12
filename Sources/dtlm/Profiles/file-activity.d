@@ -10,7 +10,7 @@ syscall::open:entry,
 syscall::openat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: open(\"%s\")", execname, pid,
+    printf("%s[%d]: open(\"%s\")\n", execname, pid,
            probefunc == "open" ? copyinstr(arg0) : copyinstr(arg1));
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -19,7 +19,7 @@ syscall::openat:entry
 syscall::close:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: close(fd=%d)", execname, pid, (int)arg0);
+    printf("%s[%d]: close(fd=%d)\n", execname, pid, (int)arg0);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -28,7 +28,7 @@ syscall::read:entry,
 syscall::pread:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: %s(fd=%d, %d)", execname, pid, probefunc, (int)arg0, (size_t)arg2);
+    printf("%s[%d]: %s(fd=%d, %d)\n", execname, pid, probefunc, (int)arg0, (size_t)arg2);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -37,7 +37,7 @@ syscall::write:entry,
 syscall::pwrite:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: %s(fd=%d, %d)", execname, pid, probefunc, (int)arg0, (size_t)arg2);
+    printf("%s[%d]: %s(fd=%d, %d)\n", execname, pid, probefunc, (int)arg0, (size_t)arg2);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -47,7 +47,7 @@ syscall::fstatat:entry
 {
     /* FreeBSD libc stat() is a wrapper around fstatat(AT_FDCWD, …) so
      * the path is in arg1 (the second argument to fstatat). */
-    printf("%s[%d]: stat(\"%s\")", execname, pid, copyinstr(arg1));
+    printf("%s[%d]: stat(\"%s\")\n", execname, pid, copyinstr(arg1));
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -56,7 +56,7 @@ syscall::unlink:entry,
 syscall::unlinkat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: %s(\"%s\")", execname, pid, probefunc,
+    printf("%s[%d]: %s(\"%s\")\n", execname, pid, probefunc,
            probefunc == "unlink" ? copyinstr(arg0) : copyinstr(arg1));
     /* @dtlm-stack */
     /* @dtlm-ustack */
@@ -66,7 +66,7 @@ syscall::rename:entry,
 syscall::renameat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: rename", execname, pid);
+    printf("%s[%d]: rename\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

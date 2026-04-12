@@ -3,7 +3,7 @@
 proc:::signal-clear
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc signal-clear", execname, pid);
+    printf("%s[%d]: proc signal-clear\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

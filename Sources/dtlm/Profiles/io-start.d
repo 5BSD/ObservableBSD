@@ -3,7 +3,7 @@
 io:::start
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: io start", execname, pid);
+    printf("%s[%d]: io start\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

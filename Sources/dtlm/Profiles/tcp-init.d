@@ -7,7 +7,7 @@ tcp:::connect-refused,
 tcp:::connect-request
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp %s", execname, pid, probename);
+    printf("%s[%d]: tcp %s\n", execname, pid, probename);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

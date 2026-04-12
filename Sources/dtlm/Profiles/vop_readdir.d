@@ -3,7 +3,7 @@
 vfs::vop_readdir:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_readdir", execname, pid);
+    printf("%s[%d]: vop_readdir\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

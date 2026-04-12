@@ -3,7 +3,7 @@
 proc:::exec-failure
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc exec-failure", execname, pid);
+    printf("%s[%d]: proc exec-failure\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

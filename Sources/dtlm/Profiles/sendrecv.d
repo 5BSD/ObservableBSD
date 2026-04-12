@@ -7,7 +7,7 @@ syscall::sendto:entry,
 syscall::sendmsg:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: %s(fd=%d)", execname, pid, probefunc, (int)arg0);
+    printf("%s[%d]: %s(fd=%d)\n", execname, pid, probefunc, (int)arg0);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -16,7 +16,7 @@ syscall::recvfrom:return,
 syscall::recvmsg:return
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: %s -> %d", execname, pid, probefunc, (int)arg1);
+    printf("%s[%d]: %s -> %d\n", execname, pid, probefunc, (int)arg1);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

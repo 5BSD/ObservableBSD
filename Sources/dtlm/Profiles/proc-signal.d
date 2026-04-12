@@ -5,7 +5,7 @@ proc:::signal-clear,
 proc:::signal-discard
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc %s", execname, pid, probename);
+    printf("%s[%d]: proc %s\n", execname, pid, probename);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

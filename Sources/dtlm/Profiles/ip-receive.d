@@ -3,7 +3,7 @@
 ip:::receive
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: ip recv", execname, pid);
+    printf("%s[%d]: ip recv\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

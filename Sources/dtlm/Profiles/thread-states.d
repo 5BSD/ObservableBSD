@@ -9,19 +9,19 @@
 sched:::on-cpu
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: on-cpu cpu=%d", execname, pid, tid, cpu);
+    printf("%s[%d/tid %d]: on-cpu cpu=%d\n", execname, pid, tid, cpu);
 }
 
 sched:::off-cpu
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: off-cpu", execname, pid, tid);
+    printf("%s[%d/tid %d]: off-cpu\n", execname, pid, tid);
 }
 
 sched:::sleep
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sleep", execname, pid, tid);
+    printf("%s[%d/tid %d]: sleep\n", execname, pid, tid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
@@ -29,5 +29,5 @@ sched:::sleep
 sched:::wakeup
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: wakeup", execname, pid, tid);
+    printf("%s[%d/tid %d]: wakeup\n", execname, pid, tid);
 }

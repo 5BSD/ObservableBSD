@@ -3,7 +3,7 @@
 tcp:::receive
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: tcp recv len=%d", execname, pid, args[2]->ip_plength);
+    printf("%s[%d]: tcp recv len=%d\n", execname, pid, args[2]->ip_plength);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

@@ -3,5 +3,5 @@
 sched:::remain-cpu
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched remain-cpu", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched remain-cpu\n", execname, pid, tid);
 }

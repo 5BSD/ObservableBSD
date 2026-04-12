@@ -3,7 +3,7 @@
 vfs::vop_remove:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: vop_remove", execname, pid);
+    printf("%s[%d]: vop_remove\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

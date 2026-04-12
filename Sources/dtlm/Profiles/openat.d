@@ -3,7 +3,7 @@
 syscall::openat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: openat(_, \"%s\")",
+    printf("%s[%d]: openat(_, \"%s\")\n",
            execname, pid, copyinstr(arg1));
     /* @dtlm-stack */
     /* @dtlm-ustack */

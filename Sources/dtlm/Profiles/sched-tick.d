@@ -3,5 +3,5 @@
 sched:::tick
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched tick", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched tick\n", execname, pid, tid);
 }

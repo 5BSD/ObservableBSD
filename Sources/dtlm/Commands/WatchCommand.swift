@@ -15,9 +15,10 @@ import Glibc
 /// duration flags, run it via libdtrace, and stream the output
 /// through the chosen exporter.
 ///
-/// Phase 1 supports `--format text` only. JSON and OTel exporters
-/// land in Phases 2 and 3 by adding new `Exporter` conformances —
-/// the run loop in `WatchRunner` doesn't change.
+/// `--format text` (default, Phase 1) writes libdtrace's formatted
+/// printf output directly to stdout. `--format json` (Phase 2) wraps
+/// each probe firing as one JSONL record on stdout. `--format otel`
+/// (Phase 3, not yet implemented) will POST to an OTLP collector.
 struct WatchCommand: ParsableCommand {
 
     static let configuration = CommandConfiguration(
@@ -66,6 +67,9 @@ struct WatchCommand: ParsableCommand {
     @OptionGroup
     var stack: StackOptions
 
+    @OptionGroup
+    var format: FormatOption
+
     func validate() throws {
         if profile == nil && file == nil {
             throw ValidationError("provide a profile name or `-f /path/to/script.d`.")
@@ -112,8 +116,6 @@ struct WatchCommand: ParsableCommand {
             params[String(parts[0])] = String(parts[1])
         }
 
-        // Phase 1 only ships the text exporter. Future phases register
-        // additional formats here behind a --format flag.
         let resource = ResourceAttributes(
             serviceName: "dtlm",
             serviceInstanceId: nil,
@@ -123,11 +125,28 @@ struct WatchCommand: ParsableCommand {
             dtlmVersion: "0.1.0",
             custom: [:]
         )
-        let exporter = TextExporter(resource: resource)
+
+        // Pick the exporter and the run-loop backend based on the
+        // --format flag. The two backends share compile/exec/go/poll
+        // but differ in how libdtrace's output is captured.
+        let exporter: Exporter
+        let backend: WatchRunner.Backend
+        switch format.format {
+        case .text:
+            exporter = TextExporter(resource: resource)
+            backend = .text
+        case .json:
+            exporter = JSONLExporter(
+                profileName: profileToRun.name,
+                resource: resource
+            )
+            backend = .structured
+        }
 
         let runner = WatchRunner(
             profile: profileToRun,
             exporter: exporter,
+            backend: backend,
             predicate: filter.renderPredicate(),
             predicateAnd: filter.renderPredicateAnd(),
             parameters: params,

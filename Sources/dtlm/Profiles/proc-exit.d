@@ -3,7 +3,7 @@
 proc:::exit
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: exit (reason=%d)", execname, pid, (int)arg0);
+    printf("%s[%d]: exit (reason=%d)\n", execname, pid, (int)arg0);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

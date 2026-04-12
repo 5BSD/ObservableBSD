@@ -3,7 +3,7 @@
 proc:::signal-discard
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc signal-discard", execname, pid);
+    printf("%s[%d]: proc signal-discard\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

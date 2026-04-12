@@ -3,5 +3,5 @@
 sched:::surrender
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched surrender", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched surrender\n", execname, pid, tid);
 }

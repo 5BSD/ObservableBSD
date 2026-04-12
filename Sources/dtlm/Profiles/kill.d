@@ -3,7 +3,7 @@
 syscall::kill:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: signal %d to pid %d",
+    printf("%s[%d]: signal %d to pid %d\n",
            execname, pid, (int)arg1, (pid_t)arg0);
     /* @dtlm-stack */
     /* @dtlm-ustack */

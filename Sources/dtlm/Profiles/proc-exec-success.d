@@ -3,7 +3,7 @@
 proc:::exec-success
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: proc exec-success", execname, pid);
+    printf("%s[%d]: proc exec-success\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

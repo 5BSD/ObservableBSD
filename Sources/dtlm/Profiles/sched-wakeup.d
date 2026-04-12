@@ -3,7 +3,7 @@
 sched:::wakeup
 /* @dtlm-predicate */
 {
-    printf("%s[%d/tid %d]: sched wakeup", execname, pid, tid);
+    printf("%s[%d/tid %d]: sched wakeup\n", execname, pid, tid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

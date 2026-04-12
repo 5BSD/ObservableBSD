@@ -3,7 +3,7 @@
 syscall::nanosleep:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: nanosleep", execname, pid);
+    printf("%s[%d]: nanosleep\n", execname, pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

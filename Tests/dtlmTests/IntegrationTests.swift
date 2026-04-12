@@ -393,6 +393,20 @@ final class IntegrationTests: XCTestCase {
             switch profile.name {
             case "kinst":
                 extraArgs = ["--param", "func=vm_fault", "--param", "offset=4"]
+            case "malloc-trace", "malloc-counts", "malloc-leaks",
+                 "postgresql-queries", "postgresql-slow",
+                 "mysql-queries",
+                 "python-calls", "python-slow",
+                 "ruby-calls",
+                 "node-http", "node-gc",
+                 "usdt-list":
+                extraArgs = ["--param", "pid=1"]
+            case "func-trace", "func-time":
+                extraArgs = ["--param", "pid=1", "--param", "func=malloc"]
+            case "kfunc-trace", "kfunc-time":
+                extraArgs = ["--param", "func=vm_fault"]
+            case "lib-calls":
+                extraArgs = ["--param", "pid=1", "--param", "lib=libc.so.7", "--param", "func=malloc"]
             default:
                 extraArgs = []
             }

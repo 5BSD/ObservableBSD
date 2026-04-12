@@ -428,23 +428,11 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
-    // MARK: - Root tier: --format json end-to-end (Phase 2)
+    // MARK: - Root tier: --format json end-to-end
 
-    /// Run a high-frequency `printf`-based profile in
-    /// `--format json --duration 1` and assert every output line is
-    /// valid JSONL with the expected fields (`time`, `profile`, `body`).
-    ///
-    /// Uses `sched-on-cpu` because it (a) fires constantly on any
-    /// running system (every CPU schedule decision), (b) uses
-    /// `printf` not `printa`, so the data flows through libdtrace's
-    /// `dtrace_fprintf` path — which the structured backend captures
-    /// via a pipe and turns into one ProbeEvent per line.
-    ///
-    /// Aggregation rows from `printa()` flow through the same pipe
-    /// (`aggregatePrint(to: writeFP)` runs after the poll loop), so
-    /// each row becomes a ProbeEvent with the rendered text in
-    /// `body` rather than a typed `AggregationSnapshot`. Phase 3's
-    /// typed aggregation walker will replace that.
+    /// Run `sched-on-cpu` in `--format json --duration 1` and assert
+    /// every output line is valid JSONL with the expected fields
+    /// (`time`, `profile`, `body`).
     func testJsonFormatProducesValidJSONL() throws {
         try XCTSkipUnless(isRoot,
             "json format runs libdtrace; requires root. Run with `sudo swift test`.")

@@ -1,7 +1,7 @@
 # Dev OTel Collector for dtlm
 
-A local OpenTelemetry Collector instance used as a test target while
-building dtlm's `OTLPHTTPJSONExporter` (Phase 3). Paired with
+A local OpenTelemetry Collector instance used as a test target for
+dtlm's `OTLPHTTPJSONExporter`. Paired with
 [`otelcol-dev.yaml`](./otelcol-dev.yaml) in the project root.
 
 This is **not** a production deployment. It has no TLS, no auth, no
@@ -10,8 +10,8 @@ to stdout and discarded. That is the feature.
 
 ## Why this exists
 
-dtlm's Phase 3 deliverable is `OTLPHTTPJSONExporter` — the component
-that turns typed DTrace events into OTLP/HTTP+JSON and POSTs them to
+`OTLPHTTPJSONExporter` turns typed DTrace events into OTLP/HTTP+JSON
+and POSTs them to
 an OpenTelemetry Collector. You can't write that exporter without
 something on the other end of the wire accepting the POSTs, parsing
 them, and telling you what arrived. This collector is that something.
@@ -293,46 +293,35 @@ Point the exporter at `http://localhost:4318`, run
 --service dtlm-test --instance dev-box`, and watch the output in
 `tail -f /tmp/otelcol-dev.log`. That's the loop.
 
-## Phase 3.5: DTrace performance tuning for OTLP export
+## Performance tuning for OTLP export
 
-Phase 3 uses synchronous HTTP POSTs on the structured backend's reader
-thread. At high probe rates (`sched-on-cpu`, `sched-enqueue`) the
-POST latency blocks the reader, draining the POSIX pipe stalls, and
-libdtrace's per-CPU kernel buffers overflow — causing record drops.
+At high probe rates (`sched-on-cpu`, `sched-enqueue` on many CPUs),
+libdtrace's per-CPU kernel buffers can overflow. The following
+mitigations are in place:
 
-Low-rate profiles (`kill`, `tcp-connect`, `proc-exec-success`) are
-unaffected. The tuning work below targets the high-rate case.
+- **`onBufferedOutput` handler** — libdtrace delivers formatted
+  strings directly in-process via `pollBuffered()`. No pipe, no
+  reader thread, no syscall overhead per event.
+- **Async sender thread** — HTTP POSTs run on a dedicated
+  `DispatchQueue`, decoupled from the handler. The handler appends
+  to the batch and returns immediately.
+- **Time-based flush** — a 500 ms `DispatchSourceTimer` ensures
+  low-rate profiles flush periodically, not only at shutdown.
+- **`--bufsize` / `--switchrate` CLI flags** — let operators tune
+  libdtrace's per-CPU buffer size (default 16 MB for structured
+  mode) and buffer drain cadence (default 50 ms).
+- **gzip compression** — POST bodies are compressed via libz
+  (`Content-Encoding: gzip`).
+- **Retry/backoff** — failed POSTs retry up to 2 times with
+  exponential backoff (100 ms, 200 ms) before discarding.
+- **Drop counter** — when drops occur, `dtlm.drops` is attached
+  as an attribute on the next OTLP log batch.
 
-### In scope
+### Not yet implemented
 
-- **Async sender thread** — decouple flush from the reader thread.
-  The reader appends to the batch; a dedicated `DispatchQueue` drains
-  and POSTs on its own cadence. Eliminates reader-thread blocking.
-- **Adaptive `bufsize`** — increase libdtrace's per-CPU principal
-  buffer from the current 4 MB when `--format otel` is active (e.g.
-  16 MB). Larger buffers absorb more probe firings while the sender
-  thread is in-flight.
-- **`--batch-size` CLI flag** — let the operator tune the batch
-  threshold (default 200). Larger batches amortize HTTP overhead;
-  smaller batches reduce latency.
-- **`--switchrate` CLI flag** — expose libdtrace's `switchrate`
-  (currently hardcoded to 50 ms). Lower values drain kernel buffers
-  faster at the cost of more user/kernel transitions.
-- **Time-based flush** — add an optional `DispatchSourceTimer` that
-  flushes the batch on a cadence (e.g. every 500 ms) regardless of
-  count. Ensures low-rate profiles don't hold events until shutdown.
-- **Drop counter as OTel attribute** — surface `dtlm.drops` on the
-  next batch after drops are detected, so the collector/dashboard can
-  alert on data loss.
-
-### Deferred
-
-- gzip compression (`Content-Encoding: gzip`) — reduces POST size
-  but adds CPU on the sender thread.
-- Retry/backoff on HTTP failures — currently errors log to stderr
-  and the batch is lost.
-- Connection pooling / HTTP/2 — URLSession handles this internally
-  but we may want to tune keep-alive.
+- Connection pooling / HTTP/2 tuning (URLSession handles this
+  internally).
+- `--batch-size` CLI flag (currently hardcoded to 200).
 
 ## What's deliberately not set up yet
 

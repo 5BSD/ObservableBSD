@@ -44,6 +44,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private let flushInterval: Double   // seconds; 0 = no timer
     private let lock = NSLock()
     private var batch: [LogRecord] = []
+    private var metricsBatch: [AggregationSnapshot] = []
     private let session: URLSession
 
     /// Dedicated serial queue for HTTP POSTs. Batches are dispatched
@@ -119,20 +120,27 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     }
 
     func emit(snapshot: AggregationSnapshot) throws {
-        // No-op for Phase 3. Aggregation data still flows through the
-        // pipe as text lines and becomes LogRecords via emit(event:).
-        // Typed metric mapping is Phase 4.
+        guard !snapshot.dataPoints.isEmpty else { return }
+        lock.lock()
+        metricsBatch.append(snapshot)
+        lock.unlock()
     }
 
     func flush() throws {
         lock.lock()
-        let pending = batch
+        let pendingLogs = batch
+        let pendingMetrics = metricsBatch
         batch = []
+        metricsBatch = []
         lock.unlock()
 
-        guard !pending.isEmpty else { return }
         // Synchronous flush — used by shutdown() to drain before exit.
-        postBatch(pending)
+        if !pendingLogs.isEmpty {
+            postBatch(pendingLogs)
+        }
+        if !pendingMetrics.isEmpty {
+            postMetrics(pendingMetrics)
+        }
     }
 
     func shutdown() throws {
@@ -241,16 +249,22 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    /// Timer callback: drain the current batch if non-empty. Runs on
+    /// Timer callback: drain current batches if non-empty. Runs on
     /// the sender queue so it serializes naturally with async POSTs.
     private func timerFlush() {
         lock.lock()
-        let pending = batch
+        let pendingLogs = batch
+        let pendingMetrics = metricsBatch
         batch = []
+        metricsBatch = []
         lock.unlock()
 
-        guard !pending.isEmpty else { return }
-        postBatch(pending)
+        if !pendingLogs.isEmpty {
+            postBatch(pendingLogs)
+        }
+        if !pendingMetrics.isEmpty {
+            postMetrics(pendingMetrics)
+        }
     }
 
     /// POST a batch of records to the collector's /v1/logs endpoint.
@@ -284,6 +298,149 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         if let msg = errorBox.value {
             FileHandle.standardError.write(Data((msg + "\n").utf8))
         }
+    }
+
+    /// POST metrics to the collector's /v1/metrics endpoint.
+    private func postMetrics(_ snapshots: [AggregationSnapshot]) {
+        let body = buildMetricsEnvelope(snapshots)
+        guard let bodyData = body.data(using: .utf8) else { return }
+
+        let url = endpoint.appendingPathComponent("v1/metrics")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = bodyData
+
+        let sem = DispatchSemaphore(value: 0)
+        let errorBox = ErrorBox()
+
+        let task = session.dataTask(with: request) { _, response, error in
+            if let error {
+                errorBox.value = "otlp: POST /v1/metrics failed: \(error.localizedDescription)"
+            } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                errorBox.value = "otlp: POST /v1/metrics returned \(http.statusCode)"
+            }
+            sem.signal()
+        }
+        task.resume()
+        sem.wait()
+
+        if let msg = errorBox.value {
+            FileHandle.standardError.write(Data((msg + "\n").utf8))
+        }
+    }
+
+    /// Build the OTLP metrics JSON envelope.
+    ///
+    /// Maps DTrace aggregation kinds to OTLP metric types:
+    ///   count, sum → Sum (monotonic)
+    ///   min, max, avg, stddev → Gauge
+    ///   quantize, lquantize, llquantize → Histogram
+    func buildMetricsEnvelope(_ snapshots: [AggregationSnapshot]) -> String {
+        let timeNano = dateToUnixNano(Date())
+
+        var json = "{\"resourceMetrics\":[{\"resource\":{\"attributes\":["
+        json += resourceAttributesJSON()
+        json += "]},\"scopeMetrics\":[{\"scope\":{\"name\":\"dtlm\",\"version\":\"\(escapeJSON(resource.dtlmVersion))\"},"
+        json += "\"metrics\":["
+
+        for (si, snapshot) in snapshots.enumerated() {
+            if si > 0 { json += "," }
+
+            let metricName = snapshot.aggregationName.isEmpty
+                ? "dtlm.\(escapeJSON(snapshot.profileName)).\(snapshot.kind.rawValue)"
+                : "dtlm.\(escapeJSON(snapshot.profileName)).\(escapeJSON(snapshot.aggregationName))"
+
+            json += "{\"name\":\"\(metricName)\","
+
+            switch snapshot.kind {
+            case .count, .sum:
+                json += "\"sum\":{\"dataPoints\":["
+                json += buildSumDataPoints(snapshot, timeNano: timeNano)
+                json += "],\"aggregationTemporality\":2,\"isMonotonic\":true}}"
+
+            case .min, .max, .avg, .stddev:
+                json += "\"gauge\":{\"dataPoints\":["
+                json += buildGaugeDataPoints(snapshot, timeNano: timeNano)
+                json += "]}}"
+
+            case .quantize, .lquantize, .llquantize:
+                json += "\"histogram\":{\"dataPoints\":["
+                json += buildHistogramDataPoints(snapshot, timeNano: timeNano)
+                json += "],\"aggregationTemporality\":2}}"
+            }
+        }
+
+        json += "]}]}]}"
+        return json
+    }
+
+    private func buildSumDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
+        var parts: [String] = []
+        for dp in snapshot.dataPoints {
+            var json = "{\"timeUnixNano\":\"\(timeNano)\""
+            if case .scalar(let v) = dp.value {
+                json += ",\"asInt\":\"\(v)\""
+            }
+            json += ",\"attributes\":["
+            json += dp.keys.enumerated().map { i, k in
+                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
+            }.joined(separator: ",")
+            json += "]}"
+            parts.append(json)
+        }
+        return parts.joined(separator: ",")
+    }
+
+    private func buildGaugeDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
+        var parts: [String] = []
+        for dp in snapshot.dataPoints {
+            var json = "{\"timeUnixNano\":\"\(timeNano)\""
+            if case .scalar(let v) = dp.value {
+                json += ",\"asInt\":\"\(v)\""
+            }
+            json += ",\"attributes\":["
+            json += dp.keys.enumerated().map { i, k in
+                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
+            }.joined(separator: ",")
+            json += "]}"
+            parts.append(json)
+        }
+        return parts.joined(separator: ",")
+    }
+
+    private func buildHistogramDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
+        var parts: [String] = []
+        for dp in snapshot.dataPoints {
+            guard case .histogram(let buckets) = dp.value else { continue }
+
+            var json = "{\"timeUnixNano\":\"\(timeNano)\""
+
+            // OTLP histogram: explicitBounds + bucketCounts arrays.
+            // explicitBounds has N-1 entries, bucketCounts has N entries.
+            let sortedBuckets = buckets.sorted { $0.upperBound < $1.upperBound }
+            let totalCount = sortedBuckets.reduce(Int64(0)) { $0 + $1.count }
+            let totalSum = sortedBuckets.reduce(Int64(0)) { $0 + $1.upperBound * $1.count }
+
+            json += ",\"count\":\"\(totalCount)\""
+            json += ",\"sum\":\(totalSum)"
+
+            json += ",\"explicitBounds\":["
+            json += sortedBuckets.dropLast().map { "\($0.upperBound)" }.joined(separator: ",")
+            json += "]"
+
+            json += ",\"bucketCounts\":["
+            json += sortedBuckets.map { "\"\($0.count)\"" }.joined(separator: ",")
+            json += "]"
+
+            json += ",\"attributes\":["
+            json += dp.keys.enumerated().map { i, k in
+                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
+            }.joined(separator: ",")
+            json += "]}"
+            parts.append(json)
+        }
+        return parts.joined(separator: ",")
     }
 
     /// Thread-safe box for passing an error string out of a

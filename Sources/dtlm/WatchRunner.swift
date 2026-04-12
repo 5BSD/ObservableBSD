@@ -278,6 +278,13 @@ struct WatchRunner {
         // runs on the same thread as poll(), so emit() must be fast
         // (the async sender in OTLPHTTPJSONExporter ensures this).
         try handle.onBufferedOutput { data in
+            // Skip aggregation fragments — they're captured as typed
+            // metrics via aggregateWalkTyped(), not as log lines.
+            if data.isAggregationKey || data.isAggregationValue
+                || data.isAggregationFormat || data.isAggregationLast {
+                return true
+            }
+
             let text = data.output.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return true }
 
@@ -324,14 +331,66 @@ struct WatchRunner {
             }
         }
 
-        // Snapshot aggregations. With the buffered handler active,
-        // printa()/printf output from END handlers flows through
-        // the handler. We still need aggregateSnap() to trigger the
-        // snapshot, but aggregatePrint needs a FILE* — use stdout
-        // since the handler intercepts the output anyway.
+        // Snapshot aggregations and walk them as typed records.
+        // aggregateSnap() triggers the kernel snapshot, then
+        // aggregateWalkTyped() iterates each record with parsed
+        // name, action type, keys, and values. We group records
+        // by (name, action) into AggregationSnapshot values and
+        // emit them to the exporter.
         do {
             try handle.aggregateSnap()
-            try handle.aggregatePrint(to: Glibc.stdout)
+
+            var snapshots: [String: AggregationSnapshot] = [:]
+
+            try handle.aggregateWalkTyped(sorted: false) { record in
+                let kind = mapAction(record.action)
+                let key = "\(record.name):\(kind.rawValue)"
+
+                let dataPoint: DataPoint
+                switch record.action {
+                case .quantize, .lquantize, .llquantize:
+                    let buckets = record.buckets.map {
+                        HistogramBucket(upperBound: $0.upperBound, count: $0.count)
+                    }
+                    dataPoint = DataPoint(
+                        keys: record.keys,
+                        value: .histogram(buckets: buckets)
+                    )
+                default:
+                    dataPoint = DataPoint(
+                        keys: record.keys,
+                        value: .scalar(record.value)
+                    )
+                }
+
+                if var existing = snapshots[key] {
+                    existing = AggregationSnapshot(
+                        timestamp: existing.timestamp,
+                        profileName: existing.profileName,
+                        aggregationName: existing.aggregationName,
+                        kind: existing.kind,
+                        dataPoints: existing.dataPoints + [dataPoint]
+                    )
+                    snapshots[key] = existing
+                } else {
+                    snapshots[key] = AggregationSnapshot(
+                        timestamp: Date(),
+                        profileName: profileName,
+                        aggregationName: record.name,
+                        kind: kind,
+                        dataPoints: [dataPoint]
+                    )
+                }
+                return .next
+            }
+
+            for snapshot in snapshots.values {
+                do {
+                    try exporterRef.emit(snapshot: snapshot)
+                } catch {
+                    errorBox.error = error
+                }
+            }
         } catch {
             FileHandle.standardError.write(Data(
                 "dtlm: aggregation snapshot failed: \(error)\n".utf8
@@ -341,6 +400,21 @@ struct WatchRunner {
         // Surface any error the handler captured from the exporter.
         if let err = errorBox.error {
             throw err
+        }
+    }
+
+    /// Map DTraceCore's AggregationAction to dtlm's AggregationKind.
+    private func mapAction(_ action: DTraceHandle.AggregationAction) -> AggregationKind {
+        switch action {
+        case .count:     return .count
+        case .sum:       return .sum
+        case .min:       return .min
+        case .max:       return .max
+        case .avg:       return .avg
+        case .stddev:    return .stddev
+        case .quantize:  return .quantize
+        case .lquantize: return .lquantize
+        case .llquantize: return .llquantize
         }
     }
 }

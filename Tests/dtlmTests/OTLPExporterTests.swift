@@ -395,6 +395,52 @@ final class OTLPExporterTests: XCTestCase {
         XCTAssertEqual(bodyObj["stringValue"] as? String, body)
     }
 
+    // MARK: - Drop counter
+
+    func testDropCounterAppearsInEnvelope() throws {
+        let exporter = makeExporter()
+        let record = OTLPHTTPJSONExporter.LogRecord(
+            timeUnixNano: 1_700_000_000_000_000_000,
+            severityNumber: 9,
+            body: "test",
+            attributes: [(key: "dtlm.profile", value: .string("kill"))]
+        )
+        let json = exporter.buildEnvelope([record], drops: 500)
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceLogs = obj["resourceLogs"] as! [[String: Any]]
+        let scopeLogs = resourceLogs[0]["scopeLogs"] as! [[String: Any]]
+        let logRecords = scopeLogs[0]["logRecords"] as! [[String: Any]]
+        let attrs = logRecords[0]["attributes"] as! [[String: Any]]
+
+        let dropsAttr = attrs.first { ($0["key"] as? String) == "dtlm.drops" }
+        XCTAssertNotNil(dropsAttr, "dtlm.drops attribute should be present when drops > 0")
+        let dropsVal = (dropsAttr?["value"] as? [String: Any])?["intValue"] as? String
+        XCTAssertEqual(dropsVal, "500")
+    }
+
+    func testNoDropCounterWhenZeroDrops() throws {
+        let exporter = makeExporter()
+        let record = OTLPHTTPJSONExporter.LogRecord(
+            timeUnixNano: 1_700_000_000_000_000_000,
+            severityNumber: 9,
+            body: "test",
+            attributes: [(key: "dtlm.profile", value: .string("kill"))]
+        )
+        let json = exporter.buildEnvelope([record], drops: 0)
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceLogs = obj["resourceLogs"] as! [[String: Any]]
+        let scopeLogs = resourceLogs[0]["scopeLogs"] as! [[String: Any]]
+        let logRecords = scopeLogs[0]["logRecords"] as! [[String: Any]]
+        let attrs = logRecords[0]["attributes"] as! [[String: Any]]
+
+        let dropsAttr = attrs.first { ($0["key"] as? String) == "dtlm.drops" }
+        XCTAssertNil(dropsAttr, "dtlm.drops should be absent when drops == 0")
+    }
+
     // MARK: - Static metadata
 
     func testFormatNameIsOtel() {

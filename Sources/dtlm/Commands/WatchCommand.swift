@@ -18,7 +18,7 @@ import Glibc
 /// `--format text` (default, Phase 1) writes libdtrace's formatted
 /// printf output directly to stdout. `--format json` (Phase 2) wraps
 /// each probe firing as one JSONL record on stdout. `--format otel`
-/// (Phase 3, not yet implemented) will POST to an OTLP collector.
+/// (Phase 3) POSTs logs and metrics to an OTLP/HTTP collector.
 struct WatchCommand: ParsableCommand {
 
     static let configuration = CommandConfiguration(
@@ -148,8 +148,9 @@ struct WatchCommand: ParsableCommand {
             )
             backend = .structured
         case .otel:
-            guard let url = URL(string: otel.endpoint) else {
-                throw ValidationError("invalid --endpoint URL: '\(otel.endpoint)'")
+            guard let url = URL(string: otel.endpoint),
+                  url.scheme == "http" || url.scheme == "https" else {
+                throw ValidationError("--endpoint must be an http:// or https:// URL, got: '\(otel.endpoint)'")
             }
             exporter = OTLPHTTPJSONExporter(
                 endpoint: url,

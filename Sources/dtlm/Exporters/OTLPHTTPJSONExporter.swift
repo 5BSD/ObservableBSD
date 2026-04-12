@@ -86,8 +86,8 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     /// drop handler on the poll thread.
     func reportDrops(_ count: UInt64) {
         lock.lock()
+        defer { lock.unlock() }
         pendingDrops += count
-        lock.unlock()
     }
 
     func start() throws {
@@ -436,12 +436,12 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             switch snapshot.kind {
             case .count, .sum:
                 json += "\"sum\":{\"dataPoints\":["
-                json += buildSumDataPoints(snapshot, timeNano: timeNano)
+                json += buildScalarDataPoints(snapshot, timeNano: timeNano)
                 json += "],\"aggregationTemporality\":2,\"isMonotonic\":true}}"
 
             case .min, .max, .avg, .stddev:
                 json += "\"gauge\":{\"dataPoints\":["
-                json += buildGaugeDataPoints(snapshot, timeNano: timeNano)
+                json += buildScalarDataPoints(snapshot, timeNano: timeNano)
                 json += "]}}"
 
             case .quantize, .lquantize, .llquantize:
@@ -455,24 +455,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         return json
     }
 
-    private func buildSumDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
-        var parts: [String] = []
-        for dp in snapshot.dataPoints {
-            var json = "{\"timeUnixNano\":\"\(timeNano)\""
-            if case .scalar(let v) = dp.value {
-                json += ",\"asInt\":\"\(v)\""
-            }
-            json += ",\"attributes\":["
-            json += dp.keys.enumerated().map { i, k in
-                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
-            }.joined(separator: ",")
-            json += "]}"
-            parts.append(json)
-        }
-        return parts.joined(separator: ",")
-    }
-
-    private func buildGaugeDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
+    private func buildScalarDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
         var parts: [String] = []
         for dp in snapshot.dataPoints {
             var json = "{\"timeUnixNano\":\"\(timeNano)\""
@@ -503,7 +486,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             let totalSum = sortedBuckets.reduce(Int64(0)) { $0 + $1.upperBound * $1.count }
 
             json += ",\"count\":\"\(totalCount)\""
-            json += ",\"sum\":\(totalSum)"
+            json += ",\"sum\":\"\(totalSum)\""
 
             json += ",\"explicitBounds\":["
             json += sortedBuckets.dropLast().map { "\($0.upperBound)" }.joined(separator: ",")

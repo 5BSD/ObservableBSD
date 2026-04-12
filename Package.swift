@@ -34,11 +34,17 @@ let package = Package(
         ),
     ],
     targets: [
+        .systemLibrary(
+            name: "CZlib",
+            pkgConfig: nil,
+            providers: []
+        ),
         .executableTarget(
             name: "dtlm",
             dependencies: [
                 .product(name: "DTraceCore", package: "FreeBSDKit"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "CZlib",
             ],
             resources: [
                 // Bundle the hand-authored .d profiles as SwiftPM

@@ -5,6 +5,7 @@
  */
 
 import Foundation
+import CZlib
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -362,33 +363,51 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    /// Compress data with gzip using the shell `gzip` command.
-    /// Returns nil if compression fails (falls back to uncompressed).
+    /// Compress data with gzip using libz (deflateInit2 + deflate).
+    /// Returns nil if compression fails (caller falls back to
+    /// uncompressed). Uses the gzip wrapper format (windowBits=31)
+    /// so the collector sees a valid gzip stream.
     private func gzip(_ data: Data) -> Data? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
-        proc.arguments = ["-c"]
+        let srcLen = data.count
+        guard srcLen > 0 else { return nil }
 
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        proc.standardInput = stdinPipe
-        proc.standardOutput = stdoutPipe
-        proc.standardError = FileHandle(forWritingAtPath: "/dev/null")
+        let bound = Int(CZlib.compressBound(UInt(srcLen)))
+        var dest = [UInt8](repeating: 0, count: bound)
 
-        do {
-            try proc.run()
-        } catch {
-            return nil
+        let result: Data? = data.withUnsafeBytes { srcBuf in
+            dest.withUnsafeMutableBufferPointer { destBuf in
+                guard let srcBase = srcBuf.baseAddress,
+                      let destBase = destBuf.baseAddress else { return nil }
+
+                var stream = z_stream()
+                stream.next_in = UnsafeMutablePointer(
+                    mutating: srcBase.assumingMemoryBound(to: UInt8.self)
+                )
+                stream.avail_in = UInt32(srcLen)
+                stream.next_out = destBase
+                stream.avail_out = UInt32(bound)
+
+                // windowBits = 15 + 16 = 31 enables gzip header/trailer.
+                let initResult = deflateInit2_(
+                    &stream,
+                    Z_DEFAULT_COMPRESSION,
+                    Z_DEFLATED,
+                    15 + 16,
+                    8,
+                    Z_DEFAULT_STRATEGY,
+                    ZLIB_VERSION,
+                    Int32(MemoryLayout<z_stream>.size)
+                )
+                guard initResult == Z_OK else { return nil }
+
+                let deflateResult = CZlib.deflate(&stream, Z_FINISH)
+                CZlib.deflateEnd(&stream)
+
+                guard deflateResult == Z_STREAM_END else { return nil }
+                return Data(destBuf.prefix(Int(stream.total_out)))
+            }
         }
-
-        stdinPipe.fileHandleForWriting.write(data)
-        try? stdinPipe.fileHandleForWriting.close()
-
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
-
-        let compressed = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        return compressed.isEmpty ? nil : compressed
+        return result
     }
 
     /// Build the OTLP metrics JSON envelope.

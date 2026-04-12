@@ -127,7 +127,7 @@ struct WatchCommand: ParsableCommand {
             serviceInstanceId: nil,
             hostName: ProcessInfo.processInfo.hostName,
             osName: "freebsd",
-            osVersion: "",
+            osVersion: ProcessInfo.processInfo.osVersionString,
             dtlmVersion: "0.1.0",
             custom: [:]
         )
@@ -195,5 +195,16 @@ private extension ProcessInfo {
         // Truncate at the first NUL and decode as UTF-8.
         let bytes = buf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Kernel version string from `uname(2)` (e.g. "15.0-RELEASE-p5").
+    var osVersionString: String {
+        var uts = utsname()
+        guard Glibc.uname(&uts) == 0 else { return "" }
+        return withUnsafePointer(to: &uts.release) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
+                String(cString: $0)
+            }
+        }
     }
 }

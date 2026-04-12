@@ -381,7 +381,22 @@ final class IntegrationTests: XCTestCase {
         // by default. We skip them with a warning rather than
         // failing the whole sweep — kinst availability is a
         // kernel-config decision, not a profile bug.
-        let kinstSkipNames: Set<String> = ["kinst"]
+        // Profiles that can't compile without a real target process
+        // or kernel module. Skip with a warning — these are
+        // environment issues, not profile bugs.
+        let grabSkipNames: Set<String> = [
+            "kinst",
+            // pid-provider profiles need a grabbable target process.
+            "malloc-trace", "malloc-counts", "malloc-leaks",
+            "postgresql-queries", "postgresql-slow",
+            "mysql-queries",
+            "python-calls", "python-slow",
+            "ruby-calls",
+            "node-http", "node-gc",
+            "usdt-list",
+            "func-trace", "func-time",
+            "lib-calls",
+        ]
 
         var failures: [(name: String, stderr: String)] = []
         var skipped: [String] = []
@@ -422,8 +437,9 @@ final class IntegrationTests: XCTestCase {
                 // isn't loaded show up as "does not match any
                 // probes" — those are environment issues, not
                 // profile bugs.
-                if kinstSkipNames.contains(profile.name)
-                    && stderr.contains("does not match any probes") {
+                if grabSkipNames.contains(profile.name)
+                    && (stderr.contains("does not match any probes")
+                        || stderr.contains("failed to grab process")) {
                     skipped.append(profile.name)
                     continue
                 }

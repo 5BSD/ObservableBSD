@@ -259,11 +259,16 @@ struct WatchRunner {
         // Without this handler, libdtrace defaults to "abort on
         // first drop" and the very next dtrace_work() call returns
         // .error with the message "Abort due to drop".
-        try handle.onDrop { drop in
+        try handle.onDrop { [exporterRef = exporter] drop in
             fputs(
                 "dtlm: dropped \(drop.drops) record(s) (\(drop.message))\n",
                 stderr
             )
+            // Report drops to the OTLP exporter so the next batch
+            // includes a dtlm.drops attribute.
+            if let otlp = exporterRef as? OTLPHTTPJSONExporter {
+                otlp.reportDrops(drop.drops)
+            }
             return true
         }
 

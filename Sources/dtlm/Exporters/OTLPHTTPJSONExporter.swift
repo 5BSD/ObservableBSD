@@ -45,6 +45,8 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private let lock = NSLock()
     private var batch: [LogRecord] = []
     private var metricsBatch: [AggregationSnapshot] = []
+    private var pendingDrops: UInt64 = 0
+    private let maxRetries: Int
     private let session: URLSession
 
     /// Dedicated serial queue for HTTP POSTs. Batches are dispatched
@@ -64,6 +66,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         resource: ResourceAttributes,
         batchSize: Int = 200,
         flushInterval: Double = 0.5,
+        maxRetries: Int = 2,
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
@@ -71,9 +74,19 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         self.resource = resource
         self.batchSize = batchSize
         self.flushInterval = flushInterval
+        self.maxRetries = maxRetries
         // Allow injecting a custom session for testing; default is
         // an ephemeral session (no disk cache, no cookies).
         self.session = session ?? URLSession(configuration: .ephemeral)
+    }
+
+    /// Record DTrace drops so the next OTLP batch includes a
+    /// `dtlm.drops` attribute. Thread-safe — called from the
+    /// drop handler on the poll thread.
+    func reportDrops(_ count: UInt64) {
+        lock.lock()
+        pendingDrops += count
+        lock.unlock()
     }
 
     func start() throws {
@@ -106,16 +119,20 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         batch.append(record)
         let shouldFlush = batch.count >= batchSize
         let pending: [LogRecord]?
+        let drops: UInt64
         if shouldFlush {
             pending = batch
+            drops = pendingDrops
             batch = []
+            pendingDrops = 0
         } else {
             pending = nil
+            drops = 0
         }
         lock.unlock()
 
         if let pending {
-            asyncPost(pending)
+            asyncPost(pending, drops: drops)
         }
     }
 
@@ -130,13 +147,15 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         lock.lock()
         let pendingLogs = batch
         let pendingMetrics = metricsBatch
+        let drops = pendingDrops
         batch = []
         metricsBatch = []
+        pendingDrops = 0
         lock.unlock()
 
         // Synchronous flush — used by shutdown() to drain before exit.
         if !pendingLogs.isEmpty {
-            postBatch(pendingLogs)
+            postBatch(pendingLogs, drops: drops)
         }
         if !pendingMetrics.isEmpty {
             postMetrics(pendingMetrics)
@@ -186,14 +205,18 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     }
 
     /// Build the full OTLP JSON envelope for a batch of log records.
-    func buildEnvelope(_ records: [LogRecord]) -> String {
+    /// When `drops` > 0, a `dtlm.drops` attribute is added to the
+    /// first log record so the collector/dashboard can detect data loss.
+    func buildEnvelope(_ records: [LogRecord], drops: UInt64 = 0) -> String {
         var json = "{\"resourceLogs\":[{\"resource\":{\"attributes\":["
         json += resourceAttributesJSON()
         json += "]},\"scopeLogs\":[{\"scope\":{\"name\":\"dtlm\",\"version\":\"\(escapeJSON(resource.dtlmVersion))\"},"
         json += "\"logRecords\":["
         for (i, record) in records.enumerated() {
             if i > 0 { json += "," }
-            json += buildRecordJSON(record)
+            // Attach drop count to the first record in the batch.
+            let recordDrops = (i == 0 && drops > 0) ? drops : UInt64(0)
+            json += buildRecordJSON(record, drops: recordDrops)
         }
         json += "]}]}]}"
         return json
@@ -218,7 +241,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }.joined(separator: ",")
     }
 
-    private func buildRecordJSON(_ record: LogRecord) -> String {
+    private func buildRecordJSON(_ record: LogRecord, drops: UInt64 = 0) -> String {
         var json = "{"
         // OTLP JSON encodes 64-bit integers as decimal strings.
         json += "\"timeUnixNano\":\"\(record.timeUnixNano)\","
@@ -237,15 +260,19 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             }
             json += "}}"
         }
+        if drops > 0 {
+            if !record.attributes.isEmpty { json += "," }
+            json += "{\"key\":\"dtlm.drops\",\"value\":{\"intValue\":\"\(drops)\"}}"
+        }
         json += "]}"
         return json
     }
 
     /// Dispatch a batch to the sender queue for async POST.
     /// Called from `emit()` on the reader thread — returns immediately.
-    private func asyncPost(_ records: [LogRecord]) {
+    private func asyncPost(_ records: [LogRecord], drops: UInt64) {
         senderQueue.async { [self] in
-            postBatch(records)
+            postBatch(records, drops: drops)
         }
     }
 
@@ -255,79 +282,113 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         lock.lock()
         let pendingLogs = batch
         let pendingMetrics = metricsBatch
+        let drops = pendingDrops
         batch = []
         metricsBatch = []
+        pendingDrops = 0
         lock.unlock()
 
         if !pendingLogs.isEmpty {
-            postBatch(pendingLogs)
+            postBatch(pendingLogs, drops: drops)
         }
         if !pendingMetrics.isEmpty {
             postMetrics(pendingMetrics)
         }
     }
 
-    /// POST a batch of records to the collector's /v1/logs endpoint.
-    /// Synchronous — called on the sender queue (async path) or the
-    /// calling thread (shutdown path). Errors are logged to stderr,
-    /// not fatal.
-    private func postBatch(_ records: [LogRecord]) {
-        let body = buildEnvelope(records)
+    /// POST a batch of log records to /v1/logs with retry and gzip.
+    private func postBatch(_ records: [LogRecord], drops: UInt64 = 0) {
+        let body = buildEnvelope(records, drops: drops)
         guard let bodyData = body.data(using: .utf8) else { return }
-
-        let url = endpoint.appendingPathComponent("v1/logs")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = bodyData
-
-        let sem = DispatchSemaphore(value: 0)
-        let errorBox = ErrorBox()
-
-        let task = session.dataTask(with: request) { _, response, error in
-            if let error {
-                errorBox.value = "otlp: POST failed: \(error.localizedDescription)"
-            } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                errorBox.value = "otlp: POST /v1/logs returned \(http.statusCode)"
-            }
-            sem.signal()
-        }
-        task.resume()
-        sem.wait()
-
-        if let msg = errorBox.value {
-            FileHandle.standardError.write(Data((msg + "\n").utf8))
-        }
+        post(data: bodyData, path: "v1/logs")
     }
 
-    /// POST metrics to the collector's /v1/metrics endpoint.
+    /// POST metrics to /v1/metrics with retry and gzip.
     private func postMetrics(_ snapshots: [AggregationSnapshot]) {
         let body = buildMetricsEnvelope(snapshots)
         guard let bodyData = body.data(using: .utf8) else { return }
+        post(data: bodyData, path: "v1/metrics")
+    }
 
-        let url = endpoint.appendingPathComponent("v1/metrics")
+    /// Shared HTTP POST with gzip compression and retry/backoff.
+    /// Synchronous — called on the sender queue or shutdown path.
+    private func post(data: Data, path: String) {
+        let url = endpoint.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = bodyData
 
-        let sem = DispatchSemaphore(value: 0)
-        let errorBox = ErrorBox()
+        // gzip compress the body if possible.
+        if let compressed = gzip(data) {
+            request.httpBody = compressed
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+        } else {
+            request.httpBody = data
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
 
-        let task = session.dataTask(with: request) { _, response, error in
-            if let error {
-                errorBox.value = "otlp: POST /v1/metrics failed: \(error.localizedDescription)"
-            } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                errorBox.value = "otlp: POST /v1/metrics returned \(http.statusCode)"
+        // Retry loop with exponential backoff (100ms, 400ms).
+        for attempt in 0...maxRetries {
+            if attempt > 0 {
+                let delayMs = 100 * (1 << (attempt - 1))  // 100, 200, 400...
+                Thread.sleep(forTimeInterval: Double(delayMs) / 1000.0)
             }
-            sem.signal()
-        }
-        task.resume()
-        sem.wait()
 
-        if let msg = errorBox.value {
-            FileHandle.standardError.write(Data((msg + "\n").utf8))
+            let sem = DispatchSemaphore(value: 0)
+            let errorBox = ErrorBox()
+
+            let task = session.dataTask(with: request) { _, response, error in
+                if let error {
+                    errorBox.value = "otlp: POST /\(path) failed: \(error.localizedDescription)"
+                } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    errorBox.value = "otlp: POST /\(path) returned \(http.statusCode)"
+                }
+                sem.signal()
+            }
+            task.resume()
+            sem.wait()
+
+            if errorBox.value == nil {
+                return  // success
+            }
+            if attempt == maxRetries {
+                // Final attempt failed — log and discard.
+                if let msg = errorBox.value {
+                    FileHandle.standardError.write(Data(
+                        ("\(msg) (after \(maxRetries + 1) attempts)\n").utf8
+                    ))
+                }
+            }
         }
+    }
+
+    /// Compress data with gzip using the shell `gzip` command.
+    /// Returns nil if compression fails (falls back to uncompressed).
+    private func gzip(_ data: Data) -> Data? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        proc.arguments = ["-c"]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        proc.standardInput = stdinPipe
+        proc.standardOutput = stdoutPipe
+        proc.standardError = FileHandle(forWritingAtPath: "/dev/null")
+
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+
+        stdinPipe.fileHandleForWriting.write(data)
+        try? stdinPipe.fileHandleForWriting.close()
+
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+
+        let compressed = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        return compressed.isEmpty ? nil : compressed
     }
 
     /// Build the OTLP metrics JSON envelope.

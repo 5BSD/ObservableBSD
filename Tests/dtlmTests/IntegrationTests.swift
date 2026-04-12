@@ -536,6 +536,52 @@ final class IntegrationTests: XCTestCase {
             "body should contain a proc-shaped printf, got: \(body)")
     }
 
+    // MARK: - Root tier: otel format
+
+    /// Smoke test for `--format otel`: verify dtlm exits cleanly
+    /// when POSTing to a collector (or when the collector is down —
+    /// errors are non-fatal). No stdout expected since output goes
+    /// to the collector, not the terminal.
+    func testOtelFormatExitsCleanly() throws {
+        try XCTSkipUnless(isRoot,
+            "otel format runs libdtrace; requires root. Run with `sudo swift test`.")
+        try skipIfBinaryMissing()
+
+        guard let result = runDtlm(
+            ["watch", "kill", "--format", "otel", "--duration", "1",
+             "--endpoint", "http://localhost:4318"],
+            timeout: 15.0
+        ) else {
+            XCTFail("could not run dtlm")
+            return
+        }
+        XCTAssertEqual(result.exitCode, 0,
+            "dtlm watch --format otel should exit 0; stderr: \(result.stderr)")
+        // No stdout expected — output goes to the collector.
+        // Stderr may contain drop messages or HTTP errors if
+        // the collector isn't running, but the exit code should
+        // still be 0.
+    }
+
+    /// Test otel format with an aggregation profile to verify
+    /// metrics export doesn't crash.
+    func testOtelFormatWithAggregationProfile() throws {
+        try XCTSkipUnless(isRoot,
+            "otel format runs libdtrace; requires root.")
+        try skipIfBinaryMissing()
+
+        guard let result = runDtlm(
+            ["watch", "syscall-counts", "--format", "otel", "--duration", "1",
+             "--endpoint", "http://localhost:4318"],
+            timeout: 15.0
+        ) else {
+            XCTFail("could not run dtlm")
+            return
+        }
+        XCTAssertEqual(result.exitCode, 0,
+            "dtlm watch syscall-counts --format otel should exit 0; stderr: \(result.stderr)")
+    }
+
     // MARK: - Root tier: probes subcommand
 
     func testProbesSubcommandLightSmokeTest() throws {

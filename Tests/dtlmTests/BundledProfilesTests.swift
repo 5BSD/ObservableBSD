@@ -23,6 +23,8 @@ final class BundledProfilesTests: XCTestCase {
     private let sentinelParameters: [String: String] = [
         "func": "vm_fault",
         "offset": "4",
+        "pid": "1",
+        "lib": "libc.so.7",
     ]
 
     private func loader() -> ProfileLoader {

@@ -10,11 +10,10 @@
 // shared library targets will be added to this same package
 // using the FreeBSDKit-style multi-target layout.
 //
-// Pinned against FreeBSDKit 0.2.3 for the DTraceCore module (the
-// libdtrace bindings). The dtlm executable intentionally does NOT
-// depend on DBlocks — profiles are .d files loaded as text and
-// handed to libdtrace via DTraceCore's compile/exec/go/work/consume
-// APIs.
+// Depends on FreeBSDKit for the DTraceCore module (libdtrace
+// bindings). dtlm does NOT depend on DBlocks — profiles are .d
+// files loaded as text and handed to libdtrace via DTraceCore's
+// compile/exec/go/poll/consume APIs.
 
 import PackageDescription
 

@@ -514,28 +514,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         var value: String?
     }
 
-    /// Escape a string for inclusion as a JSON string literal value.
-    /// Same implementation as JSONLExporter — RFC 8259 compliant.
-    func escapeJSON(_ s: String) -> String {
-        var out = ""
-        out.reserveCapacity(s.count + 8)
-        for ch in s.unicodeScalars {
-            switch ch {
-            case "\"": out.append("\\\"")
-            case "\\": out.append("\\\\")
-            case "\u{08}": out.append("\\b")
-            case "\u{0C}": out.append("\\f")
-            case "\n": out.append("\\n")
-            case "\r": out.append("\\r")
-            case "\t": out.append("\\t")
-            default:
-                if ch.value < 0x20 {
-                    out.append(String(format: "\\u%04x", ch.value))
-                } else {
-                    out.unicodeScalars.append(ch)
-                }
-            }
-        }
-        return out
-    }
+    /// Delegate to the module-level `escapeJSON` in Exporter.swift.
+    func escapeJSON(_ s: String) -> String { dtlm.escapeJSON(s) }
 }

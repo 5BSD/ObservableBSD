@@ -227,31 +227,23 @@ struct WatchRunner {
     /// `dt_print_format` → `fprintf(fp, …)` directly to the FILE*
     /// the consumer passed to `dtrace_work`. So Phase 2's per-event
     /// printf capture has to go through the FILE* path. Phase 3's
-    /// typed metric mapping WILL use the buffered handler — that's
-    /// what it's actually for.
+    /// Uses `onBufferedOutput` to intercept libdtrace's formatted
+    /// printf/printa output directly in-process, bypassing the POSIX
+    /// pipe that Phase 2 used. Each callback invocation delivers one
+    /// formatted string from one probe firing (or one aggregation
+    /// fragment). No pipe, no reader thread, no line splitting — the
+    /// string goes straight from libdtrace's consumer into the
+    /// exporter.
     ///
-    /// The pipe lets us reuse the proven `poll(to:)` /
-    /// `aggregatePrint(to:)` path (same one Phase 1 text mode uses)
-    /// but redirected into our process instead of stdout. A background
-    /// reader thread accumulates the bytes, splits on newlines, and
-    /// hands each complete line to the exporter.
-    ///
-    /// **Historical note:** this path silently produced zero output
-    /// until FreeBSDKit commit d606daf. libdtrace's default chew
-    /// callbacks (`dt_nullrec`) return `DTRACE_CONSUME_NEXT`, which
-    /// makes the per-record loop in `dt_consume_cpu` `continue` and
-    /// skip the `dtrace_fprintf` call. dtrace(1) avoids this by
-    /// always passing its own chew/chewrec; DTraceCore now substitutes
-    /// "always THIS" defaults in `cdtrace_work` when callers pass nil.
+    /// This is significantly faster than the pipe path because it
+    /// eliminates the write(2)/read(2) syscall pair and the byte-
+    /// scanning loop per event. On a 20-CPU `sched-on-cpu` run that's
+    /// hundreds of thousands fewer syscalls per second.
     private func runStructuredBackend(handle: borrowing DTraceHandle, stopFlag: StopFlag) throws {
-        // Bigger principal buffer for the structured path. The pipe
-        // we're writing into is small (16-64KB on FreeBSD by default)
-        // and the in-process reader thread is slower than direct-to-
-        // TTY stdout, so libdtrace's fwrite() can block and the
-        // kernel buffer fills up faster than we'd like. 16m gives the
-        // consumer more headroom before kernel drops start happening.
-        // Text mode keeps the dtrace(1) default of 4m because TTY
-        // writes are fast enough to drain at line rate.
+        // Bigger principal buffer for the structured path. The
+        // buffered handler is faster than the old pipe path, but
+        // high-rate probes on many CPUs can still outpace the
+        // consumer. 16m per-CPU gives headroom before kernel drops.
         //
         // If the operator passed --bufsize, that already took effect
         // in run() — only override to 16m if they didn't specify one.
@@ -275,186 +267,78 @@ struct WatchRunner {
             return true
         }
 
-        // Set up a raw POSIX pipe. libdtrace's poll(to: writeFP)
-        // will fprintf into the write end; the reader thread drains
-        // the read end and emits one event per newline-terminated
-        // line.
-        var fds: [Int32] = [-1, -1]
-        guard pipe(&fds) == 0 else {
-            throw DtlmRunError.compileFailed(
-                profile: profile.name,
-                source: "",
-                underlying: NSError(
-                    domain: "dtlm", code: Int(errno),
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "pipe(2) failed: \(String(cString: strerror(errno)))"]
-                )
-            )
-        }
-        let readFD = fds[0]
-        let writeFD = fds[1]
-
-        // Wrap the write fd in a FILE* for libdtrace. fdopen takes
-        // ownership of the fd — fclose(writeFP) will close writeFD.
-        guard let writeFP = fdopen(writeFD, "w") else {
-            close(readFD)
-            close(writeFD)
-            throw DtlmRunError.compileFailed(
-                profile: profile.name,
-                source: "",
-                underlying: NSError(
-                    domain: "dtlm", code: Int(errno),
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "fdopen(write end) failed: \(String(cString: strerror(errno)))"]
-                )
-            )
-        }
-
-        // Unbuffered: every fwrite from libdtrace goes straight to
-        // the pipe fd so the reader thread sees data without waiting
-        // for a stdio flush.
-        setvbuf(writeFP, nil, _IONBF, 0)
-
-        // Capture state the reader thread needs.
+        // Capture state the handler closure needs.
         let exporterRef = exporter
         let profileName = profile.name
         let errorBox = HandlerErrorBox()
-        let readerDone = DispatchSemaphore(value: 0)
 
-        // Once the reader thread is dispatched and writeFP is open,
-        // any control-flow exit from this function MUST close writeFP
-        // (so the reader sees EOF on the pipe and unblocks from
-        // read(2)) and then wait for the reader to finish. Without
-        // this, an early throw from handle.go() / aggregateSnap()
-        // would leak the reader thread, both pipe FDs, and the
-        // exporter capture. Use a flag to make the cleanup
-        // idempotent: the happy path also closes writeFP and waits,
-        // and we don't want to double-close.
-        var writeFPClosed = false
-        func closeWriterAndJoinReader() {
-            if !writeFPClosed {
-                writeFPClosed = true
-                fflush(writeFP)
-                fclose(writeFP)
-                readerDone.wait()
-            }
-        }
-        defer { closeWriterAndJoinReader() }
+        // Register the buffered output handler. libdtrace calls this
+        // synchronously from dtrace_work() for every printf/printa
+        // action output instead of writing to the FILE*. The handler
+        // runs on the same thread as poll(), so emit() must be fast
+        // (the async sender in OTLPHTTPJSONExporter ensures this).
+        try handle.onBufferedOutput { data in
+            let text = data.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return true }
 
-        // Reader thread: drain the pipe until EOF, splitting on
-        // newlines and emitting each complete line as a ProbeEvent.
-        // Single-pass scan over each chunk; carry-over bytes between
-        // chunks live in `tail`. Avoids the O(n²) Data.removeSubrange
-        // pattern that turns into a death-spiral once the buffer
-        // grows past a megabyte at high probe rates.
-        DispatchQueue.global(qos: .userInitiated).async {
-            defer {
-                close(readFD)
-                readerDone.signal()
-            }
-
-            let chunkSize = 8192
-            var chunk = [UInt8](repeating: 0, count: chunkSize)
-            var tail: [UInt8] = []   // bytes left over from the previous chunk
-
-            @inline(__always)
-            func emit(_ bytes: ArraySlice<UInt8>) {
-                guard !bytes.isEmpty,
-                      let line = String(bytes: bytes, encoding: .utf8)
-                else { return }
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { return }
-                let event = ProbeEvent(
-                    timestamp: Date(),
-                    profileName: profileName,
-                    probeName: "",
-                    pid: 0,
-                    execname: "",
-                    printfBody: trimmed,
-                    stack: nil,
-                    ustack: nil
-                )
-                do {
-                    try exporterRef.emit(event: event)
-                } catch {
-                    errorBox.error = error
-                }
-            }
-
-            while true {
-                let n = read(readFD, &chunk, chunkSize)
-                if n <= 0 { break }
-
-                // Single-pass split: walk the chunk, emit each line
-                // as soon as we hit a newline. Bytes after the last
-                // newline carry over to `tail` for next iteration.
-                var lineStart = 0
-                for i in 0..<n where chunk[i] == 0x0A {
-                    if tail.isEmpty {
-                        emit(chunk[lineStart..<i])
-                    } else {
-                        // Combine carryover with the slice from the
-                        // current chunk to form one complete line.
-                        tail.append(contentsOf: chunk[lineStart..<i])
-                        emit(tail[tail.startIndex..<tail.endIndex])
-                        tail.removeAll(keepingCapacity: true)
-                    }
-                    lineStart = i + 1
-                }
-                if lineStart < n {
-                    tail.append(contentsOf: chunk[lineStart..<n])
-                }
-            }
-
-            // Flush any final partial line that didn't end with \n.
-            if !tail.isEmpty {
-                emit(tail[tail.startIndex..<tail.endIndex])
-            }
-        }
-
-        // Start the trace and run the poll loop, writing to the pipe.
-        do {
-            try handle.go()
-
-            loop: while !stopFlag.isSet {
-                let status = handle.poll(to: writeFP)
-                switch status {
-                case .okay:
-                    handle.sleep()
-                case .done:
-                    break loop
-                case .error:
-                    FileHandle.standardError.write(Data(
-                        "dtlm: libdtrace work() failed: \(handle.lastErrorMessage)\n".utf8
-                    ))
-                    break loop
-                }
-                if errorBox.error != nil {
-                    break loop
-                }
-            }
-
-            // Snapshot aggregations to the pipe. printa()/printf
-            // output from END handlers and the aggregation table
-            // itself flow through here.
+            let event = ProbeEvent(
+                timestamp: Date(),
+                profileName: profileName,
+                probeName: "",
+                pid: 0,
+                execname: "",
+                printfBody: text,
+                stack: nil,
+                ustack: nil
+            )
             do {
-                try handle.aggregateSnap()
-                try handle.aggregatePrint(to: writeFP)
+                try exporterRef.emit(event: event)
             } catch {
+                errorBox.error = error
+                return false  // abort consume
+            }
+            return true
+        }
+
+        // Start the trace and run the poll loop. pollBuffered()
+        // passes NULL as the FILE* to dtrace_work(), which tells
+        // libdtrace to route printf/printa output through the
+        // buffered handler instead of writing to a file.
+        try handle.go()
+
+        loop: while !stopFlag.isSet {
+            let status = handle.pollBuffered()
+            switch status {
+            case .okay:
+                handle.sleep()
+            case .done:
+                break loop
+            case .error:
                 FileHandle.standardError.write(Data(
-                    "dtlm: aggregation snapshot failed: \(error)\n".utf8
+                    "dtlm: libdtrace work() failed: \(handle.lastErrorMessage)\n".utf8
                 ))
+                break loop
+            }
+            if errorBox.error != nil {
+                break loop
             }
         }
 
-        // Close the write end so the reader sees EOF and unblocks,
-        // then wait for it. The defer above guarantees this also runs
-        // on the early-throw path; running it explicitly here means
-        // the reader has finished by the time we check errorBox below.
-        closeWriterAndJoinReader()
+        // Snapshot aggregations. With the buffered handler active,
+        // printa()/printf output from END handlers flows through
+        // the handler. We still need aggregateSnap() to trigger the
+        // snapshot, but aggregatePrint needs a FILE* — use stdout
+        // since the handler intercepts the output anyway.
+        do {
+            try handle.aggregateSnap()
+            try handle.aggregatePrint(to: Glibc.stdout)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "dtlm: aggregation snapshot failed: \(error)\n".utf8
+            ))
+        }
 
-        // Surface any error the reader thread captured from the
-        // exporter.
+        // Surface any error the handler captured from the exporter.
         if let err = errorBox.error {
             throw err
         }

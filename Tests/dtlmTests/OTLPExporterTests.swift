@@ -400,4 +400,232 @@ final class OTLPExporterTests: XCTestCase {
     func testFormatNameIsOtel() {
         XCTAssertEqual(OTLPHTTPJSONExporter.formatName, "otel")
     }
+
+    // MARK: - Metrics envelope shape
+
+    private func makeCountSnapshot(
+        name: String = "counts",
+        profileName: String = "syscall-counts",
+        dataPoints: [DataPoint]? = nil
+    ) -> AggregationSnapshot {
+        let points = dataPoints ?? [
+            DataPoint(keys: ["read"], value: .scalar(42)),
+            DataPoint(keys: ["write"], value: .scalar(17)),
+        ]
+        return AggregationSnapshot(
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            profileName: profileName,
+            aggregationName: name,
+            kind: .count,
+            dataPoints: points
+        )
+    }
+
+    func testMetricsEnvelopeIsValidJSON() throws {
+        let exporter = makeExporter()
+        let snapshot = makeCountSnapshot()
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            XCTFail("metrics envelope is not valid JSON: \(json)")
+            return
+        }
+        XCTAssertNotNil(obj["resourceMetrics"], "top-level key must be resourceMetrics")
+    }
+
+    func testMetricsEnvelopeTopLevelStructure() throws {
+        let exporter = makeExporter()
+        let snapshot = makeCountSnapshot()
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        XCTAssertEqual(resourceMetrics.count, 1)
+
+        let rm = resourceMetrics[0]
+        XCTAssertNotNil(rm["resource"])
+        XCTAssertNotNil(rm["scopeMetrics"])
+
+        let scopeMetrics = rm["scopeMetrics"] as! [[String: Any]]
+        XCTAssertEqual(scopeMetrics.count, 1)
+
+        let sm = scopeMetrics[0]
+        let scope = sm["scope"] as! [String: Any]
+        XCTAssertEqual(scope["name"] as? String, "dtlm")
+        XCTAssertNotNil(sm["metrics"])
+    }
+
+    // MARK: - Sum metric (count/sum aggregations)
+
+    func testSumMetricFromCountAggregation() throws {
+        let exporter = makeExporter()
+        let snapshot = makeCountSnapshot()
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        XCTAssertEqual(metrics.count, 1)
+
+        let metric = metrics[0]
+        XCTAssertEqual(metric["name"] as? String, "dtlm.syscall-counts.counts")
+
+        // Must be a Sum metric.
+        let sum = metric["sum"] as! [String: Any]
+        XCTAssertEqual(sum["isMonotonic"] as? Bool, true)
+        XCTAssertEqual(sum["aggregationTemporality"] as? Int, 2) // cumulative
+
+        let dataPoints = sum["dataPoints"] as! [[String: Any]]
+        XCTAssertEqual(dataPoints.count, 2)
+
+        // First data point: read=42
+        let dp0 = dataPoints[0]
+        XCTAssertEqual(dp0["asInt"] as? String, "42")
+        let attrs0 = dp0["attributes"] as! [[String: Any]]
+        let key0val = (attrs0[0]["value"] as! [String: Any])["stringValue"] as? String
+        XCTAssertEqual(key0val, "read")
+    }
+
+    // MARK: - Gauge metric (min/max/avg/stddev)
+
+    func testGaugeMetricFromMaxAggregation() throws {
+        let exporter = makeExporter()
+        let snapshot = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "latency",
+            aggregationName: "peak",
+            kind: .max,
+            dataPoints: [DataPoint(keys: ["nginx"], value: .scalar(9500))]
+        )
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        let metric = metrics[0]
+
+        XCTAssertEqual(metric["name"] as? String, "dtlm.latency.peak")
+        XCTAssertNotNil(metric["gauge"], "max should produce a gauge metric")
+
+        let gauge = metric["gauge"] as! [String: Any]
+        let dataPoints = gauge["dataPoints"] as! [[String: Any]]
+        XCTAssertEqual(dataPoints.count, 1)
+        XCTAssertEqual(dataPoints[0]["asInt"] as? String, "9500")
+    }
+
+    // MARK: - Histogram metric (quantize)
+
+    func testHistogramMetricFromQuantize() throws {
+        let exporter = makeExporter()
+        let snapshot = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "io-latency",
+            aggregationName: "dist",
+            kind: .quantize,
+            dataPoints: [DataPoint(
+                keys: ["nginx"],
+                value: .histogram(buckets: [
+                    HistogramBucket(upperBound: 1, count: 10),
+                    HistogramBucket(upperBound: 2, count: 20),
+                    HistogramBucket(upperBound: 4, count: 5),
+                ])
+            )]
+        )
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        let metric = metrics[0]
+
+        XCTAssertNotNil(metric["histogram"], "quantize should produce a histogram")
+
+        let histogram = metric["histogram"] as! [String: Any]
+        let dataPoints = histogram["dataPoints"] as! [[String: Any]]
+        XCTAssertEqual(dataPoints.count, 1)
+
+        let dp = dataPoints[0]
+        // count = 10 + 20 + 5 = 35
+        XCTAssertEqual(dp["count"] as? String, "35")
+
+        let bucketCounts = dp["bucketCounts"] as! [String]
+        XCTAssertEqual(bucketCounts.count, 3)
+
+        let explicitBounds = dp["explicitBounds"] as! [Any]
+        XCTAssertEqual(explicitBounds.count, 2) // N-1 bounds for N buckets
+    }
+
+    // MARK: - Metric name formatting
+
+    func testMetricNameUsesProfileAndAggregationName() throws {
+        let exporter = makeExporter()
+        let snapshot = makeCountSnapshot(name: "calls", profileName: "tcp-connect")
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        XCTAssertEqual(metrics[0]["name"] as? String, "dtlm.tcp-connect.calls")
+    }
+
+    func testMetricNameFallsBackToKindForAnonymousAgg() throws {
+        let exporter = makeExporter()
+        let snapshot = makeCountSnapshot(name: "", profileName: "syscall-counts")
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        XCTAssertEqual(metrics[0]["name"] as? String, "dtlm.syscall-counts.count")
+    }
+
+    // MARK: - Empty snapshot
+
+    func testEmitSnapshotSkipsEmptyDataPoints() throws {
+        let exporter = makeExporter()
+        let snapshot = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "x",
+            aggregationName: "y",
+            kind: .count,
+            dataPoints: []
+        )
+        try exporter.emit(snapshot: snapshot)
+        // Should be a no-op — no metrics queued.
+        try exporter.flush()
+    }
+
+    // MARK: - Multiple metrics in one envelope
+
+    func testMultipleSnapshotsProduceMultipleMetrics() throws {
+        let exporter = makeExporter()
+        let snap1 = makeCountSnapshot(name: "reads", profileName: "io")
+        let snap2 = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "io",
+            aggregationName: "latency",
+            kind: .max,
+            dataPoints: [DataPoint(keys: ["disk0"], value: .scalar(500))]
+        )
+        let json = exporter.buildMetricsEnvelope([snap1, snap2])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        XCTAssertEqual(metrics.count, 2)
+    }
 }

@@ -17,21 +17,19 @@ import Glibc
 ///
 /// 1. **Text mode** (`backend = .text`) — libdtrace writes its
 ///    formatted printf output directly to stdout via
-///    `poll(to: stdout)`. The Phase 1 path. Proven, fast, no per-event
-///    Swift overhead. ANSI color when stdout is a TTY. The Exporter's
-///    `emit(event:)` is NOT called in this mode — `TextExporter` is
-///    a no-op pass-through; libdtrace's stdio is the actual output.
+///    `poll(to: stdout)`. ANSI color when stdout is a TTY. The
+///    Exporter's `emit(event:)` is NOT called — `TextExporter` is
+///    a pass-through; libdtrace's stdio is the actual output.
 ///
 /// 2. **Structured mode** (`backend = .structured`) — libdtrace's
-///    formatted output is fprintf'd into a POSIX pipe, and a
-///    background reader thread splits the byte stream on newlines
-///    and turns each complete line into a typed `ProbeEvent` for
-///    `exporter.emit(event:)`. Phase 2's `JSONLExporter` uses this.
-///    Phase 3's `OTLPHTTPJSONExporter` will too.
+///    formatted output is intercepted via `onBufferedOutput` and
+///    delivered as typed `ProbeEvent` values to
+///    `exporter.emit(event:)`. Used by `JSONLExporter` and
+///    `OTLPHTTPJSONExporter`. Aggregations are walked via
+///    `aggregateWalkTyped` and emitted as `AggregationSnapshot`.
 ///
-/// The two paths share the run loop (compile / exec / go / poll /
-/// sleep / aggregate / stop). They differ only in how output is
-/// captured.
+/// Both paths share the run loop (compile / exec / go / poll /
+/// sleep / aggregate / stop). They differ in how output is captured.
 struct WatchRunner {
 
     /// Which output capture path to use.
@@ -39,10 +37,9 @@ struct WatchRunner {
         /// Text — libdtrace writes directly to stdout via
         /// `poll(to: stdout)`. Used by `TextExporter`.
         case text
-        /// Structured — libdtrace's buffered handler routes each
+        /// Structured — `onBufferedOutput` handler routes each
         /// formatted line through `exporter.emit(event:)`. Used by
-        /// `JSONLExporter` (Phase 2) and `OTLPHTTPJSONExporter`
-        /// (Phase 3).
+        /// `JSONLExporter` and `OTLPHTTPJSONExporter`.
         case structured
     }
 
@@ -142,7 +139,7 @@ struct WatchRunner {
         try exporter.shutdown()
     }
 
-    // MARK: - Text backend (Phase 1)
+    // MARK: - Text backend
 
     /// Text mode: libdtrace writes formatted printf output directly
     /// to stdout via `poll(to: stdout)`. ANSI color when stdout is
@@ -212,38 +209,25 @@ struct WatchRunner {
         fflush(Glibc.stdout)
     }
 
-    // MARK: - Structured backend (Phase 2 / Phase 3)
+    // MARK: - Structured backend
 
-    /// Structured mode: route libdtrace's formatted output through a
-    /// pipe and read each line on a background thread, wrapping it
-    /// as a `ProbeEvent` for `exporter.emit(event:)`.
+    /// Structured mode: intercept libdtrace's formatted printf/printa
+    /// output via `onBufferedOutput` and deliver each string directly
+    /// to the exporter as a `ProbeEvent`.
     ///
-    /// **Why a pipe and not the buffered handler?**
-    /// `dtrace_handle_buffered` is for **structured aggregation
-    /// introspection** — it's called with `AGGKEY`/`AGGVAL`/`AGGFORMAT`/
-    /// `AGGLAST` flagged fragments so consumers can walk aggregation
-    /// data without going through the formatted-text path. It does
-    /// NOT receive `printf` output; printf flows through
-    /// `dt_print_format` → `fprintf(fp, …)` directly to the FILE*
-    /// the consumer passed to `dtrace_work`. So Phase 2's per-event
-    /// printf capture has to go through the FILE* path. Phase 3's
-    /// Uses `onBufferedOutput` to intercept libdtrace's formatted
-    /// printf/printa output directly in-process, bypassing the POSIX
-    /// pipe that Phase 2 used. Each callback invocation delivers one
-    /// formatted string from one probe firing (or one aggregation
-    /// fragment). No pipe, no reader thread, no line splitting — the
-    /// string goes straight from libdtrace's consumer into the
-    /// exporter.
+    /// `pollBuffered()` passes NULL as the FILE* to `dtrace_work()`,
+    /// which tells libdtrace to route output through the registered
+    /// handler instead of writing to a file. Aggregation fragments
+    /// (flagged AGGKEY/AGGVAL/AGGLAST) are filtered out here since
+    /// they're captured as typed metrics via `aggregateWalkTyped()`.
     ///
-    /// This is significantly faster than the pipe path because it
-    /// eliminates the write(2)/read(2) syscall pair and the byte-
-    /// scanning loop per event. On a 20-CPU `sched-on-cpu` run that's
-    /// hundreds of thousands fewer syscalls per second.
+    /// **Limitation:** the handler only receives the formatted text.
+    /// Probe metadata (probeName, pid, execname) is not available;
+    /// those fields are zeroed in the ProbeEvent. The actual values
+    /// are embedded in the printf body string.
     private func runStructuredBackend(handle: borrowing DTraceHandle, stopFlag: StopFlag) throws {
-        // Bigger principal buffer for the structured path. The
-        // buffered handler is faster than the old pipe path, but
-        // high-rate probes on many CPUs can still outpace the
-        // consumer. 16m per-CPU gives headroom before kernel drops.
+        // 16m per-CPU buffer gives headroom before kernel drops
+        // at high probe rates on many CPUs.
         //
         // If the operator passed --bufsize, that already took effect
         // in run() — only override to 16m if they didn't specify one.

@@ -19,8 +19,8 @@ import Foundation
 ///
 /// v1 ships three conformances:
 ///   - `TextExporter` (line-oriented stdout, dwatch-style)
-///   - `JSONLExporter` (Phase 2, structured pipe)
-///   - `OTLPHTTPJSONExporter` (Phase 3, the OTel bridge)
+///   - `JSONLExporter` (JSONL, one JSON object per probe firing)
+///   - `OTLPHTTPJSONExporter` (OTLP/HTTP logs + metrics)
 ///
 /// Post-v1 conformances are anticipated for Prometheus, OTLP/protobuf,
 /// Loki, S3 archive, and vendor APIs. None of them require core

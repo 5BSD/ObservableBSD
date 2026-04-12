@@ -15,10 +15,10 @@ import Glibc
 /// duration flags, run it via libdtrace, and stream the output
 /// through the chosen exporter.
 ///
-/// `--format text` (default, Phase 1) writes libdtrace's formatted
-/// printf output directly to stdout. `--format json` (Phase 2) wraps
-/// each probe firing as one JSONL record on stdout. `--format otel`
-/// (Phase 3) POSTs logs and metrics to an OTLP/HTTP collector.
+/// `--format text` (default) writes libdtrace's formatted printf
+/// output directly to stdout. `--format json` wraps each probe
+/// firing as one JSONL record on stdout. `--format otel` POSTs
+/// logs and metrics to an OTLP/HTTP collector.
 struct WatchCommand: ParsableCommand {
 
     static let configuration = CommandConfiguration(

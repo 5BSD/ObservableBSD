@@ -13,7 +13,7 @@ import FoundationNetworking
 
 // MARK: - OTLPHTTPJSONExporter
 
-/// OTLP/HTTP+JSON exporter (Phase 3 + 3.5). Batches probe events as
+/// OTLP/HTTP+JSON exporter. Batches probe events as
 /// OpenTelemetry LogRecords and POSTs them to an OTLP/HTTP collector's
 /// `/v1/logs` endpoint.
 ///
@@ -140,8 +140,8 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     func emit(snapshot: AggregationSnapshot) throws {
         guard !snapshot.dataPoints.isEmpty else { return }
         lock.lock()
+        defer { lock.unlock() }
         metricsBatch.append(snapshot)
-        lock.unlock()
     }
 
     func flush() throws {

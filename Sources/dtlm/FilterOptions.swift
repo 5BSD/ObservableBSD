@@ -195,8 +195,7 @@ struct StackOptions: ParsableArguments {
 
 // MARK: - FormatOption
 
-/// Output format selection. dtlm v1 ships text (Phase 1), json
-/// (Phase 2), and otel (Phase 3).
+/// Output format selection.
 enum OutputFormat: String, ExpressibleByArgument, Sendable {
     /// Line-oriented dwatch-style stdout. Each probe firing prints
     /// the script's `printf` body verbatim.

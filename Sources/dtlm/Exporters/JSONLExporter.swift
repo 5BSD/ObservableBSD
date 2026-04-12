@@ -21,13 +21,13 @@ import Foundation
 /// ```
 ///
 /// Aggregation tables (e.g., `printa()` rows from `systop` on END)
-/// flow through the same handler — one row per JSON line. Phase 3's
-/// OTLP exporter will switch to a structured `aggregateWalk` for
-/// proper metric attribution; for Phase 2, line-oriented JSONL is
-/// what users actually pipe to log shippers.
+/// flow through the same handler — one row per JSON line. The OTLP
+/// exporter uses `aggregateWalkTyped` for proper metric attribution;
+/// JSONL keeps line-oriented output since that's what users pipe to
+/// log shippers.
 ///
 /// **This exporter uses libdtrace's `onBufferedOutput` handler path**
-/// (vs the Phase 1 `TextExporter` direct-to-stdout path). The handler
+/// (vs the `TextExporter` direct-to-stdout path). The handler
 /// receives each formatted line synchronously when libdtrace produces
 /// it. dtlm wraps that line in a JSON object, escapes the body
 /// string, and writes it to the configured output.
@@ -100,10 +100,10 @@ final class JSONLExporter: Exporter, @unchecked Sendable {
     }
 
     func emit(snapshot: AggregationSnapshot) throws {
-        // Phase 2 doesn't yet build typed AggregationSnapshot
-        // values — those come in Phase 3 alongside OTel metric
-        // mapping. For now this is a no-op; aggregation rows
-        // arrive as ProbeEvent lines via the buffered handler.
+        // No-op: aggregation rows arrive as formatted text lines
+        // via the buffered handler and are emitted as JSONL records
+        // through emit(event:). Typed metric output is handled by
+        // OTLPHTTPJSONExporter.
     }
 
     func flush() throws {

@@ -8,8 +8,7 @@ import ArgumentParser
 
 // MARK: - dtlm
 
-/// Top-level `dtlm` command. Routes to one of the four Phase 1
-/// subcommands.
+/// Top-level `dtlm` command. Routes to subcommands.
 @main
 struct Dtlm: ParsableCommand {
 
@@ -25,11 +24,6 @@ struct Dtlm: ParsableCommand {
             text, JSONL, or OTLP/HTTP+JSON to your existing OpenTelemetry \
             collector with stack traces attached.
 
-            Phase 1 (this build) ships the .d profile loader, ~21 bundled \
-            profiles, the four core subcommands, filter and duration \
-            flags, and text output via the Exporter framework. JSON, \
-            OTel, and the rest of the catalog land in subsequent phases. \
-            See DESIGN.md.
             """,
         version: "0.1.0",
         subcommands: [

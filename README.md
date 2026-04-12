@@ -2,40 +2,13 @@
 
 **Convert FreeBSD's instrumentation surface to OpenTelemetry telemetry.**
 
-ObservableBSD is the umbrella project for tools that bridge
-FreeBSD-native instrumentation — DTrace probes, hardware-trace
-frameworks, kernel counters, log streams — into the modern
-observability stack via OpenTelemetry. It exists because FreeBSD
-has rich instrumentation built into the kernel and almost nothing
-between it and Grafana / Tempo / Loki / Datadog / etc.
+ObservableBSD bridges FreeBSD-native instrumentation — DTrace probes,
+hardware-trace frameworks, kernel counters — into the modern
+observability stack via OpenTelemetry. FreeBSD has rich instrumentation
+built into the kernel; this project connects it to Grafana, Jaeger,
+Loki, Prometheus, and any OTel-compatible backend.
 
-The first (and currently only) executable in the package is
-[`dtlm`](#dtlm), which handles the DTrace half of that gap. As
-ObservableBSD grows, additional sources and shared infrastructure
-will land in this same Swift package as new targets — FreeBSDKit
-style.
-
----
-
-## What's in the package today
-
-| Target | Kind | Purpose | Status |
-|---|---|---|---|
-| `dtlm` | executable | DTrace → OTel telemetry CLI. Apple Instruments-equivalent profile catalog, structured output (text / JSONL / OTLP), stack capture, USDT discovery. | Phase 1 complete (99 bundled profiles, 54 tests, full dwatch parity verified against live kernel) |
-
-## What's planned
-
-| Target | Kind | Purpose | When |
-|---|---|---|---|
-| `dtlm` (HWT integration) | inside the `dtlm` executable | Add the FreeBSD `hwt(4)` Hardware Trace Framework as a second `TelemetrySource` next to libdtrace, sharing dtlm's existing Exporter framework, OTel push, resource attribution, and `rc.d/dtlm` wrapper. See [`DESIGN-HWT.md`](./DESIGN-HWT.md) for the architecture. | Post-v1 of the DTrace path |
-| `ObservableBSDCore` (tentative name) | library | If/when a second tool is added, the Exporter framework, OTel encoders, and resource attribution helpers are extracted from `dtlm` into a shared library that other ObservableBSD tools depend on. | When the second tool needs them |
-| Future tools (TBD) | executables | Possible future telemetry sources include syslog/log-file tailers, sysctl-based metric exporters, and an `hwpmc(4)` hardware-perf-counter exporter. None are committed work — they're the natural shape if there's user demand. | Speculative |
-
-The point of the umbrella is that **the OTel pipeline only gets
-built once.** Every new ObservableBSD telemetry source plugs into
-the same Exporter framework, the same `--format text|json|otel`
-flags, the same `--service`/`--instance` resource attribution,
-the same `rc.d` wrapper, the same documentation conventions.
+The first executable in the package is [`dtlm`](#dtlm).
 
 ---
 
@@ -43,75 +16,161 @@ the same `rc.d` wrapper, the same documentation conventions.
 
 **Apple Instruments for FreeBSD, with OpenTelemetry output.**
 
-`dtlm` bundles a catalog of DTrace-backed profiling templates
-equivalent to Instruments' Time Profiler, System Trace, File
-Activity, Network Activity, Allocations, Thread States, and Lock
-Contention — for both kernel events and your own USDT-instrumented
-applications — and ships the results as text, JSONL, or
-OTLP/HTTP+JSON to your existing OpenTelemetry collector with stack
-traces attached.
+`dtlm` bundles 118 DTrace profiling templates covering the equivalent
+of Instruments' Time Profiler, System Trace, File Activity, Network
+Activity, Allocations, Thread States, and Lock Contention — for both
+kernel events and USDT-instrumented applications — and ships the
+results as text, JSONL, or OTLP/HTTP+JSON to an OpenTelemetry
+collector.
 
-It exists because FreeBSD has DTrace and nothing between it and the
-modern observability stack: no Instruments-equivalent profiling
-catalog, no OTel data source, no continuous-profiling story.
+### Output formats
 
-See [`DESIGN.md`](./DESIGN.md) for the full dtlm/DTrace design and
-[`DESIGN-HWT.md`](./DESIGN-HWT.md) for the planned hardware-trace
-integration.
+| Format | Flag | Description |
+|--------|------|-------------|
+| Text | `--format text` (default) | dwatch-style line output to stdout |
+| JSONL | `--format json` | One JSON object per probe firing, pipe to `jq`/Loki/Vector |
+| OTLP | `--format otel` | POST logs to `/v1/logs`, metrics to `/v1/metrics` on an OTel collector |
 
-### How dtlm profiles work
+The OTLP exporter includes:
+- Async sender thread (HTTP doesn't block the DTrace consumer)
+- gzip compression via libz
+- Retry with exponential backoff (2 attempts)
+- Drop counter attribute (`dtlm.drops`) on data loss
+- Typed metrics from DTrace aggregations (count/sum -> Sum, min/max/avg -> Gauge, quantize -> Histogram)
 
-A profile is a `.d` file. Filename = profile name. The first
-`/* … */` comment is the description. An optional
-`/* @dtlm-predicate */` marker is where dtlm injects CLI filter
-predicates. `${param}` placeholders get substituted from
-`--param key=value` flags. Everything else is plain D, handed to
-libdtrace verbatim.
+### Profile catalog (118 profiles)
 
-Profiles load from three places, scanned in order with shadowing:
+| Category | Count | Examples |
+|----------|-------|---------|
+| Syscall | 24 | `open`, `kill`, `read-write`, `syscall-counts`, `slow-syscalls` |
+| Scheduler | 18 | `sched-on-cpu`, `sched-off-cpu`, `sched-sleep`, `sched-wakeup` |
+| TCP | 16 | `tcp-connect`, `tcp-send`, `tcp-state-change`, `tcp-io` |
+| Process | 11 | `proc-create`, `proc-exec-success`, `proc-exit`, `proc-signal` |
+| VFS | 9 | `vop_create`, `vop_lookup`, `vop_rename`, `vop_remove` |
+| UDP | 6 | `udp-send`, `udp-receive`, `udplite` |
+| Memory | 3 | `malloc-trace`, `malloc-counts`, `malloc-leaks` |
+| VM | 3 | `vm-fault`, `vm-pgfault`, `vm-activity` |
+| I/O | 3 | `io-start`, `io-done`, `io` |
+| IP | 3 | `ip-send`, `ip-receive`, `ip` |
+| Lock | 2 | `lock-contention`, `mutex-contention` |
+| Function | 5 | `func-trace`, `func-time`, `kfunc-trace`, `kfunc-time`, `lib-calls` |
+| USDT Apps | 9 | `postgresql-queries`, `mysql-queries`, `python-calls`, `node-http`, `ruby-calls` |
+| Composite | 6 | `system-trace`, `file-activity`, `network-activity`, `thread-states` |
 
-1. **Bundled SwiftPM resources** inside the `dtlm` binary —
-   ~99 profiles covering full dwatch parity plus the Apple
-   Instruments umbrella set, always present
-2. **`/usr/local/share/dtlm/profiles/`** — system, where the
-   FreeBSD port drops the rest of the catalog
-3. **`~/.dtlm/profiles/`** — per-user
+### Quick start
 
-There is **no** JSON profile format, no Codable schema, no DBlocks
-runtime dependency. dtlm uses `DTraceCore` (the libdtrace bindings
-in FreeBSDKit) directly. Adding a profile is a one-file drop.
+```sh
+# Build
+swift build
 
-### dtlm status
+# List every bundled profile
+.build/debug/dtlm list
 
-**Phase 1 complete.** ~99 bundled profiles, full dwatch parity
-verified end-to-end against a live FreeBSD 15 kernel via libdtrace,
-54 unit + integration tests passing, the `Exporter` framework in
-place with `TextExporter` as the first conformance, ANSI color
-when stdout is a TTY, marker-based filter injection, `${param}`
-substitution, `--with-stack` / `--with-ustack` plumbed through,
-`--duration` tick injection, sub-second per-subprocess timeout in
-the integration test sweep.
+# Watch kill(2) syscalls system-wide
+sudo .build/debug/dtlm watch kill
 
-Subsequent phases:
+# Filter by process, run for 60 seconds
+sudo .build/debug/dtlm watch open --execname nginx --duration 60
 
-- **Phase 2**: `JSONLExporter` + sampling
-- **Phase 3**: `OTLPHTTPJSONExporter` (logs + typed metrics + stacks
-  + auth + traceparent + resource attribution + graceful shutdown)
-- **Phase 4**: ~25 more bundled system profiles
-- **Phase 5**: ~15-20 application/USDT profiles
-- **Phase 6**: `rc.d/dtlm` wrapper
-- **Phase 7**: `Scripts/regen_catalog.swift` + FreeBSD port
-  packaging for the full ~296-profile `DBlocks.Dwatch` catalog
-- **Post-v1**: hwt(4) integration per `DESIGN-HWT.md`
+# JSONL output, pipe to jq
+sudo .build/debug/dtlm watch tcp-connect --format json | jq .
+
+# Send to an OpenTelemetry collector
+sudo .build/debug/dtlm watch syscall-counts --format otel --duration 10
+
+# Custom endpoint
+sudo .build/debug/dtlm watch sched-on-cpu --format otel --endpoint http://collector:4318 --duration 5
+
+# Trace malloc in a specific process
+sudo .build/debug/dtlm watch malloc-trace --param pid=1234
+
+# Trace PostgreSQL queries
+sudo .build/debug/dtlm watch postgresql-queries --param pid=$(pgrep postgres)
+
+# Measure time in a kernel function
+sudo .build/debug/dtlm watch kfunc-time --param func=tcp_output --duration 10
+
+# Trace a user-space function with stacks
+sudo .build/debug/dtlm watch func-trace --param pid=5678 --param func=SSL_read --with-ustack
+
+# Discover USDT probes in a running process
+sudo .build/debug/dtlm watch usdt-list --param pid=1234 --duration 1
+
+# Run an arbitrary .d file
+sudo .build/debug/dtlm watch -f /path/to/myscript.d
+
+# Tune DTrace buffers for high-rate profiles
+sudo .build/debug/dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms --duration 5
+
+# Print rendered D source (no root needed)
+.build/debug/dtlm generate kill --pid 1234
+
+# List available DTrace probes
+sudo .build/debug/dtlm probes --provider tcp
+```
+
+### Custom profiles
+
+Drop a `.d` file into `~/.dtlm/profiles/` and dtlm picks it up automatically:
+
+```sh
+mkdir -p ~/.dtlm/profiles
+
+cat > ~/.dtlm/profiles/my-trace.d << 'EOF'
+/*
+ * Count syscalls by name for a specific process
+ */
+syscall:::entry
+/* @dtlm-predicate */
+{
+    @[probefunc] = count();
+}
+
+dtrace:::END
+{
+    printa("%-30s %@d\n", @);
+}
+EOF
+
+# It shows up in the catalog
+dtlm list | grep my-trace
+
+# Run it with filters
+sudo dtlm watch my-trace --execname nginx --duration 30 --format otel
+```
+
+**Profile markers:**
+- `/* @dtlm-predicate */` — replaced with `--pid`/`--execname`/`--where` filters
+- `/* @dtlm-predicate-and */` — appended to an existing predicate
+- `/* @dtlm-stack */` / `/* @dtlm-ustack */` — replaced with `stack()`/`ustack()` when `--with-stack`/`--with-ustack` is set
+- `${name}` — substituted from `--param name=value`
+
+**Profile sources** (higher priority shadows lower):
+1. `~/.dtlm/profiles/` (user)
+2. `/usr/local/share/dtlm/profiles/` (system)
+3. Bundled in the binary
+
+### DTrace buffer tuning
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--bufsize` | 4m (text), 16m (json/otel) | Per-CPU trace buffer size |
+| `--switchrate` | 50ms | Buffer drain cadence |
+
+For extreme probe rates (`sched-on-cpu` on many CPUs), increase buffers:
+```sh
+sudo dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms
+```
 
 ---
 
 ## Requirements
 
-- FreeBSD 13.0 or later
+- FreeBSD 15.0 or later
 - Swift 6.3 or later
 - DTrace enabled in the running kernel (default on `GENERIC`)
-- Root or `sudo` to actually run probes (libdtrace requires it)
+- Root to run probes (libdtrace requires it)
+- For OTLP output: an OpenTelemetry collector on the network (e.g. `otelcol-contrib`)
 
 ## Building
 
@@ -119,46 +178,25 @@ Subsequent phases:
 swift build
 ```
 
-The dtlm binary lands at `.build/debug/dtlm`.
-
-## Quick start
-
-```sh
-# List every bundled profile
-.build/debug/dtlm list
-
-# Print the rendered D source for a profile (no root needed)
-.build/debug/dtlm generate kill
-
-# Watch every kill(2) syscall (Ctrl-C or --duration to stop)
-sudo .build/debug/dtlm watch kill
-
-# Watch every open() from nginx, for 60 seconds
-sudo .build/debug/dtlm watch open --execname nginx --duration 60
-
-# Run a kinst probe with parameter substitution
-sudo .build/debug/dtlm watch kinst --param func=vm_fault --param offset=4 --duration 30
-
-# Run an arbitrary .d file
-sudo .build/debug/dtlm watch -f /path/to/myscript.d
-
-# Discover DTrace probes (USDT included if --pid is given)
-sudo .build/debug/dtlm probes --provider tcp
-```
-
 ## Testing
 
 ```sh
-# Unit + structural tests (no root required)
+# Unit + structural tests (no root needed, 93 tests)
 swift test
 
-# Full integration sweep, including the libdtrace compile-check
-# of every bundled profile (requires root)
+# Full integration sweep including libdtrace compilation of
+# every bundled profile (requires root)
 sudo swift test
 
-# After running tests as root, restore .build ownership
+# After root tests, restore .build ownership
 sudo chown -R $(id -un):$(id -gn) .build
 ```
+
+## Dependencies
+
+- [FreeBSDKit](https://github.com/SwiftBSD/FreeBSDKit) >= 0.2.6 (DTraceCore module)
+- [swift-argument-parser](https://github.com/apple/swift-argument-parser) >= 1.2.0
+- libz (system, for gzip compression)
 
 ## License
 

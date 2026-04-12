@@ -70,6 +70,9 @@ struct WatchCommand: ParsableCommand {
     @OptionGroup
     var format: FormatOption
 
+    @OptionGroup
+    var otel: OTelOptions
+
     func validate() throws {
         if profile == nil && file == nil {
             throw ValidationError("provide a profile name or `-f /path/to/script.d`.")
@@ -137,6 +140,16 @@ struct WatchCommand: ParsableCommand {
             backend = .text
         case .json:
             exporter = JSONLExporter(
+                profileName: profileToRun.name,
+                resource: resource
+            )
+            backend = .structured
+        case .otel:
+            guard let url = URL(string: otel.endpoint) else {
+                throw ValidationError("invalid --endpoint URL: '\(otel.endpoint)'")
+            }
+            exporter = OTLPHTTPJSONExporter(
+                endpoint: url,
                 profileName: profileToRun.name,
                 resource: resource
             )

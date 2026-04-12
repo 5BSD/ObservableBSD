@@ -196,9 +196,7 @@ struct StackOptions: ParsableArguments {
 // MARK: - FormatOption
 
 /// Output format selection. dtlm v1 ships text (Phase 1), json
-/// (Phase 2), and otel (Phase 3). Only the first two are wired up
-/// today; `otel` will refuse to run until Phase 3 lands the
-/// OTLP/HTTP+JSON exporter.
+/// (Phase 2), and otel (Phase 3).
 enum OutputFormat: String, ExpressibleByArgument, Sendable {
     /// Line-oriented dwatch-style stdout. Each probe firing prints
     /// the script's `printf` body verbatim.
@@ -208,6 +206,12 @@ enum OutputFormat: String, ExpressibleByArgument, Sendable {
     /// `printf` body lands in the `body` field, alongside `time`
     /// and `profile`. Pipe-friendly for `jq`, Loki, Vector, Splunk.
     case json
+
+    /// OTLP/HTTP+JSON — batch probe events as OpenTelemetry
+    /// LogRecords and POST to an OTLP/HTTP collector's `/v1/logs`
+    /// endpoint. Feeds directly into Grafana, Jaeger, Loki, or any
+    /// OTel-compatible backend.
+    case otel
 }
 
 struct FormatOption: ParsableArguments {
@@ -215,14 +219,36 @@ struct FormatOption: ParsableArguments {
     @Option(
         name: .customLong("format"),
         help: ArgumentHelp(
-            "Output format: text (default, dwatch-style) or json (JSONL).",
+            "Output format: text (default), json (JSONL), or otel (OTLP/HTTP).",
             discussion: """
                 'text' streams libdtrace's formatted output directly \
                 to stdout, including aggregation tables. 'json' wraps \
                 each line as a JSONL record with time/profile/body \
-                fields, suitable for piping to jq, Loki, Vector, etc.
+                fields, suitable for piping to jq, Loki, Vector, etc. \
+                'otel' batches events as OTLP LogRecords and POSTs \
+                them to an OpenTelemetry collector (see --endpoint).
                 """
         )
     )
     var format: OutputFormat = .text
+}
+
+// MARK: - OTelOptions
+
+/// CLI flags for the OTLP/HTTP exporter. Only meaningful when
+/// `--format otel` is passed; ignored otherwise.
+struct OTelOptions: ParsableArguments {
+
+    @Option(
+        name: .customLong("endpoint"),
+        help: ArgumentHelp(
+            "OTLP/HTTP collector base URL (default: http://localhost:4318).",
+            discussion: """
+                The exporter POSTs to <endpoint>/v1/logs. Only used \
+                when --format otel is active. No TLS or auth headers \
+                for now (dev workflow).
+                """
+        )
+    )
+    var endpoint: String = "http://localhost:4318"
 }

@@ -25,7 +25,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/SwiftBSD/FreeBSDKit",
-            from: "0.2.5"
+            from: "0.2.6"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser",

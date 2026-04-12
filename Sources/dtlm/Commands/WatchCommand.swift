@@ -73,6 +73,9 @@ struct WatchCommand: ParsableCommand {
     @OptionGroup
     var otel: OTelOptions
 
+    @OptionGroup
+    var dtrace: DTraceOptions
+
     func validate() throws {
         if profile == nil && file == nil {
             throw ValidationError("provide a profile name or `-f /path/to/script.d`.")
@@ -165,7 +168,9 @@ struct WatchCommand: ParsableCommand {
             parameters: params,
             withStack: stack.withStack,
             withUstack: stack.withUstack,
-            durationSeconds: duration.durationSeconds
+            durationSeconds: duration.durationSeconds,
+            bufsize: dtrace.bufsize,
+            switchrate: dtrace.switchrate
         )
 
         do {

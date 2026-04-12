@@ -12,7 +12,7 @@ import FoundationNetworking
 
 // MARK: - OTLPHTTPJSONExporter
 
-/// OTLP/HTTP+JSON exporter (Phase 3). Batches probe events as
+/// OTLP/HTTP+JSON exporter (Phase 3 + 3.5). Batches probe events as
 /// OpenTelemetry LogRecords and POSTs them to an OTLP/HTTP collector's
 /// `/v1/logs` endpoint.
 ///
@@ -20,17 +20,19 @@ import FoundationNetworking
 /// to keep the dep count at zero and avoid `JSONEncoder` reflection
 /// overhead on the flush path.
 ///
-/// **Batching**: count-based, default 200 events per flush. At high
-/// probe rates (sched-on-cpu) that's <10ms of accumulation; at low
-/// rates events sit until `shutdown()` flushes the final batch.
+/// **Batching**: count-based (default 200) plus a time-based flush
+/// timer (default 500 ms). At high probe rates the count threshold
+/// triggers first; at low rates the timer ensures events don't sit
+/// until shutdown.
 ///
-/// **HTTP**: synchronous `URLSession.dataTask` gated by a semaphore.
-/// `emit()` is called from the structured-backend reader thread which
-/// is already on `DispatchQueue.global`, so blocking briefly on flush
-/// is acceptable — the pipe has a 16MB buffer and drops are tolerated.
+/// **Async sender**: `emit()` is called from the structured-backend
+/// reader thread. When a batch is full, the records are handed off
+/// to a dedicated serial `DispatchQueue` that builds the JSON envelope
+/// and POSTs synchronously. This decouples HTTP latency from the
+/// reader thread so the pipe never stalls waiting on the network.
 ///
 /// `@unchecked Sendable`: mutable `batch` array is protected by
-/// `lock`; `URLSession` is thread-safe.
+/// `lock`; `URLSession` and the sender queue are thread-safe.
 final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     static let formatName = "otel"
@@ -39,29 +41,53 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private let resource: ResourceAttributes
     private let profileName: String
     private let batchSize: Int
+    private let flushInterval: Double   // seconds; 0 = no timer
     private let lock = NSLock()
     private var batch: [LogRecord] = []
     private let session: URLSession
+
+    /// Dedicated serial queue for HTTP POSTs. Batches are dispatched
+    /// here from `emit()` so the reader thread returns immediately.
+    private let senderQueue = DispatchQueue(
+        label: "dtlm.otlp.sender",
+        qos: .utility
+    )
+
+    /// Timer that flushes the current batch periodically, ensuring
+    /// low-rate profiles don't hold events until shutdown.
+    private var flushTimer: DispatchSourceTimer?
 
     init(
         endpoint: URL,
         profileName: String,
         resource: ResourceAttributes,
         batchSize: Int = 200,
+        flushInterval: Double = 0.5,
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
         self.profileName = profileName
         self.resource = resource
         self.batchSize = batchSize
+        self.flushInterval = flushInterval
         // Allow injecting a custom session for testing; default is
         // an ephemeral session (no disk cache, no cookies).
         self.session = session ?? URLSession(configuration: .ephemeral)
     }
 
     func start() throws {
-        // No-op. We could do a connectivity check here but the plan
-        // defers retry/backoff to Phase 3.5.
+        guard flushInterval > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: senderQueue)
+        let interval = UInt64(flushInterval * 1_000_000_000)
+        timer.schedule(
+            deadline: .now() + flushInterval,
+            repeating: .nanoseconds(Int(interval))
+        )
+        timer.setEventHandler { [weak self] in
+            self?.timerFlush()
+        }
+        timer.resume()
+        flushTimer = timer
     }
 
     func emit(event: ProbeEvent) throws {
@@ -78,17 +104,24 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         lock.lock()
         batch.append(record)
         let shouldFlush = batch.count >= batchSize
+        let pending: [LogRecord]?
+        if shouldFlush {
+            pending = batch
+            batch = []
+        } else {
+            pending = nil
+        }
         lock.unlock()
 
-        if shouldFlush {
-            try flush()
+        if let pending {
+            asyncPost(pending)
         }
     }
 
     func emit(snapshot: AggregationSnapshot) throws {
         // No-op for Phase 3. Aggregation data still flows through the
         // pipe as text lines and becomes LogRecords via emit(event:).
-        // Typed metric mapping is Phase 3.5.
+        // Typed metric mapping is Phase 4.
     }
 
     func flush() throws {
@@ -98,10 +131,15 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         lock.unlock()
 
         guard !pending.isEmpty else { return }
+        // Synchronous flush — used by shutdown() to drain before exit.
         postBatch(pending)
     }
 
     func shutdown() throws {
+        flushTimer?.cancel()
+        flushTimer = nil
+        // Drain any in-flight async POSTs, then flush remaining batch.
+        senderQueue.sync { }
         try flush()
         session.invalidateAndCancel()
     }
@@ -195,8 +233,30 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         return json
     }
 
+    /// Dispatch a batch to the sender queue for async POST.
+    /// Called from `emit()` on the reader thread — returns immediately.
+    private func asyncPost(_ records: [LogRecord]) {
+        senderQueue.async { [self] in
+            postBatch(records)
+        }
+    }
+
+    /// Timer callback: drain the current batch if non-empty. Runs on
+    /// the sender queue so it serializes naturally with async POSTs.
+    private func timerFlush() {
+        lock.lock()
+        let pending = batch
+        batch = []
+        lock.unlock()
+
+        guard !pending.isEmpty else { return }
+        postBatch(pending)
+    }
+
     /// POST a batch of records to the collector's /v1/logs endpoint.
-    /// Errors are logged to stderr, not fatal.
+    /// Synchronous — called on the sender queue (async path) or the
+    /// calling thread (shutdown path). Errors are logged to stderr,
+    /// not fatal.
     private func postBatch(_ records: [LogRecord]) {
         let body = buildEnvelope(records)
         guard let bodyData = body.data(using: .utf8) else { return }

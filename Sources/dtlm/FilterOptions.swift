@@ -233,6 +233,44 @@ struct FormatOption: ParsableArguments {
     var format: OutputFormat = .text
 }
 
+// MARK: - DTraceOptions
+
+/// CLI flags for DTrace performance tuning. These override the
+/// defaults in WatchRunner for operators who need more headroom
+/// at high probe rates or tighter latency at low rates.
+struct DTraceOptions: ParsableArguments {
+
+    @Option(
+        name: .customLong("bufsize"),
+        help: ArgumentHelp(
+            "Per-CPU trace buffer size (e.g. 4m, 32m, 128m).",
+            discussion: """
+                Larger buffers reduce kernel drops at high probe rates \
+                (sched-on-cpu, sched-enqueue) at the cost of memory. \
+                The kernel maximum is set by kern.dtrace.bufsize_max \
+                (default 128m). dtlm defaults to 4m for text output \
+                and 16m for structured output (json/otel).
+                """
+        )
+    )
+    var bufsize: String?
+
+    @Option(
+        name: .customLong("switchrate"),
+        help: ArgumentHelp(
+            "Buffer switch rate (e.g. 50ms, 10ms, 1hz).",
+            discussion: """
+                Controls how often the kernel swaps trace buffers so \
+                dtlm can read them. Lower values drain faster (fewer \
+                drops) but cost more user/kernel transitions. Also \
+                sets the maximum latency between an in-script exit(0) \
+                and dtlm noticing. Default: 50ms.
+                """
+        )
+    )
+    var switchrate: String?
+}
+
 // MARK: - OTelOptions
 
 /// CLI flags for the OTLP/HTTP exporter. Only meaningful when

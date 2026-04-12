@@ -55,6 +55,8 @@ struct WatchRunner {
     let withStack: Bool
     let withUstack: Bool
     let durationSeconds: Double?
+    let bufsize: String?
+    let switchrate: String?
 
     /// Render the profile, hand it to libdtrace, run it, and stream
     /// output through the exporter.
@@ -93,9 +95,9 @@ struct WatchRunner {
         //                       responsive — a profile with
         //                       --duration 0.1 should take ~150ms,
         //                       not ~1.1s.
-        try handle.setBufferSize("4m")
+        try handle.setBufferSize(bufsize ?? "4m")
         try handle.setAggregationBufferSize("4m")
-        try handle.setSwitchRate("50ms")
+        try handle.setSwitchRate(switchrate ?? "50ms")
 
         // Quiet mode: suppress libdtrace's default banner. The
         // script's printfs still come through the buffered-output
@@ -250,7 +252,12 @@ struct WatchRunner {
         // consumer more headroom before kernel drops start happening.
         // Text mode keeps the dtrace(1) default of 4m because TTY
         // writes are fast enough to drain at line rate.
-        try handle.setBufferSize("16m")
+        //
+        // If the operator passed --bufsize, that already took effect
+        // in run() — only override to 16m if they didn't specify one.
+        if bufsize == nil {
+            try handle.setBufferSize("16m")
+        }
 
         // Register a drop handler that LOGS the drop but returns
         // .continue so libdtrace doesn't abort the session. This

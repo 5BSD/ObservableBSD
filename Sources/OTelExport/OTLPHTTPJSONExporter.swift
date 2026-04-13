@@ -502,13 +502,22 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
                 json += ",\"asInt\":\"\(v)\""
             }
             json += ",\"attributes\":["
-            json += dp.keys.enumerated().map { i, k in
-                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
-            }.joined(separator: ",")
+            json += Self.buildDimensionAttributes(dp)
             json += "]}"
             parts.append(json)
         }
         return parts.joined(separator: ",")
+    }
+
+    private static func buildDimensionAttributes(_ dp: DataPoint) -> String {
+        if !dp.attributes.isEmpty {
+            return dp.attributes.map { attr in
+                "{\"key\":\"\(escapeJSON(attr.name))\",\"value\":{\"stringValue\":\"\(escapeJSON(attr.value))\"}}"
+            }.joined(separator: ",")
+        }
+        return dp.keys.enumerated().map { i, k in
+            "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
+        }.joined(separator: ",")
     }
 
     private func buildHistogramDataPoints(_ snapshot: AggregationSnapshot, timeNano: UInt64) -> String {
@@ -535,9 +544,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             json += "]"
 
             json += ",\"attributes\":["
-            json += dp.keys.enumerated().map { i, k in
-                "{\"key\":\"key.\(i)\",\"value\":{\"stringValue\":\"\(escapeJSON(k))\"}}"
-            }.joined(separator: ",")
+            json += Self.buildDimensionAttributes(dp)
             json += "]}"
             parts.append(json)
         }

@@ -140,12 +140,25 @@ public enum AggregationKind: String, Sendable {
 /// One data point in an aggregation snapshot. The `keys` are the
 /// tuple key dimensions; the `value` is the bucket / scalar /
 /// histogram payload.
+///
+/// Use `attributes` for named key-value pairs (e.g. `cpu_id=3`).
+/// If `attributes` is non-empty, it takes precedence over `keys`
+/// in OTLP output. `keys` are emitted as `key.0`, `key.1`, etc.
+/// and exist for DTrace aggregation tuples where names aren't known.
 public struct DataPoint: Sendable {
     public let keys: [String]
+    public let attributes: [(name: String, value: String)]
     public let value: AggregationValue
 
     public init(keys: [String], value: AggregationValue) {
         self.keys = keys
+        self.attributes = []
+        self.value = value
+    }
+
+    public init(attributes: [(name: String, value: String)], value: AggregationValue) {
+        self.keys = attributes.map(\.value)
+        self.attributes = attributes
         self.value = value
     }
 }

@@ -68,6 +68,10 @@ struct WatchRunner {
             durationSeconds: durationSeconds
         )
 
+        // Parse aggregation key names from the source so OTLP
+        // datapoints get semantic attribute names instead of key.0.
+        let aggKeyNames = Self.parseAggregationKeyNames(from: rendered)
+
         let handle: DTraceHandle = try DTraceHandle.open()
         defer { try? handle.stop() }
 
@@ -108,7 +112,7 @@ struct WatchRunner {
         case .text:
             try runTextBackend(handle: handle, stopFlag: stopFlag)
         case .structured:
-            try runStructuredBackend(handle: handle, stopFlag: stopFlag)
+            try runStructuredBackend(handle: handle, stopFlag: stopFlag, aggKeyNames: aggKeyNames)
         }
 
         try exporter.flush()
@@ -201,7 +205,7 @@ struct WatchRunner {
     /// Probe metadata (probeName, pid, execname) is not available;
     /// those fields are zeroed in the ProbeEvent. The actual values
     /// are embedded in the printf body string.
-    private func runStructuredBackend(handle: borrowing DTraceHandle, stopFlag: StopFlag) throws {
+    private func runStructuredBackend(handle: borrowing DTraceHandle, stopFlag: StopFlag, aggKeyNames: [String: [String]]) throws {
         // 16m per-CPU buffer gives headroom before kernel drops
         // at high probe rates on many CPUs.
         //
@@ -383,6 +387,14 @@ struct WatchRunner {
                 let kind = mapAction(record.action)
                 let key = "\(record.name):\(kind.rawValue)"
 
+                // Build named attributes from parsed key names,
+                // falling back to positional key.N for unknowns.
+                let names = aggKeyNames[record.name]
+                let attrs: [(name: String, value: String)] = record.keys.enumerated().map { i, v in
+                    let name = (names != nil && i < names!.count) ? names![i] : "key.\(i)"
+                    return (name, v)
+                }
+
                 let dataPoint: DataPoint
                 switch record.action {
                 case .quantize, .lquantize, .llquantize:
@@ -390,12 +402,12 @@ struct WatchRunner {
                         HistogramBucket(upperBound: $0.upperBound, count: $0.count)
                     }
                     dataPoint = DataPoint(
-                        keys: record.keys,
+                        attributes: attrs,
                         value: .histogram(buckets: buckets)
                     )
                 default:
                     dataPoint = DataPoint(
-                        keys: record.keys,
+                        attributes: attrs,
                         value: .scalar(record.value)
                     )
                 }
@@ -471,6 +483,51 @@ struct WatchRunner {
 
         // Fallback: treat as symbol name
         return StackFrame(address: 0, symbol: s)
+    }
+
+    /// Parse aggregation key names from the rendered D source.
+    ///
+    /// Scans for `@name[expr1, expr2, ...]` patterns and extracts
+    /// the key expressions as dimension names. DTrace builtins like
+    /// `execname`, `pid`, `probefunc` become attribute names directly.
+    /// String literals like `"malloc"` become `label`. Complex
+    /// expressions become `key.N` as a fallback.
+    static func parseAggregationKeyNames(from source: String) -> [String: [String]] {
+        var result: [String: [String]] = [:]
+        let pattern = #"@(\w+)\[([^\]]+)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return result
+        }
+        let nsRange = NSRange(source.startIndex..<source.endIndex, in: source)
+        for match in regex.matches(in: source, range: nsRange) {
+            guard let nameRange = Range(match.range(at: 1), in: source),
+                  let keysRange = Range(match.range(at: 2), in: source)
+            else { continue }
+            let name = String(source[nameRange])
+            if result[name] != nil { continue } // first occurrence wins
+            let rawKeys = source[keysRange].split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            let names = rawKeys.enumerated().map { i, expr -> String in
+                // Known DTrace builtins map to semantic names.
+                switch expr {
+                case "execname": return "execname"
+                case "pid": return "pid"
+                case "tid": return "tid"
+                case "cpu": return "cpu"
+                case "probefunc": return "syscall"
+                case "probename": return "probe"
+                case "probemod": return "module"
+                case "probeprov": return "provider"
+                default:
+                    // String literals → "label", complex → "key.N"
+                    if expr.hasPrefix("\"") { return "label" }
+                    return "key.\(i)"
+                }
+            }
+            result[name] = names
+        }
+        return result
     }
 
     /// Parse execname and pid from the printf body.

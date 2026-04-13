@@ -221,7 +221,7 @@ struct WatchCommand: ParsableCommand {
                     aggregationName: sample.domain.rawValue + "_milliwatts",
                     kind: .avg,
                     dataPoints: [DataPoint(
-                        keys: [sample.domain.rawValue],
+                        attributes: [("rapl_domain", sample.domain.rawValue)],
                         value: .scalar(Int64(sample.watts * 1000))
                     )]
                 ))
@@ -238,7 +238,7 @@ struct WatchCommand: ParsableCommand {
                         timestamp: now, profileName: "cpu",
                         aggregationName: "temp",
                         kind: .avg,
-                        dataPoints: [DataPoint(keys: [cpuKey], value: .scalar(Int64(temp)))]
+                        dataPoints: [DataPoint(attributes: [("cpu_id", cpuKey)], value: .scalar(Int64(temp)))]
                     ))
                 }
 
@@ -247,7 +247,7 @@ struct WatchCommand: ParsableCommand {
                         timestamp: now, profileName: "cpu",
                         aggregationName: "freq_mhz",
                         kind: .avg,
-                        dataPoints: [DataPoint(keys: [cpuKey], value: .scalar(Int64(freq)))]
+                        dataPoints: [DataPoint(attributes: [("cpu_id", cpuKey)], value: .scalar(Int64(freq)))]
                     ))
                 }
 
@@ -257,7 +257,7 @@ struct WatchCommand: ParsableCommand {
                             timestamp: now, profileName: "cpu",
                             aggregationName: "cstate_\(level.name.lowercased())_pct",
                             kind: .avg,
-                            dataPoints: [DataPoint(keys: [cpuKey], value: .scalar(Int64(residency.percentages[i])))]
+                            dataPoints: [DataPoint(attributes: [("cpu_id", cpuKey)], value: .scalar(Int64(residency.percentages[i])))]
                         ))
                     }
                 }
@@ -268,21 +268,21 @@ struct WatchCommand: ParsableCommand {
                 try exporter.emit(snapshot: AggregationSnapshot(
                     timestamp: now, profileName: "system",
                     aggregationName: "cpu_temp_max", kind: .max,
-                    dataPoints: [DataPoint(keys: ["cpu"], value: .scalar(Int64(maxTemp)))]
+                    dataPoints: [DataPoint(attributes: [("source", "cpu")], value: .scalar(Int64(maxTemp)))]
                 ))
             }
             if let maxFreq = sys.maxFreq {
                 try exporter.emit(snapshot: AggregationSnapshot(
                     timestamp: now, profileName: "system",
                     aggregationName: "cpu_freq_max_mhz", kind: .max,
-                    dataPoints: [DataPoint(keys: ["cpu"], value: .scalar(Int64(maxFreq)))]
+                    dataPoints: [DataPoint(attributes: [("source", "cpu")], value: .scalar(Int64(maxFreq)))]
                 ))
             }
             if let gpuFreq = sys.gpuFreqMHz {
                 try exporter.emit(snapshot: AggregationSnapshot(
                     timestamp: now, profileName: "system",
                     aggregationName: "gpu_freq_mhz", kind: .avg,
-                    dataPoints: [DataPoint(keys: ["gpu"], value: .scalar(Int64(gpuFreq)))]
+                    dataPoints: [DataPoint(attributes: [("source", "gpu")], value: .scalar(Int64(gpuFreq)))]
                 ))
             }
         }

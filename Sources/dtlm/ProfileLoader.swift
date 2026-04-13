@@ -225,4 +225,37 @@ extension ProfileLoader {
             origin: .explicit
         )
     }
+
+    /// Resolve a profile from either a file path or a catalog name.
+    /// Shared by `watch` and `generate` commands.
+    static func resolve(
+        name: String?,
+        file: String?
+    ) throws -> Profile {
+        if let file {
+            return try loadExplicit(path: file)
+        } else if let name {
+            let loader = ProfileLoader()
+            for warning in loader.shadowingWarnings {
+                FileHandle.standardError.write(Data((warning + "\n").utf8))
+            }
+            guard let resolved = loader.lookup(name) else {
+                throw ProfileError.unknownProfile(name)
+            }
+            return resolved
+        } else {
+            throw ProfileError.unknownProfile("<none>")
+        }
+    }
+
+    /// Parse `--param key=value` arguments into a dictionary.
+    static func parseParams(_ paramArgs: [String]) -> [String: String] {
+        var params: [String: String] = [:]
+        for raw in paramArgs {
+            let parts = raw.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            params[String(parts[0])] = String(parts[1])
+        }
+        return params
+    }
 }

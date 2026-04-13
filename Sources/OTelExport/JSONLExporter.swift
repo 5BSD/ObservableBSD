@@ -48,13 +48,13 @@ public final class JSONLExporter: Exporter, @unchecked Sendable {
 
         if let stack = event.stack, !stack.isEmpty {
             line += ",\"stack\":["
-            line += stack.map { "\"\(escapeJSON(formatFrame($0)))\"" }
+            line += stack.map { "\"\(escapeJSON($0.formatted))\"" }
                 .joined(separator: ",")
             line += "]"
         }
         if let ustack = event.ustack, !ustack.isEmpty {
             line += ",\"ustack\":["
-            line += ustack.map { "\"\(escapeJSON(formatFrame($0)))\"" }
+            line += ustack.map { "\"\(escapeJSON($0.formatted))\"" }
                 .joined(separator: ",")
             line += "]"
         }
@@ -76,6 +76,4 @@ public final class JSONLExporter: Exporter, @unchecked Sendable {
         guard let data = line.data(using: .utf8) else { return }
         output.write(data)
     }
-
-    private func formatFrame(_ frame: StackFrame) -> String { frame.formatted }
 }

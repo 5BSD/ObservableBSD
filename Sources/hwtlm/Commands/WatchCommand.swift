@@ -9,7 +9,12 @@ import Foundation
 import Glibc
 import OTelExport
 
-private nonisolated(unsafe) var signalReceived = false
+private final class StopFlag: @unchecked Sendable {
+    private var _stopped = false
+    var isSet: Bool { _stopped }
+    func set() { _stopped = true }
+}
+private nonisolated(unsafe) var globalStopFlag: StopFlag?
 
 // MARK: - hwtlm watch
 
@@ -64,9 +69,14 @@ struct WatchCommand: ParsableCommand {
         if let duration { count = max(1, Int(duration / interval)) }
         else { count = nil }
 
-        signalReceived = false
-        signal(SIGINT) { _ in signalReceived = true }
-        signal(SIGTERM) { _ in signalReceived = true }
+        let stopFlag = StopFlag()
+        globalStopFlag = stopFlag
+        var sa = sigaction()
+        sa.__sigaction_u.__sa_handler = { _ in globalStopFlag?.set() }
+        sigemptyset(&sa.sa_mask)
+        sa.sa_flags = 0
+        sigaction(SIGINT, &sa, nil)
+        sigaction(SIGTERM, &sa, nil)
 
         // OTLP exporter
         let otelExporter: OTLPHTTPJSONExporter?
@@ -95,7 +105,7 @@ struct WatchCommand: ParsableCommand {
             try exporter.start()
             otelExporter = exporter
             FileHandle.standardError.write(Data(
-                "Exporting to \(endpoint)/v1/metrics\n".utf8
+                "Exporting to \(endpointStr)/v1/metrics\n".utf8
             ))
         } else {
             otelExporter = nil
@@ -125,7 +135,7 @@ struct WatchCommand: ParsableCommand {
         if let rapl {
             do {
                 try rapl.run(count: count, intervalSeconds: interval) { snapshot in
-                    guard !signalReceived else { throw ExitCode.success }
+                    guard !stopFlag.isSet else { throw ExitCode.success }
                     let sys = SysctlReader.snapshot(cpuCount: cpuCount)
                     try emitSample(rapl: snapshot, sys: sys, otel: otelExporter)
                 }
@@ -141,7 +151,7 @@ struct WatchCommand: ParsableCommand {
             do {
                 while count == nil || taken < count! {
                     usleep(intervalMicros)
-                    guard !signalReceived else { throw ExitCode.success }
+                    guard !stopFlag.isSet else { throw ExitCode.success }
                     let sys = SysctlReader.snapshot(cpuCount: cpuCount)
                     try emitSample(rapl: nil, sys: sys, otel: otelExporter)
                     taken += 1
@@ -166,7 +176,8 @@ struct WatchCommand: ParsableCommand {
     ) throws {
         switch format {
         case .otel:
-            try emitOTLP(rapl: rapl, sys: sys, exporter: otel!)
+            guard let exporter = otel else { return }
+            try emitOTLP(rapl: rapl, sys: sys, exporter: exporter)
         case .json:
             if perCore {
                 print(HWFormatter.perCoreJsonLine(rapl: rapl, sys: sys))

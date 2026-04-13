@@ -98,7 +98,7 @@ public final class CollapsedStackExporter: Exporter, @unchecked Sendable {
         // bottom-up (root first).
         if let kstack = event.stack, !kstack.isEmpty {
             for frame in kstack.reversed() {
-                parts.append(formatFrame(frame))
+                parts.append(frame.formatted)
             }
         }
 
@@ -110,12 +110,10 @@ public final class CollapsedStackExporter: Exporter, @unchecked Sendable {
         // User stack (top).
         if let ustack = event.ustack, !ustack.isEmpty {
             for frame in ustack.reversed() {
-                parts.append(formatFrame(frame))
+                parts.append(frame.formatted)
             }
         }
 
         return parts.joined(separator: ";")
     }
-
-    private func formatFrame(_ frame: StackFrame) -> String { frame.formatted }
 }

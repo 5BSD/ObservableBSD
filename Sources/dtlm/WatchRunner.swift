@@ -7,6 +7,7 @@
 import Foundation
 import DTraceCore
 import Glibc
+import OTelExport
 
 // MARK: - WatchRunner
 
@@ -311,6 +312,9 @@ struct WatchRunner {
 
                 // Stack frames from DTrace start with whitespace and
                 // typically contain ` (backtick) or 0x (hex address).
+                // This heuristic can misclassify a printf line that
+                // starts with whitespace and contains a backtick, but
+                // in practice DTrace printf output never does.
                 let isStackFrame = raw.first?.isWhitespace == true
                     && (trimmed.contains("`") || trimmed.hasPrefix("0x"))
 

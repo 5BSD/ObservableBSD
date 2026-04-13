@@ -30,17 +30,18 @@ public final class TextExporter: Exporter {
     public func start() throws {}
 
     public func emit(event: ProbeEvent) throws {
-        let body = event.printfBody ?? event.probeName
-        var line = "\(event.execname)[\(event.pid)]: \(body)\n"
+        let body = event.printfBody ?? ""
+        guard !body.isEmpty else { return }
+        var line = body + "\n"
 
         if let stack = event.stack, !stack.isEmpty {
             for frame in stack {
-                line += "    [k] \(formatFrame(frame))\n"
+                line += "    [k] \(frame.formatted)\n"
             }
         }
         if let ustack = event.ustack, !ustack.isEmpty {
             for frame in ustack {
-                line += "    [u] \(formatFrame(frame))\n"
+                line += "    [u] \(frame.formatted)\n"
             }
         }
 
@@ -80,5 +81,4 @@ public final class TextExporter: Exporter {
         output.write(data)
     }
 
-    private func formatFrame(_ frame: StackFrame) -> String { frame.formatted }
 }

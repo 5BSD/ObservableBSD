@@ -83,15 +83,14 @@ struct ProbesCommand: ParsableCommand {
         // so its USDT providers stay loaded into the libdtrace
         // handle. Use a Holder so the ~Copyable proc handle outlives
         // its enclosing scope.
+        let listingPattern = provider.map { "\($0):::" }
         let probes: [DTraceProbeDescription]
         do {
             if let pid {
                 let proc = try handle.grabProcess(pid: pid)
-                let listingPattern = provider.map { "\($0):::" }
                 probes = try handle.listProbes(matching: listingPattern)
                 _ = consume proc   // explicit lifetime extension
             } else {
-                let listingPattern = provider.map { "\($0):::" }
                 probes = try handle.listProbes(matching: listingPattern)
             }
         } catch {

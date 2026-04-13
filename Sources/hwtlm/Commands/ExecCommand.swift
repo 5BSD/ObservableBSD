@@ -72,7 +72,7 @@ struct ExecCommand: ParsableCommand {
         if let rapl, let before = beforeCounters, let after = afterCounters {
             for domain in rapl.domains {
                 guard let b = before[domain], let a = after[domain] else { continue }
-                let delta: UInt64 = a >= b ? a - b : (0x1_0000_0000 - b) + a
+                let delta = raplCounterDelta(a, b)
                 let joules = rapl.units.joules(rawDelta: delta, domain: domain)
                 let watts = elapsed > 0 ? joules / elapsed : 0
                 powerResults.append((domain: domain, joules: joules, watts: watts))
@@ -162,13 +162,13 @@ struct ExecCommand: ParsableCommand {
         // Power table
         if !power.isEmpty {
             let nameWidth = max(10, power.map(\.domain.rawValue.count).max() ?? 10)
-            let header = "\(pad("DOMAIN", nameWidth))  \(pad("ENERGY (J)", 12))  \(pad("AVG POWER (W)", 14))"
+            let header = "\(HWFormatter.pad("DOMAIN", nameWidth))  \(HWFormatter.pad("ENERGY (J)", 12))  \(HWFormatter.pad("AVG POWER (W)", 14))"
             print(header)
             print(String(repeating: "─", count: header.count))
 
             var totalJoules = 0.0
             for r in power {
-                print("\(pad(r.domain.rawValue, nameWidth))  \(String(format: "%10.3f", r.joules))  \(String(format: "%12.3f", r.watts))")
+                print("\(HWFormatter.pad(r.domain.rawValue, nameWidth))  \(String(format: "%10.3f", r.joules))  \(String(format: "%12.3f", r.watts))")
                 if r.domain == .package { totalJoules = r.joules }
             }
             print()
@@ -227,8 +227,4 @@ struct ExecCommand: ParsableCommand {
         print("{" + parts.joined(separator: ",") + "}")
     }
 
-    private func pad(_ s: String, _ width: Int) -> String {
-        if s.count >= width { return s }
-        return s + String(repeating: " ", count: width - s.count)
-    }
 }

@@ -540,7 +540,4 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         return parts.joined(separator: ",")
     }
 
-    private final class ErrorBox: @unchecked Sendable {
-        var value: String?
-    }
 }

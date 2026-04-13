@@ -59,10 +59,10 @@ struct ListCommand: ParsableCommand {
             print()
             print("RAPL domains:")
             let nameWidth = max(10, rapl.domains.map(\.rawValue.count).max() ?? 10)
-            print("  \(pad("DOMAIN", nameWidth))  DESCRIPTION")
+            print("  \(HWFormatter.pad("DOMAIN", nameWidth))  DESCRIPTION")
             print("  " + String(repeating: "─", count: nameWidth + 2 + 30))
             for domain in rapl.domains {
-                print("  \(pad(domain.rawValue, nameWidth))  \(domain.label)")
+                print("  \(HWFormatter.pad(domain.rawValue, nameWidth))  \(domain.label)")
             }
             print()
         } else {
@@ -123,17 +123,17 @@ struct ListCommand: ParsableCommand {
                 print()
                 print("Per-core C-state residency:")
                 let names = firstCS.supported.map(\.name)
-                var header = "  " + pad("CPU", 4)
-                for n in names { header += "  " + pad(n + "%", 7) }
+                var header = "  " + HWFormatter.pad("CPU", 4)
+                for n in names { header += "  " + HWFormatter.pad(n + "%", 7) }
                 print(header)
                 for core in sys.cores {
                     if let cstate = core.cstate, let residency = cstate.residency {
-                        var line = "  " + pad(String(format: "%3d", core.cpu), 4)
+                        var line = "  " + HWFormatter.pad(String(format: "%3d", core.cpu), 4)
                         for (i, _) in names.enumerated() {
                             if i < residency.percentages.count {
-                                line += "  " + pad(String(format: "%5.1f", residency.percentages[i]), 7)
+                                line += "  " + HWFormatter.pad(String(format: "%5.1f", residency.percentages[i]), 7)
                             } else {
-                                line += "  " + pad("   --", 7)
+                                line += "  " + HWFormatter.pad("   --", 7)
                             }
                         }
                         print(line)
@@ -219,8 +219,4 @@ struct ListCommand: ParsableCommand {
         print("{" + parts.joined(separator: ",") + "}")
     }
 
-    private func pad(_ s: String, _ width: Int) -> String {
-        if s.count >= width { return s }
-        return s + String(repeating: " ", count: width - s.count)
-    }
 }

@@ -12,6 +12,11 @@ import Glibc
 
 // MARK: - Sample types
 
+/// 32-bit RAPL counter delta with rollover handling.
+func raplCounterDelta(_ cur: UInt64, _ prev: UInt64) -> UInt64 {
+    cur >= prev ? cur - prev : (0x1_0000_0000 - prev) + cur
+}
+
 /// One power reading for a single domain at a single point in time.
 struct RAPLSample: Sendable {
     let cpu: Int
@@ -93,12 +98,7 @@ final class RAPLSampler {
             guard let cur = counters[domain],
                   let prev = previous[domain] else { continue }
 
-            let delta: UInt64
-            if cur >= prev {
-                delta = cur - prev
-            } else {
-                delta = (0x1_0000_0000 - prev) + cur
-            }
+            let delta = raplCounterDelta(cur, prev)
 
             let joules = units.joules(rawDelta: delta, domain: domain)
 

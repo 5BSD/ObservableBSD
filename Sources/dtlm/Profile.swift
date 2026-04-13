@@ -184,8 +184,6 @@ enum ProfileOrigin: Int, Sendable, Comparable {
 enum ProfileError: Error, CustomStringConvertible {
     /// The profile's source contains `${name}` but no value was supplied.
     case missingParameter(name: String, profile: String)
-    /// The filename (without `.d`) doesn't match the profile name field.
-    case nameMismatch(filename: String, declared: String)
     /// The file couldn't be read.
     case readFailed(path: String, underlying: Error)
     /// The user asked for a profile name dtlm doesn't have.
@@ -195,8 +193,6 @@ enum ProfileError: Error, CustomStringConvertible {
         switch self {
         case .missingParameter(let name, let profile):
             return "profile '\(profile)' requires --param \(name)=<value>"
-        case .nameMismatch(let filename, let declared):
-            return "profile filename '\(filename)' doesn't match declared name '\(declared)'"
         case .readFailed(let path, let underlying):
             return "failed to read profile at \(path): \(underlying)"
         case .unknownProfile(let name):

@@ -201,7 +201,7 @@ enum HWFormatter {
 
     // MARK: - Helpers
 
-    private static func pad(_ s: String, _ width: Int) -> String {
+    static func pad(_ s: String, _ width: Int) -> String {
         if s.count >= width { return s }
         return s + String(repeating: " ", count: width - s.count)
     }

@@ -70,27 +70,16 @@ struct GenerateCommand: ParsableCommand {
 
     func run() throws {
         let profileToRender: Profile
-        if let file {
-            do {
-                profileToRender = try ProfileLoader.loadExplicit(path: file)
-            } catch {
-                throw ValidationError("\(error)")
-            }
-        } else if let name = profile {
-            let loader = ProfileLoader()
-            guard let resolved = loader.lookup(name) else {
-                throw ValidationError("unknown profile '\(name)'. Try `dtlm list`.")
-            }
-            profileToRender = resolved
-        } else {
-            throw ValidationError("internal: no profile resolved")
+        do {
+            profileToRender = try ProfileLoader.resolve(name: profile, file: file)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "dtlm generate: \(error)\n".utf8
+            ))
+            throw ExitCode.failure
         }
 
-        var params: [String: String] = [:]
-        for raw in paramArgs {
-            let parts = raw.split(separator: "=", maxSplits: 1)
-            params[String(parts[0])] = String(parts[1])
-        }
+        let params = ProfileLoader.parseParams(paramArgs)
 
         let rendered = try profileToRender.render(
             parameters: params,

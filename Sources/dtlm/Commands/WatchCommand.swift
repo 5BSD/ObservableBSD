@@ -7,6 +7,7 @@
 import ArgumentParser
 import Foundation
 import Glibc
+import OTelExport
 
 // MARK: - dtlm watch
 
@@ -90,37 +91,17 @@ struct WatchCommand: ParsableCommand {
     }
 
     func run() throws {
-        // Resolve the profile from either the registry or an
-        // explicit -f path.
         let profileToRun: Profile
-        if let file {
-            do {
-                profileToRun = try ProfileLoader.loadExplicit(path: file)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "dtlm watch: \(error)\n".utf8
-                ))
-                throw ExitCode.failure
-            }
-        } else if let name = profile {
-            let loader = ProfileLoader()
-            for warning in loader.shadowingWarnings {
-                FileHandle.standardError.write(Data((warning + "\n").utf8))
-            }
-            guard let resolved = loader.lookup(name) else {
-                throw ValidationError("unknown profile '\(name)'. Try `dtlm list`.")
-            }
-            profileToRun = resolved
-        } else {
-            throw ValidationError("internal: no profile resolved")
+        do {
+            profileToRun = try ProfileLoader.resolve(name: profile, file: file)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "dtlm watch: \(error)\n".utf8
+            ))
+            throw ExitCode.failure
         }
 
-        // Build the parameter map from the --param key=value entries.
-        var params: [String: String] = [:]
-        for raw in paramArgs {
-            let parts = raw.split(separator: "=", maxSplits: 1)
-            params[String(parts[0])] = String(parts[1])
-        }
+        let params = ProfileLoader.parseParams(paramArgs)
 
         let otelEnv = OTelEnvironment()
         let resource = ResourceAttributes(

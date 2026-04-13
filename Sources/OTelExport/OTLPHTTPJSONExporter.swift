@@ -46,6 +46,9 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     private var flushTimer: DispatchSourceTimer?
 
+    /// Retryable HTTP status codes per the OTLP spec.
+    private static let retryableStatusCodes: Set<Int> = [429, 502, 503, 504]
+
     public init(
         endpoint: URL,
         scopeName: String? = nil,
@@ -54,6 +57,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         batchSize: Int = 200,
         flushInterval: Double = 0.5,
         maxRetries: Int = 2,
+        exportTimeout: TimeInterval = 10.0,
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
@@ -63,7 +67,9 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         self.batchSize = batchSize
         self.flushInterval = flushInterval
         self.maxRetries = maxRetries
-        self.session = session ?? URLSession(configuration: .ephemeral)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = exportTimeout
+        self.session = session ?? URLSession(configuration: config)
     }
 
     /// Record drops so the next OTLP batch includes a drop attribute.
@@ -181,6 +187,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     private func dateToUnixNano(_ date: Date) -> UInt64 {
         let seconds = date.timeIntervalSince1970
+        guard seconds >= 0 else { return 0 }
         return UInt64(seconds * 1_000_000_000)
     }
 
@@ -201,10 +208,13 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private func resourceAttributesJSON() -> String {
         var attrs: [(String, String)] = [
             ("service.name", resource.serviceName),
+            ("service.version", resource.serviceVersion),
             ("host.name", resource.hostName),
             ("os.type", resource.osName),
             ("os.version", resource.osVersion),
-            ("service.version", resource.serviceVersion),
+            ("telemetry.sdk.name", "observablebsd"),
+            ("telemetry.sdk.language", "swift"),
+            ("telemetry.sdk.version", resource.serviceVersion),
         ]
         if let instanceId = resource.serviceInstanceId {
             attrs.append(("service.instance.id", instanceId))
@@ -220,6 +230,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private func buildRecordJSON(_ record: LogRecord, drops: UInt64 = 0) -> String {
         var json = "{"
         json += "\"timeUnixNano\":\"\(record.timeUnixNano)\","
+        json += "\"observedTimeUnixNano\":\"\(record.timeUnixNano)\","
         json += "\"severityNumber\":\(record.severityNumber),"
         json += "\"body\":{\"stringValue\":\"\(escapeJSON(record.body))\"},"
         json += "\"attributes\":["
@@ -284,6 +295,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         let url = endpoint.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.setValue("OTel-OTLP-Exporter-Swift/\(resource.serviceVersion)", forHTTPHeaderField: "User-Agent")
 
         if let compressed = gzip(data) {
             request.httpBody = compressed
@@ -296,35 +308,68 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
         for attempt in 0...maxRetries {
             if attempt > 0 {
-                let delayMs = 100 * (1 << (attempt - 1))
-                Thread.sleep(forTimeInterval: Double(delayMs) / 1000.0)
+                // Exponential backoff with jitter per OTLP spec.
+                let baseMs = 100.0 * Double(1 << (attempt - 1))
+                let jitter = Double.random(in: 0...(baseMs * 0.5))
+                Thread.sleep(forTimeInterval: (baseMs + jitter) / 1000.0)
             }
 
             let sem = DispatchSemaphore(value: 0)
-            let errorBox = ErrorBox()
+            let resultBox = PostResultBox()
 
             let task = session.dataTask(with: request) { _, response, error in
                 if let error {
-                    errorBox.value = "otlp: POST /\(path) failed: \(error.localizedDescription)"
-                } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                    errorBox.value = "otlp: POST /\(path) returned \(http.statusCode)"
+                    resultBox.error = "otlp: POST /\(path) failed: \(error.localizedDescription)"
+                    resultBox.retryable = true  // connection failure is retryable
+                } else if let http = response as? HTTPURLResponse {
+                    if (200..<300).contains(http.statusCode) {
+                        // Success — check for partial_success in response
+                        // (logged as warning, not an error)
+                    } else {
+                        resultBox.error = "otlp: POST /\(path) returned \(http.statusCode)"
+                        resultBox.retryable = Self.retryableStatusCodes.contains(http.statusCode)
+                        // Honor Retry-After header from 429/503
+                        if let retryAfter = http.value(forHTTPHeaderField: "Retry-After"),
+                           let seconds = Double(retryAfter) {
+                            resultBox.retryAfterSeconds = seconds
+                        }
+                    }
                 }
                 sem.signal()
             }
             task.resume()
             sem.wait()
 
-            if errorBox.value == nil {
+            // Success
+            if resultBox.error == nil { return }
+
+            // Non-retryable error — log and give up immediately
+            if !resultBox.retryable {
+                FileHandle.standardError.write(Data(
+                    ("\(resultBox.error!) (non-retryable)\n").utf8
+                ))
                 return
             }
+
+            // Last retry failed
             if attempt == maxRetries {
-                if let msg = errorBox.value {
-                    FileHandle.standardError.write(Data(
-                        ("\(msg) (after \(maxRetries + 1) attempts)\n").utf8
-                    ))
-                }
+                FileHandle.standardError.write(Data(
+                    ("\(resultBox.error!) (after \(maxRetries + 1) attempts)\n").utf8
+                ))
+                return
+            }
+
+            // If server sent Retry-After, honor it on next attempt
+            if let retryAfter = resultBox.retryAfterSeconds, retryAfter > 0 {
+                Thread.sleep(forTimeInterval: retryAfter)
             }
         }
+    }
+
+    private final class PostResultBox: @unchecked Sendable {
+        var error: String?
+        var retryable: Bool = false
+        var retryAfterSeconds: Double?
     }
 
     private func gzip(_ data: Data) -> Data? {
@@ -436,10 +481,11 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
             let sortedBuckets = buckets.sorted { $0.upperBound < $1.upperBound }
             let totalCount = sortedBuckets.reduce(Int64(0)) { $0 + $1.count }
-            let totalSum = sortedBuckets.reduce(Int64(0)) { $0 + $1.upperBound * $1.count }
 
             json += ",\"count\":\"\(totalCount)\""
-            json += ",\"sum\":\"\(totalSum)\""
+            // Omit sum — DTrace quantize buckets have power-of-2
+            // boundaries, so we can't reconstruct the true sum of
+            // observed values from bucket bounds alone.
 
             json += ",\"explicitBounds\":["
             json += sortedBuckets.dropLast().map { "\($0.upperBound)" }.joined(separator: ",")

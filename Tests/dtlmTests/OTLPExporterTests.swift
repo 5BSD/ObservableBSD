@@ -141,6 +141,9 @@ final class OTLPExporterTests: XCTestCase {
         XCTAssertEqual(lookup["os.type"], "freebsd")
         XCTAssertEqual(lookup["os.version"], "15.0")
         XCTAssertEqual(lookup["service.version"], "0.1.0")
+        XCTAssertEqual(lookup["telemetry.sdk.name"], "observablebsd")
+        XCTAssertEqual(lookup["telemetry.sdk.language"], "swift")
+        XCTAssertNotNil(lookup["telemetry.sdk.version"])
     }
 
     // MARK: - Log record fields
@@ -169,6 +172,7 @@ final class OTLPExporterTests: XCTestCase {
         let lr = logRecords[0]
         // Required OTLP LogRecord fields.
         XCTAssertNotNil(lr["timeUnixNano"], "must have timeUnixNano")
+        XCTAssertNotNil(lr["observedTimeUnixNano"], "must have observedTimeUnixNano per OTLP spec")
         XCTAssertNotNil(lr["severityNumber"], "must have severityNumber")
         XCTAssertNotNil(lr["body"], "must have body")
         XCTAssertNotNil(lr["attributes"], "must have attributes")

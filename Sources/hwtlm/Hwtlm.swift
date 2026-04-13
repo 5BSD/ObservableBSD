@@ -6,6 +6,14 @@
 
 import ArgumentParser
 
+// MARK: - Output format enum
+
+enum HWOutputFormat: String, ExpressibleByArgument, Sendable {
+    case text
+    case json
+    case otel
+}
+
 // MARK: - hwtlm
 
 /// Top-level `hwtlm` command. Routes to subcommands.

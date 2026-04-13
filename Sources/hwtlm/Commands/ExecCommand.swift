@@ -30,7 +30,7 @@ struct ExecCommand: ParsableCommand {
     )
 
     @Option(name: .customLong("format"), help: "Output format: text (default) or json.")
-    var format: String = "text"
+    var format: HWOutputFormat = .text
 
     @Flag(name: .customLong("per-core"), help: "Show per-core temperature deltas.")
     var perCore: Bool = false
@@ -46,9 +46,6 @@ struct ExecCommand: ParsableCommand {
     func validate() throws {
         if args.isEmpty {
             throw ValidationError("provide a command to run after '--'")
-        }
-        if format != "text" && format != "json" {
-            throw ValidationError("--format must be 'text' or 'json'")
         }
     }
 
@@ -82,7 +79,7 @@ struct ExecCommand: ParsableCommand {
             }
         }
 
-        if format == "json" {
+        if format == .json {
             emitJSON(power: powerResults, beforeSys: beforeSys, afterSys: afterSys,
                      elapsed: elapsed, exitCode: exitCode, rapl: rapl)
         } else {
@@ -96,12 +93,20 @@ struct ExecCommand: ParsableCommand {
     // MARK: - Child process
 
     private func runChild(_ args: [String]) -> Int32 {
+        // Build C args array. strdup is only used in the child
+        // (which either execs or _exits), so no leak in parent.
         let pid = fork()
         if pid == 0 {
-            let cArgs = args.map { strdup($0) } + [nil]
-            execvp(cArgs[0], cArgs)
-            perror("hwtlm exec: \(args[0])")
-            _exit(127)
+            // Child process — exec replaces the image, _exit on failure.
+            args[0].withCString { cmd in
+                let cArgs: [UnsafeMutablePointer<CChar>?] = args.map { arg in
+                    arg.withCString { strdup($0) }
+                } + [nil]
+                execvp(cmd, cArgs)
+                perror("hwtlm exec: \(args[0])")
+                _exit(127)
+            }
+            _exit(127) // unreachable, satisfies compiler
         }
         var status: Int32 = 0
         waitpid(pid, &status, 0)

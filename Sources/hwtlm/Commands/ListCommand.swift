@@ -24,23 +24,17 @@ struct ListCommand: ParsableCommand {
     )
 
     @Option(name: .customLong("format"), help: "Output format: text (default) or json.")
-    var format: String = "text"
+    var format: HWOutputFormat = .text
 
     @Flag(name: .customLong("per-core"), help: "Show per-core detail instead of summary.")
     var perCore: Bool = false
-
-    func validate() throws {
-        if format != "text" && format != "json" {
-            throw ValidationError("--format must be 'text' or 'json'")
-        }
-    }
 
     func run() throws {
         let cpuCount = CpuctlReader.detectCPUCount()
         let rapl = RAPLSampler()
         let sys = SysctlReader.snapshot(cpuCount: cpuCount)
 
-        if format == "json" {
+        if format == .json {
             emitJSON(rapl: rapl, sys: sys, cpuCount: cpuCount)
         } else {
             emitText(rapl: rapl, sys: sys, cpuCount: cpuCount)

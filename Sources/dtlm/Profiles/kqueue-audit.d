@@ -18,7 +18,7 @@ syscall::kevent:entry
 /* @dtlm-predicate */
 {
     printf("%s[%d]: kevent fd=%d nchanges=%d nevents=%d\n",
-        execname, pid, arg0, arg1, arg3);
+        execname, pid, arg0, arg2, arg4);
     @kevent_calls[execname] = count();
 }
 

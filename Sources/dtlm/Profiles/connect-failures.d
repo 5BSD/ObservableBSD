@@ -6,7 +6,7 @@
  */
 
 syscall::connect:return
-/arg0 == -1 /* @dtlm-predicate-and *//
+/arg1 == -1 /* @dtlm-predicate-and *//
 {
     printf("%s[%d]: connect failed errno=%d\n", execname, pid, errno);
     @failures[execname, errno] = count();

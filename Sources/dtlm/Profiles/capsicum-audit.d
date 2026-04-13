@@ -36,7 +36,7 @@ syscall::cap_fcntls_limit:entry
 }
 
 syscall::cap_enter:return
-/* @dtlm-predicate */
+/arg1 == 0 /* @dtlm-predicate-and *//
 {
     @cap_enters[execname] = count();
 }

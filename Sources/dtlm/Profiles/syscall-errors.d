@@ -7,7 +7,7 @@
  */
 
 syscall:::return
-/arg0 == -1 /* @dtlm-predicate-and *//
+/arg1 == -1 /* @dtlm-predicate-and *//
 {
     @errors[execname, probefunc, errno] = count();
 }

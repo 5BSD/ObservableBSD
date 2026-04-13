@@ -7,7 +7,7 @@
  */
 
 syscall:::return
-/arg0 == -1 && (errno == 13 || errno == 1) /* @dtlm-predicate-and *//
+/arg1 == -1 && (errno == 13 || errno == 1) /* @dtlm-predicate-and *//
 {
     printf("%s[%d]: %s failed errno=%d (%s)\n",
         execname, pid, probefunc, errno,

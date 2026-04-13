@@ -99,12 +99,21 @@ syscall::truncate:entry
            copyinstr(arg0), arg1);
 }
 
+syscall::chflags:entry,
+syscall::lchflags:entry
+/* @dtlm-predicate */
+{
+    printf("%s[%d]: %s(\"%s\", 0x%x)\n", execname, pid, probefunc,
+           copyinstr(arg0), arg1);
+}
+
 syscall::mkdir:entry, syscall::mkdirat:entry,
 syscall::rmdir:entry,
 syscall::unlink:entry, syscall::unlinkat:entry,
 syscall::rename:entry, syscall::renameat:entry,
 syscall::chmod:entry, syscall::lchmod:entry, syscall::fchmodat:entry,
 syscall::chown:entry, syscall::lchown:entry, syscall::fchownat:entry,
+syscall::chflags:entry, syscall::lchflags:entry,
 syscall::symlink:entry, syscall::link:entry,
 syscall::truncate:entry
 /* @dtlm-predicate */

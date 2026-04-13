@@ -13,7 +13,7 @@ syscall::sendmsg:return,
 syscall::recvmsg:return,
 syscall::send:return,
 syscall::recv:return
-/arg0 == -1 /* @dtlm-predicate-and *//
+/arg1 == -1 /* @dtlm-predicate-and *//
 {
     @errors[execname, probefunc, errno] = count();
 }

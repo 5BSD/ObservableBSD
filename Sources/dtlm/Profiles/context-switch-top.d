@@ -1,27 +1,29 @@
 /*
- * Context switch frequency — aggregate sched transitions by process.
+ * Context switch frequency — off-cpu and preempt counts by process.
  *
- * High voluntary context switches (off-cpu) indicate I/O-bound
- * workloads. High involuntary switches (preempt) indicate CPU
- * contention.
+ * Counts sched:::off-cpu events (thread went off CPU for any
+ * reason — sleep, block, yield, or preemption) and separately
+ * counts sched:::preempt events (involuntary preemption only).
+ * The off-cpu count includes preemptions, so preempt is a
+ * subset of off-cpu.
  */
 
 sched:::off-cpu
 /* @dtlm-predicate */
 {
-    @voluntary[execname] = count();
+    @off_cpu[execname] = count();
 }
 
 sched:::preempt
 /* @dtlm-predicate */
 {
-    @involuntary[execname] = count();
+    @preempt[execname] = count();
 }
 
 dtrace:::END
 {
-    printf("\n--- Voluntary context switches (off-cpu) by process ---\n");
-    printa("%-30s %@d\n", @voluntary);
-    printf("\n--- Involuntary context switches (preempt) by process ---\n");
-    printa("%-30s %@d\n", @involuntary);
+    printf("\n--- Off-CPU events (all reasons) by process ---\n");
+    printa("%-30s %@d\n", @off_cpu);
+    printf("\n--- Preemption events (involuntary only) by process ---\n");
+    printa("%-30s %@d\n", @preempt);
 }

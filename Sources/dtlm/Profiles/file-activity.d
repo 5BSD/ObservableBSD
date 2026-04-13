@@ -62,11 +62,20 @@ syscall::unlinkat:entry
     /* @dtlm-ustack */
 }
 
-syscall::rename:entry,
+syscall::rename:entry
+/* @dtlm-predicate */
+{
+    printf("%s[%d]: rename(\"%s\", \"%s\")\n", execname, pid,
+           copyinstr(arg0), copyinstr(arg1));
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}
+
 syscall::renameat:entry
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: rename\n", execname, pid);
+    printf("%s[%d]: renameat(\"%s\", \"%s\")\n", execname, pid,
+           copyinstr(arg1), copyinstr(arg3));
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

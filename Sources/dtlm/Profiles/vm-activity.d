@@ -1,6 +1,7 @@
 /*
- * Virtual memory activity: faults, page-ins, COW faults.
- * Apple Instruments "Virtual Memory" equivalent.
+ * Virtual memory activity: faults, page alloc/free counts.
+ * Traces vm_fault events per-process and aggregates page
+ * allocations and frees by execname.
  */
 
 fbt::vm_fault:entry

@@ -1,7 +1,14 @@
 /*
- * Track outstanding allocations to detect leaks in a process.
- * Tracks malloc/free pairs by pointer address. At exit, reports
- * allocation sites (by stack) that were never freed.
+ * Allocation site tracker for leak analysis.
+ *
+ * Counts malloc calls and bytes by allocation-site stack, and
+ * separately counts free calls. Compare the two tables: sites
+ * with many mallocs but few frees are likely leaking.
+ *
+ * DTrace cannot iterate associative arrays, so true per-pointer
+ * leak tracking is not possible. This profile gives you the
+ * allocation-site view instead.
+ *
  * Usage: dtlm watch malloc-leaks --param pid=<pid> --duration 10
  */
 
@@ -13,28 +20,23 @@ pid${pid}::malloc:entry
 pid${pid}::malloc:return
 /arg1 != 0/
 {
-    /* Record the allocation: pointer → size and stack. */
-    alloc_size[arg1] = self->msize;
-    alloc_stack[arg1] = ustack();
-    @outstanding_bytes[ustack()] = sum(self->msize);
-    @outstanding_count[ustack()] = count();
+    @alloc_count[ustack()] = count();
+    @alloc_bytes[ustack()] = sum(self->msize);
     self->msize = 0;
 }
 
 pid${pid}::free:entry
-/arg0 != 0 && alloc_size[arg0]/
+/arg0 != 0/
 {
-    /* Matched free — subtract from outstanding. */
-    @outstanding_bytes[alloc_stack[arg0]] = sum(-alloc_size[arg0]);
-    @outstanding_count[alloc_stack[arg0]] = sum(-1);
-    alloc_size[arg0] = 0;
-    alloc_stack[arg0] = 0;
+    @free_count[ustack()] = count();
 }
 
 dtrace:::END
 {
-    printf("\n--- Outstanding allocations by site (potential leaks) ---\n");
-    printf("  COUNT   BYTES  STACK\n");
-    printa(@outstanding_count);
-    printa(@outstanding_bytes);
+    printf("\n--- Allocation sites (count) ---\n");
+    printa(@alloc_count);
+    printf("\n--- Allocation sites (total bytes) ---\n");
+    printa(@alloc_bytes);
+    printf("\n--- Free sites (count) ---\n");
+    printa(@free_count);
 }

@@ -13,36 +13,25 @@ import FoundationNetworking
 
 // MARK: - OTLPHTTPJSONExporter
 
-/// OTLP/HTTP+JSON exporter. Batches probe events as
-/// OpenTelemetry LogRecords and POSTs them to an OTLP/HTTP collector's
-/// `/v1/logs` endpoint.
-///
-/// The JSON envelope is built by hand (same pattern as `JSONLExporter`)
-/// to keep the dep count at zero and avoid `JSONEncoder` reflection
-/// overhead on the flush path.
+/// OTLP/HTTP+JSON exporter. Batches events as OpenTelemetry
+/// LogRecords and POSTs them to `/v1/logs`. Aggregation snapshots
+/// are mapped to OTLP metrics and POSTed to `/v1/metrics`.
 ///
 /// **Batching**: count-based (default 200) plus a time-based flush
-/// timer (default 500 ms). At high probe rates the count threshold
-/// triggers first; at low rates the timer ensures events don't sit
-/// until shutdown.
+/// timer (default 500 ms).
 ///
-/// **Async sender**: `emit()` is called from the structured-backend
-/// reader thread. When a batch is full, the records are handed off
-/// to a dedicated serial `DispatchQueue` that builds the JSON envelope
-/// and POSTs synchronously. This decouples HTTP latency from the
-/// reader thread so the pipe never stalls waiting on the network.
-///
-/// `@unchecked Sendable`: mutable `batch` array is protected by
-/// `lock`; `URLSession` and the sender queue are thread-safe.
-final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
+/// **Async sender**: `emit()` hands off batches to a dedicated
+/// serial `DispatchQueue` so HTTP latency never blocks the reader.
+public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
-    static let formatName = "otel"
+    public static let formatName = "otel"
 
     private let endpoint: URL
     private let resource: ResourceAttributes
+    private let scopeName: String
     private let profileName: String
     private let batchSize: Int
-    private let flushInterval: Double   // seconds; 0 = no timer
+    private let flushInterval: Double
     private let lock = NSLock()
     private var batch: [LogRecord] = []
     private var metricsBatch: [AggregationSnapshot] = []
@@ -50,19 +39,16 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private let maxRetries: Int
     private let session: URLSession
 
-    /// Dedicated serial queue for HTTP POSTs. Batches are dispatched
-    /// here from `emit()` so the reader thread returns immediately.
     private let senderQueue = DispatchQueue(
-        label: "dtlm.otlp.sender",
+        label: "otelexport.otlp.sender",
         qos: .utility
     )
 
-    /// Timer that flushes the current batch periodically, ensuring
-    /// low-rate profiles don't hold events until shutdown.
     private var flushTimer: DispatchSourceTimer?
 
-    init(
+    public init(
         endpoint: URL,
+        scopeName: String? = nil,
         profileName: String,
         resource: ResourceAttributes,
         batchSize: Int = 200,
@@ -71,26 +57,23 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
+        self.scopeName = scopeName ?? resource.serviceName
         self.profileName = profileName
         self.resource = resource
         self.batchSize = batchSize
         self.flushInterval = flushInterval
         self.maxRetries = maxRetries
-        // Allow injecting a custom session for testing; default is
-        // an ephemeral session (no disk cache, no cookies).
         self.session = session ?? URLSession(configuration: .ephemeral)
     }
 
-    /// Record DTrace drops so the next OTLP batch includes a
-    /// `dtlm.drops` attribute. Thread-safe — called from the
-    /// drop handler on the poll thread.
-    func reportDrops(_ count: UInt64) {
+    /// Record drops so the next OTLP batch includes a drop attribute.
+    public func reportDrops(_ count: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         pendingDrops += count
     }
 
-    func start() throws {
+    public func start() throws {
         guard flushInterval > 0 else { return }
         let timer = DispatchSource.makeTimerSource(queue: senderQueue)
         let interval = UInt64(flushInterval * 1_000_000_000)
@@ -105,13 +88,13 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         flushTimer = timer
     }
 
-    func emit(event: ProbeEvent) throws {
+    public func emit(event: ProbeEvent) throws {
         let body = event.printfBody ?? ""
         guard !body.isEmpty else { return }
 
         let record = LogRecord(
             timeUnixNano: dateToUnixNano(event.timestamp),
-            severityNumber: 9, // INFO
+            severityNumber: 9,
             body: body,
             attributes: buildAttributes(event: event)
         )
@@ -137,14 +120,14 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    func emit(snapshot: AggregationSnapshot) throws {
+    public func emit(snapshot: AggregationSnapshot) throws {
         guard !snapshot.dataPoints.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
         metricsBatch.append(snapshot)
     }
 
-    func flush() throws {
+    public func flush() throws {
         lock.lock()
         let pendingLogs = batch
         let pendingMetrics = metricsBatch
@@ -154,7 +137,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         pendingDrops = 0
         lock.unlock()
 
-        // Synchronous flush — used by shutdown() to drain before exit.
         if !pendingLogs.isEmpty {
             postBatch(pendingLogs, drops: drops)
         }
@@ -163,10 +145,9 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    func shutdown() throws {
+    public func shutdown() throws {
         flushTimer?.cancel()
         flushTimer = nil
-        // Drain any in-flight async POSTs, then flush remaining batch.
         senderQueue.sync { }
         try flush()
         session.invalidateAndCancel()
@@ -174,48 +155,42 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     // MARK: - Internal types
 
-    /// Lightweight log record — not Codable, serialized by hand.
-    struct LogRecord {
+    struct LogRecord: Sendable {
         let timeUnixNano: UInt64
         let severityNumber: Int
         let body: String
         let attributes: [(key: String, value: AttributeValue)]
     }
 
-    /// OTLP attribute values are typed. We support string and int.
-    enum AttributeValue {
+    public enum AttributeValue: Sendable {
         case string(String)
         case int(Int64)
+        case double(Double)
     }
 
     // MARK: - Private
 
     private func buildAttributes(event: ProbeEvent) -> [(key: String, value: AttributeValue)] {
         var attrs: [(key: String, value: AttributeValue)] = []
-        attrs.append((key: "dtlm.profile", value: .string(event.profileName)))
-        attrs.append((key: "dtlm.probe", value: .string(event.probeName)))
+        attrs.append((key: "\(scopeName).profile", value: .string(event.profileName)))
+        attrs.append((key: "\(scopeName).probe", value: .string(event.probeName)))
         attrs.append((key: "process.pid", value: .int(Int64(event.pid))))
         attrs.append((key: "process.executable.name", value: .string(event.execname)))
         return attrs
     }
 
-    /// Convert a `Date` to nanoseconds since Unix epoch as a `UInt64`.
     private func dateToUnixNano(_ date: Date) -> UInt64 {
         let seconds = date.timeIntervalSince1970
         return UInt64(seconds * 1_000_000_000)
     }
 
-    /// Build the full OTLP JSON envelope for a batch of log records.
-    /// When `drops` > 0, a `dtlm.drops` attribute is added to the
-    /// first log record so the collector/dashboard can detect data loss.
     func buildEnvelope(_ records: [LogRecord], drops: UInt64 = 0) -> String {
         var json = "{\"resourceLogs\":[{\"resource\":{\"attributes\":["
         json += resourceAttributesJSON()
-        json += "]},\"scopeLogs\":[{\"scope\":{\"name\":\"dtlm\",\"version\":\"\(escapeJSON(resource.dtlmVersion))\"},"
+        json += "]},\"scopeLogs\":[{\"scope\":{\"name\":\"\(escapeJSON(scopeName))\",\"version\":\"\(escapeJSON(resource.serviceVersion))\"},"
         json += "\"logRecords\":["
         for (i, record) in records.enumerated() {
             if i > 0 { json += "," }
-            // Attach drop count to the first record in the batch.
             let recordDrops = (i == 0 && drops > 0) ? drops : UInt64(0)
             json += buildRecordJSON(record, drops: recordDrops)
         }
@@ -229,7 +204,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             ("host.name", resource.hostName),
             ("os.type", resource.osName),
             ("os.version", resource.osVersion),
-            ("service.version", resource.dtlmVersion),
+            ("service.version", resource.serviceVersion),
         ]
         if let instanceId = resource.serviceInstanceId {
             attrs.append(("service.instance.id", instanceId))
@@ -244,7 +219,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     private func buildRecordJSON(_ record: LogRecord, drops: UInt64 = 0) -> String {
         var json = "{"
-        // OTLP JSON encodes 64-bit integers as decimal strings.
         json += "\"timeUnixNano\":\"\(record.timeUnixNano)\","
         json += "\"severityNumber\":\(record.severityNumber),"
         json += "\"body\":{\"stringValue\":\"\(escapeJSON(record.body))\"},"
@@ -256,29 +230,26 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             case .string(let s):
                 json += "\"stringValue\":\"\(escapeJSON(s))\""
             case .int(let n):
-                // OTLP JSON encodes int64 as decimal strings.
                 json += "\"intValue\":\"\(n)\""
+            case .double(let d):
+                json += "\"doubleValue\":\(d)"
             }
             json += "}}"
         }
         if drops > 0 {
             if !record.attributes.isEmpty { json += "," }
-            json += "{\"key\":\"dtlm.drops\",\"value\":{\"intValue\":\"\(drops)\"}}"
+            json += "{\"key\":\"\(escapeJSON(scopeName)).drops\",\"value\":{\"intValue\":\"\(drops)\"}}"
         }
         json += "]}"
         return json
     }
 
-    /// Dispatch a batch to the sender queue for async POST.
-    /// Called from `emit()` on the reader thread — returns immediately.
     private func asyncPost(_ records: [LogRecord], drops: UInt64) {
         senderQueue.async { [self] in
             postBatch(records, drops: drops)
         }
     }
 
-    /// Timer callback: drain current batches if non-empty. Runs on
-    /// the sender queue so it serializes naturally with async POSTs.
     private func timerFlush() {
         lock.lock()
         let pendingLogs = batch
@@ -297,28 +268,23 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    /// POST a batch of log records to /v1/logs with retry and gzip.
     private func postBatch(_ records: [LogRecord], drops: UInt64 = 0) {
         let body = buildEnvelope(records, drops: drops)
         guard let bodyData = body.data(using: .utf8) else { return }
         post(data: bodyData, path: "v1/logs")
     }
 
-    /// POST metrics to /v1/metrics with retry and gzip.
     private func postMetrics(_ snapshots: [AggregationSnapshot]) {
         let body = buildMetricsEnvelope(snapshots)
         guard let bodyData = body.data(using: .utf8) else { return }
         post(data: bodyData, path: "v1/metrics")
     }
 
-    /// Shared HTTP POST with gzip compression and retry/backoff.
-    /// Synchronous — called on the sender queue or shutdown path.
     private func post(data: Data, path: String) {
         let url = endpoint.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
 
-        // gzip compress the body if possible.
         if let compressed = gzip(data) {
             request.httpBody = compressed
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -328,10 +294,9 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        // Retry loop with exponential backoff (100ms, 400ms).
         for attempt in 0...maxRetries {
             if attempt > 0 {
-                let delayMs = 100 * (1 << (attempt - 1))  // 100, 200, 400...
+                let delayMs = 100 * (1 << (attempt - 1))
                 Thread.sleep(forTimeInterval: Double(delayMs) / 1000.0)
             }
 
@@ -350,10 +315,9 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             sem.wait()
 
             if errorBox.value == nil {
-                return  // success
+                return
             }
             if attempt == maxRetries {
-                // Final attempt failed — log and discard.
                 if let msg = errorBox.value {
                     FileHandle.standardError.write(Data(
                         ("\(msg) (after \(maxRetries + 1) attempts)\n").utf8
@@ -363,10 +327,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         }
     }
 
-    /// Compress data with gzip using libz (deflateInit2 + deflate).
-    /// Returns nil if compression fails (caller falls back to
-    /// uncompressed). Uses the gzip wrapper format (windowBits=31)
-    /// so the collector sees a valid gzip stream.
     private func gzip(_ data: Data) -> Data? {
         let srcLen = data.count
         guard srcLen > 0 else { return nil }
@@ -387,7 +347,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
                 stream.next_out = destBase
                 stream.avail_out = UInt32(bound)
 
-                // windowBits = 15 + 16 = 31 enables gzip header/trailer.
                 let initResult = deflateInit2_(
                     &stream,
                     Z_DEFAULT_COMPRESSION,
@@ -410,26 +369,22 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         return result
     }
 
-    /// Build the OTLP metrics JSON envelope.
-    ///
-    /// Maps DTrace aggregation kinds to OTLP metric types:
-    ///   count, sum → Sum (monotonic)
-    ///   min, max, avg, stddev → Gauge
-    ///   quantize, lquantize, llquantize → Histogram
+    // MARK: - Metrics envelope
+
     func buildMetricsEnvelope(_ snapshots: [AggregationSnapshot]) -> String {
         let timeNano = dateToUnixNano(Date())
 
         var json = "{\"resourceMetrics\":[{\"resource\":{\"attributes\":["
         json += resourceAttributesJSON()
-        json += "]},\"scopeMetrics\":[{\"scope\":{\"name\":\"dtlm\",\"version\":\"\(escapeJSON(resource.dtlmVersion))\"},"
+        json += "]},\"scopeMetrics\":[{\"scope\":{\"name\":\"\(escapeJSON(scopeName))\",\"version\":\"\(escapeJSON(resource.serviceVersion))\"},"
         json += "\"metrics\":["
 
         for (si, snapshot) in snapshots.enumerated() {
             if si > 0 { json += "," }
 
             let metricName = snapshot.aggregationName.isEmpty
-                ? "dtlm.\(escapeJSON(snapshot.profileName)).\(snapshot.kind.rawValue)"
-                : "dtlm.\(escapeJSON(snapshot.profileName)).\(escapeJSON(snapshot.aggregationName))"
+                ? "\(escapeJSON(scopeName)).\(escapeJSON(snapshot.profileName)).\(snapshot.kind.rawValue)"
+                : "\(escapeJSON(scopeName)).\(escapeJSON(snapshot.profileName)).\(escapeJSON(snapshot.aggregationName))"
 
             json += "{\"name\":\"\(metricName)\","
 
@@ -479,8 +434,6 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
             var json = "{\"timeUnixNano\":\"\(timeNano)\""
 
-            // OTLP histogram: explicitBounds + bucketCounts arrays.
-            // explicitBounds has N-1 entries, bucketCounts has N entries.
             let sortedBuckets = buckets.sorted { $0.upperBound < $1.upperBound }
             let totalCount = sortedBuckets.reduce(Int64(0)) { $0 + $1.count }
             let totalSum = sortedBuckets.reduce(Int64(0)) { $0 + $1.upperBound * $1.count }
@@ -506,14 +459,7 @@ final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         return parts.joined(separator: ",")
     }
 
-    /// Thread-safe box for passing an error string out of a
-    /// `@Sendable` closure. The semaphore guarantees the write
-    /// in the completion handler happens-before the read on the
-    /// calling thread, so no lock is needed.
     private final class ErrorBox: @unchecked Sendable {
         var value: String?
     }
-
-    /// Delegate to the module-level `escapeJSON` in Exporter.swift.
-    func escapeJSON(_ s: String) -> String { dtlm.escapeJSON(s) }
 }

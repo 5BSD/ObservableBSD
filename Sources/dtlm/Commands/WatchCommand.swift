@@ -128,7 +128,7 @@ struct WatchCommand: ParsableCommand {
             hostName: ProcessInfo.processInfo.hostName,
             osName: "freebsd",
             osVersion: ProcessInfo.processInfo.osVersionString,
-            dtlmVersion: "0.1.0",
+            serviceVersion: "0.1.0",
             custom: [:]
         )
 

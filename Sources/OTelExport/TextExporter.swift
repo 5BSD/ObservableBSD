@@ -8,43 +8,31 @@ import Foundation
 
 // MARK: - TextExporter
 
-/// Line-oriented stdout exporter, dwatch-style. The default for
-/// `dtlm watch`. Whatever the script's `printf` action produces,
-/// dtlm prints. Stack frames indent below event lines. Aggregation
-/// snapshots are printed as a tabular dump.
+/// Line-oriented stdout exporter. Whatever the event's text body
+/// produces, this exporter prints. Stack frames indent below event
+/// lines. Aggregation snapshots are printed as a tabular dump.
 ///
 /// This is the simplest possible Exporter conformance — no batching,
 /// no retry, no network — and serves as the reference implementation
-/// of the protocol. JSONL and OTLP exporters layer the same shape on
-/// top.
-final class TextExporter: Exporter {
+/// of the protocol.
+public final class TextExporter: Exporter {
 
-    static let formatName = "text"
+    public static let formatName = "text"
 
     private let output: FileHandle
     private let resource: ResourceAttributes
 
-    init(output: FileHandle = .standardOutput, resource: ResourceAttributes) {
+    public init(output: FileHandle = .standardOutput, resource: ResourceAttributes) {
         self.output = output
         self.resource = resource
     }
 
-    func start() throws {
-        // Text mode is silent at startup — operators expect line
-        // output to start when probes fire, not a banner. The
-        // resource attributes still get attached on each line via
-        // execname/pid (DTrace already includes them in the
-        // probe context); we don't print them as a header.
-    }
+    public func start() throws {}
 
-    func emit(event: ProbeEvent) throws {
-        // Format: `<execname>[<pid>]: <printf body>`
-        // matches the dwatch convention. If the script didn't
-        // printf anything, fall back to printing the probe name.
+    public func emit(event: ProbeEvent) throws {
         let body = event.printfBody ?? event.probeName
         var line = "\(event.execname)[\(event.pid)]: \(body)\n"
 
-        // If the event includes a stack, indent it below.
         if let stack = event.stack, !stack.isEmpty {
             for frame in stack {
                 line += "    [k] \(formatFrame(frame))\n"
@@ -59,8 +47,7 @@ final class TextExporter: Exporter {
         try write(line)
     }
 
-    func emit(snapshot: AggregationSnapshot) throws {
-        // Header line for the aggregation.
+    public func emit(snapshot: AggregationSnapshot) throws {
         var out = "\n--- aggregation: @\(snapshot.aggregationName) "
         out += "(\(snapshot.kind.rawValue))"
         out += " profile=\(snapshot.profileName) ---\n"
@@ -82,13 +69,9 @@ final class TextExporter: Exporter {
         try write(out)
     }
 
-    func flush() throws {
-        // FileHandle writes are unbuffered for stdout; nothing to do.
-    }
+    public func flush() throws {}
 
-    func shutdown() throws {
-        // No pending state to drain.
-    }
+    public func shutdown() throws {}
 
     // MARK: - Private
 

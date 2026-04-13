@@ -1,19 +1,16 @@
 // swift-tools-version: 6.3
 //
 // ObservableBSD — convert FreeBSD's instrumentation surface to
-// OpenTelemetry telemetry. The first (and currently only)
-// executable target is `dtlm`, which bridges DTrace probe data
-// (and, post-v1, the hwt(4) Hardware Trace Framework — see
-// DESIGN-HWT.md) into structured OTel signals.
+// OpenTelemetry telemetry.
 //
-// As ObservableBSD grows, additional executable targets and
-// shared library targets will be added to this same package
-// using the FreeBSDKit-style multi-target layout.
+// Executable targets:
+//   - dtlm  — DTrace-based instruments and profiling
+//   - hwtlm — Hardware telemetry (power, temperature, frequency)
 //
-// Depends on FreeBSDKit for the DTraceCore module (libdtrace
-// bindings). dtlm does NOT depend on DBlocks — profiles are .d
-// files loaded as text and handed to libdtrace via DTraceCore's
-// compile/exec/go/poll/consume APIs.
+// Shared library:
+//   - OTelExport — Exporter protocol, data types, and three
+//     exporter implementations (text, JSONL, OTLP/HTTP) shared
+//     across all ObservableBSD tools.
 
 import PackageDescription
 
@@ -21,6 +18,8 @@ let package = Package(
     name: "ObservableBSD",
     products: [
         .executable(name: "dtlm", targets: ["dtlm"]),
+        .executable(name: "hwtlm", targets: ["hwtlm"]),
+        .library(name: "OTelExport", targets: ["OTelExport"]),
     ],
     dependencies: [
         .package(
@@ -38,22 +37,45 @@ let package = Package(
             pkgConfig: nil,
             providers: []
         ),
+        .systemLibrary(
+            name: "CCpuctl",
+            pkgConfig: nil,
+            providers: []
+        ),
+        .target(
+            name: "OTelExport",
+            dependencies: [
+                "CZlib",
+            ]
+        ),
         .executableTarget(
             name: "dtlm",
             dependencies: [
                 .product(name: "DTraceCore", package: "FreeBSDKit"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                "CZlib",
+                "OTelExport",
             ],
             resources: [
-                // Bundle the hand-authored .d profiles as SwiftPM
-                // resources. Loaded at runtime via Bundle.module.url.
                 .process("Profiles"),
             ]
         ),
+        .executableTarget(
+            name: "hwtlm",
+            dependencies: [
+                .product(name: "FreeBSDKit", package: "FreeBSDKit"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "OTelExport",
+                "CCpuctl",
+            ],
+            exclude: ["ARM.md"]
+        ),
         .testTarget(
             name: "dtlmTests",
-            dependencies: ["dtlm"]
+            dependencies: ["dtlm", "OTelExport"]
+        ),
+        .testTarget(
+            name: "hwtlmTests",
+            dependencies: ["hwtlm", "OTelExport"]
         ),
     ]
 )

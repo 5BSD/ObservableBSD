@@ -7,6 +7,7 @@
 import XCTest
 import Foundation
 @testable import dtlm
+@testable import OTelExport
 
 /// Unit tests for `OTLPHTTPJSONExporter` — JSON envelope shape,
 /// resource attributes, OTLP field names, timeUnixNano encoding,
@@ -20,7 +21,7 @@ final class OTLPExporterTests: XCTestCase {
             hostName: "test-host",
             osName: "freebsd",
             osVersion: "15.0",
-            dtlmVersion: "0.1.0",
+            serviceVersion: "0.1.0",
             custom: [:]
         )
     }
@@ -50,6 +51,7 @@ final class OTLPExporterTests: XCTestCase {
     private func makeExporter(batchSize: Int = 1000) -> OTLPHTTPJSONExporter {
         OTLPHTTPJSONExporter(
             endpoint: URL(string: "http://localhost:4318")!,
+            scopeName: "dtlm",
             profileName: "kill",
             resource: makeResource(),
             batchSize: batchSize
@@ -241,6 +243,7 @@ final class OTLPExporterTests: XCTestCase {
         // Use batchSize=3 so we can test without 200 events.
         let exporter = OTLPHTTPJSONExporter(
             endpoint: URL(string: "http://localhost:4318")!,
+            scopeName: "dtlm",
             profileName: "kill",
             resource: makeResource(),
             batchSize: 3

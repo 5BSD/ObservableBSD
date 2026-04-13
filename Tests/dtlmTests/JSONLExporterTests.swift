@@ -20,7 +20,7 @@ final class JSONLExporterTests: XCTestCase {
             hostName: "test-host",
             osName: "freebsd",
             osVersion: "15.0",
-            dtlmVersion: "0.1.0",
+            serviceVersion: "0.1.0",
             custom: [:]
         )
     }
@@ -46,30 +46,20 @@ final class JSONLExporterTests: XCTestCase {
     // MARK: - escapeJSON helper
 
     func testEscapeJSONHandlesQuotesAndBackslashes() {
-        let exporter = JSONLExporter(
-            profileName: "x",
-            output: FileHandle(forWritingAtPath: "/dev/null") ?? .standardOutput,
-            resource: makeResource()
-        )
-        XCTAssertEqual(exporter.escapeJSON("plain"), "plain")
-        XCTAssertEqual(exporter.escapeJSON(#"with "quote""#), #"with \"quote\""#)
-        XCTAssertEqual(exporter.escapeJSON(#"back\slash"#), #"back\\slash"#)
-        XCTAssertEqual(exporter.escapeJSON("line\nfeed"), #"line\nfeed"#)
-        XCTAssertEqual(exporter.escapeJSON("tab\there"), #"tab\there"#)
-        XCTAssertEqual(exporter.escapeJSON("carriage\rreturn"), #"carriage\rreturn"#)
+        XCTAssertEqual(escapeJSON("plain"), "plain")
+        XCTAssertEqual(escapeJSON(#"with "quote""#), #"with \"quote\""#)
+        XCTAssertEqual(escapeJSON(#"back\slash"#), #"back\\slash"#)
+        XCTAssertEqual(escapeJSON("line\nfeed"), #"line\nfeed"#)
+        XCTAssertEqual(escapeJSON("tab\there"), #"tab\there"#)
+        XCTAssertEqual(escapeJSON("carriage\rreturn"), #"carriage\rreturn"#)
     }
 
     func testEscapeJSONHandlesControlCharacters() {
-        let exporter = JSONLExporter(
-            profileName: "x",
-            output: FileHandle(forWritingAtPath: "/dev/null") ?? .standardOutput,
-            resource: makeResource()
-        )
         // 0x01 is below 0x20 and not in the named-escape set, so it
         // should become \u0001.
-        XCTAssertEqual(exporter.escapeJSON("\u{01}"), "\\u0001")
+        XCTAssertEqual(escapeJSON("\u{01}"), "\\u0001")
         // 0x7f is above 0x20 and should pass through unchanged.
-        XCTAssertEqual(exporter.escapeJSON("\u{7f}"), "\u{7f}")
+        XCTAssertEqual(escapeJSON("\u{7f}"), "\u{7f}")
     }
 
     // MARK: - emit(event:) basic shape

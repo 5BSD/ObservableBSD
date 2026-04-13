@@ -8,7 +8,19 @@ observability stack via OpenTelemetry. FreeBSD has rich instrumentation
 built into the kernel; this project connects it to Grafana, Jaeger,
 Loki, Prometheus, and any OTel-compatible backend.
 
-The first executable in the package is [`dtlm`](#dtlm).
+## Scope
+
+ObservableBSD aims to provide a complete observability toolkit for
+FreeBSD, covering four areas:
+
+| Tool | Domain | Status |
+|------|--------|--------|
+| [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
+| [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
+| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | Planned |
+
+All tools emit OpenTelemetry-native output so their data flows into the
+same collectors, dashboards, and alerting pipelines.
 
 ---
 

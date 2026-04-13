@@ -1,0 +1,4 @@
+module CCpuctl [system] {
+    header "ccpuctl.h"
+    export *
+}

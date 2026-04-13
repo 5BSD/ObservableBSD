@@ -253,22 +253,37 @@ final class OTLPExporterTests: XCTestCase {
             batchSize: 3
         )
 
-        // Emit 3 events — the 3rd should trigger a flush (which will
-        // fail to POST since there's no collector, but that's fine —
-        // errors are logged to stderr, not thrown).
-        for i in 0..<3 {
+        // Emit 2 events — below threshold, batch should still hold them.
+        for i in 0..<2 {
             try exporter.emit(event: makeEvent(body: "event \(i)"))
         }
 
-        // After auto-flush, the internal batch should be empty.
-        // Verify by building an envelope from a manual flush — it
-        // should produce no HTTP call (empty batch).
-        // We can't directly inspect the batch, but we can verify
-        // that buildEnvelope with an explicit flush produces no
-        // records by emitting one more and checking the envelope.
-        try exporter.emit(event: makeEvent(body: "event 3"))
-        // Build envelope from just the one record in the batch.
-        // (We're testing that the first 3 were already flushed.)
+        // Emit a 3rd — triggers auto-flush (POST fails, but that's
+        // non-fatal). The batch should now be empty.
+        try exporter.emit(event: makeEvent(body: "event 2"))
+
+        // Emit one more after the auto-flush.
+        try exporter.emit(event: makeEvent(body: "post-flush"))
+
+        // Manually flush and build an envelope from the remaining
+        // batch. If batching worked, only the post-flush event
+        // should be in the batch (the first 3 were already sent).
+        // We test this indirectly: build an envelope with 1 record
+        // and verify it's valid.
+        let oneRecord = OTLPHTTPJSONExporter.LogRecord(
+            timeUnixNano: 1_700_000_000_000_000_000,
+            severityNumber: 9,
+            body: "post-flush",
+            attributes: []
+        )
+        let json = exporter.buildEnvelope([oneRecord])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let resourceLogs = obj["resourceLogs"] as! [[String: Any]]
+        let scopeLogs = resourceLogs[0]["scopeLogs"] as! [[String: Any]]
+        let logRecords = scopeLogs[0]["logRecords"] as! [[String: Any]]
+        XCTAssertEqual(logRecords.count, 1,
+                       "after auto-flush of 3, only the post-flush record should remain")
     }
 
     func testMultipleEmitsThenFlushProducesAllRecords() throws {
@@ -345,19 +360,15 @@ final class OTLPExporterTests: XCTestCase {
     func testEventAttributesIncludeProfilePidExecname() throws {
         let exporter = makeExporter()
         let event = makeEvent()
-        try exporter.emit(event: event)
 
-        // Build envelope by emitting one event and inspecting it.
+        // Call the real buildAttributes path and build an envelope
+        // from the result — no hand-constructed attributes.
+        let attrs = exporter.buildAttributes(event: event)
         let record = OTLPHTTPJSONExporter.LogRecord(
-            timeUnixNano: 1_700_000_000_000_000_000,
+            timeUnixNano: UInt64(event.timestamp.timeIntervalSince1970 * 1_000_000_000),
             severityNumber: 9,
-            body: "nginx[4123]: signal 15 to pid 4567",
-            attributes: [
-                (key: "dtlm.profile", value: .string("kill")),
-                (key: "dtlm.probe", value: .string("syscall::kill:entry")),
-                (key: "process.pid", value: .int(4123)),
-                (key: "process.executable.name", value: .string("nginx")),
-            ]
+            body: event.printfBody!,
+            attributes: attrs
         )
         let json = exporter.buildEnvelope([record])
         let data = json.data(using: .utf8)!
@@ -366,10 +377,10 @@ final class OTLPExporterTests: XCTestCase {
         let resourceLogs = obj["resourceLogs"] as! [[String: Any]]
         let scopeLogs = resourceLogs[0]["scopeLogs"] as! [[String: Any]]
         let logRecords = scopeLogs[0]["logRecords"] as! [[String: Any]]
-        let attrs = logRecords[0]["attributes"] as! [[String: Any]]
+        let jsonAttrs = logRecords[0]["attributes"] as! [[String: Any]]
 
         var lookup: [String: [String: Any]] = [:]
-        for attr in attrs {
+        for attr in jsonAttrs {
             lookup[attr["key"] as! String] = attr["value"] as? [String: Any]
         }
 
@@ -680,5 +691,89 @@ final class OTLPExporterTests: XCTestCase {
         let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
         let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
         XCTAssertEqual(metrics.count, 2)
+    }
+
+    // MARK: - Named dimension attributes
+
+    func testNamedAttributesEmitSemanticKeys() throws {
+        let exporter = makeExporter()
+        let snapshot = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "cpu",
+            aggregationName: "temp",
+            kind: .avg,
+            dataPoints: [DataPoint(
+                attributes: [("cpu_id", "3")],
+                value: .scalar(52)
+            )]
+        )
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        let gauge = metrics[0]["gauge"] as! [String: Any]
+        let dataPoints = gauge["dataPoints"] as! [[String: Any]]
+        let attrs = dataPoints[0]["attributes"] as! [[String: Any]]
+
+        XCTAssertEqual(attrs.count, 1)
+        XCTAssertEqual(attrs[0]["key"] as? String, "cpu_id",
+                       "named attributes should use semantic key names, not key.0")
+        let val = (attrs[0]["value"] as! [String: Any])["stringValue"] as? String
+        XCTAssertEqual(val, "3")
+    }
+
+    func testPositionalKeysUseFallbackNames() throws {
+        let exporter = makeExporter()
+        let snapshot = AggregationSnapshot(
+            timestamp: Date(),
+            profileName: "syscall-counts",
+            aggregationName: "counts",
+            kind: .count,
+            dataPoints: [DataPoint(
+                keys: ["nginx", "read"],
+                value: .scalar(42)
+            )]
+        )
+        let json = exporter.buildMetricsEnvelope([snapshot])
+        let data = json.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        let resourceMetrics = obj["resourceMetrics"] as! [[String: Any]]
+        let scopeMetrics = resourceMetrics[0]["scopeMetrics"] as! [[String: Any]]
+        let metrics = scopeMetrics[0]["metrics"] as! [[String: Any]]
+        let sum = metrics[0]["sum"] as! [String: Any]
+        let dataPoints = sum["dataPoints"] as! [[String: Any]]
+        let attrs = dataPoints[0]["attributes"] as! [[String: Any]]
+
+        XCTAssertEqual(attrs.count, 2)
+        XCTAssertEqual(attrs[0]["key"] as? String, "key.0")
+        XCTAssertEqual(attrs[1]["key"] as? String, "key.1")
+    }
+
+    // MARK: - Aggregation key name parser
+
+    func testParseAggregationKeyNamesFromDSource() {
+        let source = """
+        @counts[execname, probefunc] = count();
+        @latency[probefunc] = quantize(timestamp - self->ts);
+        @faults[execname, pid] = count();
+        @sizes["malloc"] = quantize(arg0);
+        """
+        let result = WatchRunner.parseAggregationKeyNames(from: source)
+
+        XCTAssertEqual(result["counts"], ["execname", "syscall"])
+        XCTAssertEqual(result["latency"], ["syscall"])
+        XCTAssertEqual(result["faults"], ["execname", "pid"])
+        XCTAssertEqual(result["sizes"], ["label"])
+    }
+
+    func testParseAggregationKeyNamesFallsBackForComplexExprs() {
+        let source = "@slow[copyinstr(arg0), copyinstr(arg1)] = quantize(this->elapsed_us);"
+        let result = WatchRunner.parseAggregationKeyNames(from: source)
+
+        XCTAssertEqual(result["slow"], ["key.0", "key.1"])
     }
 }

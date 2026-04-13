@@ -190,7 +190,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
     // MARK: - Private
 
-    private func buildAttributes(event: ProbeEvent) -> [(key: String, value: AttributeValue)] {
+    func buildAttributes(event: ProbeEvent) -> [(key: String, value: AttributeValue)] {
         var attrs: [(key: String, value: AttributeValue)] = []
         attrs.append((key: "\(scopeName).profile", value: .string(event.profileName)))
         attrs.append((key: "\(scopeName).probe", value: .string(event.probeName)))

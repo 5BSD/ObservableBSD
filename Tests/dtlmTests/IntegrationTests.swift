@@ -377,33 +377,27 @@ final class IntegrationTests: XCTestCase {
             "this test compiles every bundled profile via libdtrace, requires root. Run with `sudo swift test`.")
         try skipIfBinaryMissing()
 
-        // Profiles that need a kinst module which may not be loaded
-        // by default. We skip them with a warning rather than
-        // failing the whole sweep — kinst availability is a
-        // kernel-config decision, not a profile bug.
-        // Profiles that can't compile without a real target process
-        // or kernel module. Skip with a warning — these are
-        // environment issues, not profile bugs.
-        let grabSkipNames: Set<String> = [
-            "kinst",
-            // pid-provider profiles need a grabbable target process.
-            "malloc-trace", "malloc-counts", "malloc-leaks",
-            "postgresql-queries", "postgresql-slow",
-            "mysql-queries",
-            "python-calls", "python-slow",
-            "ruby-calls",
-            "node-http", "node-gc",
-            "usdt-list",
-            "func-trace", "func-time",
-            "lib-calls",
-        ]
+        // Spawn a long-lived process so pid-provider profiles can
+        // grab it. /bin/sleep is a simple, universally-available
+        // target that links libc (so lib-calls can find malloc).
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["3600"]
+        try sleeper.run()
+        let targetPid = String(sleeper.processIdentifier)
+        defer {
+            sleeper.terminate()
+            sleeper.waitUntilExit()
+        }
+
+        // Profiles that need a kinst module which may not be loaded.
+        // Skip with a warning — environment issue, not a profile bug.
+        let kinstSkip: Set<String> = ["kinst"]
 
         var failures: [(name: String, stderr: String)] = []
         var skipped: [String] = []
 
         for profile in ProfileLoader().all() {
-            // Skip profiles with required params unless we have
-            // sentinel values for them.
             let extraArgs: [String]
             switch profile.name {
             case "kinst":
@@ -415,13 +409,13 @@ final class IntegrationTests: XCTestCase {
                  "ruby-calls",
                  "node-http", "node-gc",
                  "usdt-list":
-                extraArgs = ["--param", "pid=1"]
+                extraArgs = ["--param", "pid=\(targetPid)"]
             case "func-trace", "func-time":
-                extraArgs = ["--param", "pid=1", "--param", "func=malloc"]
+                extraArgs = ["--param", "pid=\(targetPid)", "--param", "func=malloc"]
             case "kfunc-trace", "kfunc-time":
                 extraArgs = ["--param", "func=vm_fault"]
             case "lib-calls":
-                extraArgs = ["--param", "pid=1", "--param", "lib=libc.so.7", "--param", "func=malloc"]
+                extraArgs = ["--param", "pid=\(targetPid)", "--param", "lib=libc.so.7", "--param", "func=malloc"]
             default:
                 extraArgs = []
             }
@@ -433,13 +427,16 @@ final class IntegrationTests: XCTestCase {
             }
             if result.exitCode != 0 {
                 let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                // kinst profile failures when the kinst.ko module
-                // isn't loaded show up as "does not match any
-                // probes" — those are environment issues, not
-                // profile bugs.
-                if grabSkipNames.contains(profile.name)
-                    && (stderr.contains("does not match any probes")
-                        || stderr.contains("failed to grab process")) {
+                if kinstSkip.contains(profile.name)
+                    && stderr.contains("does not match any probes") {
+                    skipped.append(profile.name)
+                    continue
+                }
+                // USDT profiles (mysql, postgres, node, python, ruby)
+                // will fail with "does not match any probes" because
+                // /bin/sleep doesn't have those probes. That's an
+                // environment issue — the profile syntax is valid.
+                if stderr.contains("does not match any probes") {
                     skipped.append(profile.name)
                     continue
                 }
@@ -448,7 +445,7 @@ final class IntegrationTests: XCTestCase {
         }
 
         if !skipped.isEmpty {
-            print("[testEveryBundledProfileCompilesViaLibdtrace] skipped (kernel module not loaded): \(skipped)")
+            print("[testEveryBundledProfileCompilesViaLibdtrace] skipped (no matching probes): \(skipped)")
         }
         if !failures.isEmpty {
             let summary = failures

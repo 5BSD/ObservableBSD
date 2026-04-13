@@ -28,7 +28,7 @@ same collectors, dashboards, and alerting pipelines.
 
 **Apple Instruments for FreeBSD, with OpenTelemetry output.**
 
-`dtlm` bundles 160 DTrace profiling templates covering the equivalent
+`dtlm` bundles 171 DTrace profiling templates covering the equivalent
 of Instruments' Time Profiler, System Trace, File Activity, Network
 Activity, Allocations, Thread States, and Lock Contention — for both
 kernel events and USDT-instrumented applications — and ships the
@@ -50,7 +50,7 @@ The OTLP exporter includes:
 - Drop counter attribute (`dtlm.drops`) on data loss
 - Typed metrics from DTrace aggregations (count/sum -> Sum, min/max/avg -> Gauge, quantize -> Histogram)
 
-### Profile catalog (160 profiles)
+### Profile catalog (171 profiles)
 
 | Category | Count | Examples |
 |----------|-------|---------|

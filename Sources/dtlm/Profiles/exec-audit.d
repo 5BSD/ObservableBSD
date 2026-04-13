@@ -9,9 +9,8 @@
 proc:::exec-success
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: exec ppid=%d uid=%d gid=%d jid=%d\n",
-        execname, pid, ppid, uid, gid,
-        curproc->p_ucred->cr_prison->pr_id);
+    printf("%s[%d]: exec ppid=%d uid=%d gid=%d\n",
+        execname, pid, ppid, uid, gid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

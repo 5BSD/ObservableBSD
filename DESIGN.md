@@ -20,7 +20,7 @@
 .d profile  →  dtlm  →  libdtrace  →  events + aggregations + stacks  →  formatter  →  text / JSONL / OTLP
 ```
 
-You write or pick a `.d` file. dtlm bundles 118 of them, covering
+You write or pick a `.d` file. dtlm bundles 171 of them, covering
 both system observability (kernel events) and application
 observability (USDT probes for common ports + a generic USDT wrapper
 for your own probes). You run

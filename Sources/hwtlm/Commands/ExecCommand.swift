@@ -99,6 +99,10 @@ struct ExecCommand: ParsableCommand {
         // Build C args array. strdup is only used in the child
         // (which either execs or _exits), so no leak in parent.
         let pid = fork()
+        if pid == -1 {
+            perror("hwtlm exec: fork")
+            return 127
+        }
         if pid == 0 {
             // Child process — exec replaces the image, _exit on failure.
             args[0].withCString { cmd in

@@ -360,7 +360,7 @@ final class IntegrationTests: XCTestCase {
     /// Iterates every bundled profile, runs `dtlm watch <profile>
     /// --duration 0.05`, and asserts the watch session starts cleanly.
     /// libdtrace will refuse to run anything that doesn't compile, so
-    /// this catches every invented probe name across the entire 160-
+    /// this catches every invented probe name across the entire 171-
     /// profile catalog in one shot.
     ///
     /// Per-profile timeout is 8 seconds (the runDtlm helper's

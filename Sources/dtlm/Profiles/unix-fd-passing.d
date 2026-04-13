@@ -1,10 +1,11 @@
 /*
- * Unix domain socket FD/credential passing audit.
+ * sendmsg/recvmsg activity by process.
  *
- * Traces sendmsg/recvmsg on AF_UNIX sockets to detect
- * SCM_RIGHTS (file descriptor passing) and credential
- * passing activity. Shows which processes exchange file
- * descriptors over Unix sockets.
+ * Traces sendmsg and recvmsg syscalls with byte counts.
+ * Useful for identifying IPC-heavy processes. Note: captures
+ * all sendmsg/recvmsg calls regardless of address family —
+ * does not distinguish AF_UNIX from AF_INET or inspect
+ * ancillary data (SCM_RIGHTS).
  */
 
 syscall::sendmsg:entry

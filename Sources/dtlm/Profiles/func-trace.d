@@ -13,4 +13,6 @@ pid${pid}::${func}:entry
 pid${pid}::${func}:return
 {
     printf("%s[%d]: <- ${func} = %d\n", execname, pid, arg1);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

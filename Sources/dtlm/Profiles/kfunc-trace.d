@@ -15,4 +15,6 @@ fbt::${func}:return
 /* @dtlm-predicate */
 {
     printf("%s[%d]: <- ${func} = %d\n", execname, pid, arg1);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

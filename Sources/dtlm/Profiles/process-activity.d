@@ -41,7 +41,7 @@ proc:::exit
 proc:::signal-send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: signal-send\n", execname, pid);
+    printf("%s[%d]: signal-send sig=%d to pid=%d\n", execname, pid, (int)arg2, (int)arg1);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

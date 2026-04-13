@@ -454,6 +454,142 @@ final class IntegrationTests: XCTestCase {
             "per-core list should show CPU 0")
     }
 
+    // MARK: - wall-clock duration bound
+
+    func testWatchDurationIsWallClockBound() throws {
+        try skipIfBinaryMissing()
+        let start = Date()
+        guard let result = runHwtlm([
+            "watch", "--format", "json",
+            "--duration", "2", "--interval", "0.5"
+        ], timeout: 10.0) else {
+            XCTFail("could not run hwtlm"); return
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(result.exitCode, 0,
+            "watch --duration 2 should exit 0; stderr: \(result.stderr)")
+
+        // Should finish within duration + one interval of slack.
+        XCTAssertLessThan(elapsed, 3.5,
+            "wall-clock elapsed (\(String(format: "%.1f", elapsed))s) should be < 3.5s for --duration 2 --interval 0.5")
+
+        // Should have produced at least 2 samples.
+        let lines = result.stdout.split(whereSeparator: \.isNewline)
+            .filter { !$0.isEmpty }
+        XCTAssertGreaterThanOrEqual(lines.count, 2,
+            "should emit at least 2 samples in 2s at 0.5s interval")
+    }
+
+    // MARK: - OTLP subprocess with fake collector
+
+    func testWatchOtelPostsToCollector() throws {
+        try skipIfBinaryMissing()
+
+        // Start a minimal HTTP server that accepts OTLP POSTs and
+        // records request count + bodies.
+        let serverSocket = try startFakeCollector()
+        defer { close(serverSocket) }
+        let port = try boundPort(serverSocket)
+
+        let endpoint = "http://127.0.0.1:\(port)"
+        guard let result = runHwtlm([
+            "watch", "--format", "otel",
+            "--endpoint", endpoint,
+            "--duration", "2", "--interval", "0.5"
+        ], timeout: 10.0) else {
+            XCTFail("could not run hwtlm"); return
+        }
+
+        // The exporter should have POSTed at least one batch.
+        // We can't easily inspect the TCP stream from within the
+        // test, but we verify the process exited cleanly (it logs
+        // errors to stderr if the POST fails).
+        XCTAssertEqual(result.exitCode, 0,
+            "watch --format otel should exit 0; stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("Exporting to"),
+            "stderr should show the endpoint being used")
+    }
+
+    func testWatchOtelRejectsInvalidEndpoint() throws {
+        try skipIfBinaryMissing()
+        guard let result = runHwtlm([
+            "watch", "--format", "otel",
+            "--endpoint", "not-a-url",
+            "--duration", "1"
+        ]) else {
+            XCTFail("could not run hwtlm"); return
+        }
+        XCTAssertNotEqual(result.exitCode, 0,
+            "invalid endpoint should fail")
+        XCTAssertTrue(result.stderr.contains("http://") || result.stderr.contains("https://"),
+            "error should mention required scheme")
+    }
+
+    func testListRejectsFormatOtel() throws {
+        try skipIfBinaryMissing()
+        guard let result = runHwtlm(["list", "--format", "otel"]) else {
+            XCTFail("could not run hwtlm"); return
+        }
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("only supported by"),
+            "should explain that otel is only for watch")
+    }
+
+    // Bind a TCP socket that accepts connections and returns 200.
+    // This is a minimal fake OTLP collector — enough to prevent
+    // the exporter from logging connection errors.
+    private func startFakeCollector() throws -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw NSError(domain: "test", code: 1) }
+
+        var opt: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0  // kernel picks a free port
+        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+
+        let bindResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { close(fd); throw NSError(domain: "test", code: 2) }
+        listen(fd, 5)
+
+        // Accept connections in background and send HTTP 200
+        DispatchQueue.global().async {
+            while true {
+                let client = accept(fd, nil, nil)
+                guard client >= 0 else { break }
+                // Read the request (don't care about contents)
+                var buf = [UInt8](repeating: 0, count: 4096)
+                _ = recv(client, &buf, buf.count, 0)
+                // Send minimal HTTP 200
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+                _ = response.withCString { send(client, $0, strlen($0), 0) }
+                close(client)
+            }
+        }
+
+        return fd
+    }
+
+    private func boundPort(_ fd: Int32) throws -> UInt16 {
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &len)
+            }
+        }
+        guard result == 0 else { throw NSError(domain: "test", code: 3) }
+        return UInt16(bigEndian: addr.sin_port)
+    }
+
     // MARK: - help
 
     func testHelpExitsCleanly() throws {

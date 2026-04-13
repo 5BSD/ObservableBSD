@@ -41,3 +41,20 @@ proc:::signal-send
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }
+
+sched:::on-cpu,
+sched:::off-cpu
+/* @dtlm-predicate */
+{
+    printf("%s[%d/tid %d]: sched %s cpu=%d\n", execname, pid, tid, probename, cpu);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}
+
+fbt::vm_fault:entry
+/* @dtlm-predicate */
+{
+    printf("%s[%d]: vm_fault\n", execname, pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}

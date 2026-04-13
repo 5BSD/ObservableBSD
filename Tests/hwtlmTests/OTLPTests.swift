@@ -16,10 +16,12 @@ final class OTLPTests: XCTestCase {
     private func makeExporter() -> OTLPHTTPJSONExporter {
         let resource = ResourceAttributes(
             serviceName: "hwtlm",
+            serviceInstanceId: nil,
             hostName: "test-host",
             osName: "freebsd",
             osVersion: "15.0",
-            serviceVersion: "0.1.0"
+            serviceVersion: "0.1.0",
+            custom: [:]
         )
         return OTLPHTTPJSONExporter(
             endpoint: URL(string: "http://localhost:4318")!,

@@ -7,6 +7,7 @@
 import XCTest
 import Foundation
 @testable import dtlm
+@testable import OTelExport
 
 /// Unit tests for `JSONLExporter` — JSON encoding correctness, body
 /// escaping, stack array shape, and round-tripping the produced

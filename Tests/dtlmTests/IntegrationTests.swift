@@ -360,7 +360,7 @@ final class IntegrationTests: XCTestCase {
     /// Iterates every bundled profile, runs `dtlm watch <profile>
     /// --duration 0.05`, and asserts the watch session starts cleanly.
     /// libdtrace will refuse to run anything that doesn't compile, so
-    /// this catches every invented probe name across the entire 99-
+    /// this catches every invented probe name across the entire 118-
     /// profile catalog in one shot.
     ///
     /// Per-profile timeout is 8 seconds (the runDtlm helper's
@@ -369,8 +369,8 @@ final class IntegrationTests: XCTestCase {
     /// whole suite.
     ///
     /// At ~150ms per profile (50ms duration + ~50ms switchrate +
-    /// ~50ms binary launch overhead), the full sweep against 99
-    /// profiles takes ~15-20 seconds. Skipped when not running as
+    /// ~50ms binary launch overhead), the full sweep against 118
+    /// profiles takes ~18-20 seconds. Skipped when not running as
     /// root.
     func testEveryBundledProfileCompilesViaLibdtrace() throws {
         try XCTSkipUnless(isRoot,

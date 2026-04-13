@@ -20,7 +20,7 @@
 .d profile  →  dtlm  →  libdtrace  →  events + aggregations + stacks  →  formatter  →  text / JSONL / OTLP
 ```
 
-You write or pick a `.d` file. dtlm bundles ~40-50 of them, covering
+You write or pick a `.d` file. dtlm bundles 118 of them, covering
 both system observability (kernel events) and application
 observability (USDT probes for common ports + a generic USDT wrapper
 for your own probes). You run
@@ -45,10 +45,8 @@ stacks as attributes) and **typed OTel metrics** (counts as sums,
 `traceparent` propagation joins your USDT data into existing
 distributed traces.
 
-That's the entire product. One Swift binary. ~2150 LOC. ~50 bundled
-profiles framed as Apple Instruments equivalents + a one-shot
-generator that ships the full ~317-profile catalog via the FreeBSD
-port. **Pluggable exporter architecture** so adding a Prometheus /
+That's the entire product. One Swift binary. ~2150 LOC. 118 bundled
+profiles framed as Apple Instruments equivalents. **Pluggable exporter architecture** so adding a Prometheus /
 Loki / OTLP-protobuf / S3 / vendor-API exporter later is a new
 file, not a rewrite.
 
@@ -116,9 +114,6 @@ in `dtlm list` you pick.
   — Time Profiler, System Trace, File Activity, Network Activity,
   Allocations, Thread States, Lock Contention, etc. — for both
   kernel events and your own USDT-instrumented applications
-- A one-shot generator that ships the full ~296-profile
-  `DBlocks.Dwatch.*` catalog as `.d` files via the FreeBSD port,
-  layered on top of the hand-authored Instruments-equivalent set
 - An OTel exporter that produces **logs** (one `LogRecord` per probe
   firing) and **typed metrics** (sums/gauges/histograms via the right
   OTLP shape per DTrace aggregation kind), with stack traces attached

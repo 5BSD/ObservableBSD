@@ -31,14 +31,27 @@ pid${pid}:libc.so.7:gethostbyname2:entry
 }
 
 pid${pid}:libc.so.7:getaddrinfo:return,
-pid${pid}:libc.so.7:getnameinfo:return,
+pid${pid}:libc.so.7:getnameinfo:return
+/self->dns_ts/
+{
+    this->elapsed_us = (timestamp - self->dns_ts) / 1000;
+    printf("%s[%d]: %s %dus (status=%d)\n",
+        execname, pid, self->dns_func, this->elapsed_us, arg1);
+    @latency[self->dns_func] = quantize(this->elapsed_us);
+    self->dns_ts = 0;
+    self->dns_func = 0;
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}
+
 pid${pid}:libc.so.7:gethostbyname:return,
 pid${pid}:libc.so.7:gethostbyname2:return
 /self->dns_ts/
 {
     this->elapsed_us = (timestamp - self->dns_ts) / 1000;
-    printf("%s[%d]: %s %dus (ret=%d)\n",
-        execname, pid, self->dns_func, this->elapsed_us, arg1);
+    printf("%s[%d]: %s %dus (result=%s)\n",
+        execname, pid, self->dns_func, this->elapsed_us,
+        arg1 != 0 ? "ok" : "NULL");
     @latency[self->dns_func] = quantize(this->elapsed_us);
     self->dns_ts = 0;
     self->dns_func = 0;

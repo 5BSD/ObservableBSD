@@ -1,9 +1,10 @@
 /*
- * Socket bind/listen/connect/accept audit with port context.
+ * Socket lifecycle audit — bind/listen/connect/accept events.
  *
- * Traces the full socket lifecycle: bind, listen, connect, and
- * accept calls with file descriptor context. Essential audit
- * profile for network-facing services.
+ * Traces socket lifecycle calls with file descriptor and
+ * backlog context. Aggregates counts by process. For port/
+ * address details, combine with tcp:::connect-* or ip:::send
+ * probes.
  */
 
 syscall::bind:entry

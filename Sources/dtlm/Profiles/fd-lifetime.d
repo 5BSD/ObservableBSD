@@ -1,45 +1,48 @@
 /*
- * File descriptor lifetime — track open/close pairs.
+ * File descriptor activity — open/close/dup/socket/pipe counts.
  *
- * Records when FDs are created (open, socket, pipe, dup) and
- * when they're closed. At exit, reports FD creation sites
- * that were never closed — potential FD leaks.
+ * Aggregates FD creation and close events by process and source
+ * syscall. Compare open vs close counts to identify FD churn
+ * or potential leaks.
  */
 
 syscall::open:return,
 syscall::openat:return
 /arg1 >= 0 /* @dtlm-predicate-and *//
 {
-    fd_open_ts[pid, arg1] = timestamp;
     @fd_opens[execname, probefunc] = count();
 }
 
 syscall::socket:return
 /arg1 >= 0 /* @dtlm-predicate-and *//
 {
-    fd_open_ts[pid, arg1] = timestamp;
     @fd_opens[execname, "socket"] = count();
 }
 
-syscall::pipe:return
+syscall::pipe:return,
+syscall::pipe2:return
 /arg0 == 0 /* @dtlm-predicate-and *//
 {
-    @fd_opens[execname, "pipe"] = count();
+    @fd_opens[execname, probefunc] = count();
 }
 
 syscall::dup:return,
 syscall::dup2:return
 /arg1 >= 0 /* @dtlm-predicate-and *//
 {
-    fd_open_ts[pid, arg1] = timestamp;
     @fd_opens[execname, probefunc] = count();
+}
+
+syscall::socketpair:return
+/arg0 == 0 /* @dtlm-predicate-and *//
+{
+    @fd_opens[execname, "socketpair"] = count();
 }
 
 syscall::close:entry
 /* @dtlm-predicate */
 {
     @fd_closes[execname] = count();
-    fd_open_ts[pid, arg0] = 0;
 }
 
 dtrace:::END

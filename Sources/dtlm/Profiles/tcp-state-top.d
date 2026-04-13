@@ -10,6 +10,18 @@ tcp:::state-change
 /* @dtlm-predicate */
 {
     @transitions[execname,
+        args[5]->tcps_state == 0 ? "CLOSED" :
+        args[5]->tcps_state == 1 ? "LISTEN" :
+        args[5]->tcps_state == 2 ? "SYN_SENT" :
+        args[5]->tcps_state == 3 ? "SYN_RCVD" :
+        args[5]->tcps_state == 4 ? "ESTABLISHED" :
+        args[5]->tcps_state == 5 ? "CLOSE_WAIT" :
+        args[5]->tcps_state == 6 ? "FIN_WAIT_1" :
+        args[5]->tcps_state == 7 ? "CLOSING" :
+        args[5]->tcps_state == 8 ? "LAST_ACK" :
+        args[5]->tcps_state == 9 ? "FIN_WAIT_2" :
+        args[5]->tcps_state == 10 ? "TIME_WAIT" :
+        "UNKNOWN",
         args[3]->tcps_state == 0 ? "CLOSED" :
         args[3]->tcps_state == 1 ? "LISTEN" :
         args[3]->tcps_state == 2 ? "SYN_SENT" :
@@ -21,18 +33,6 @@ tcp:::state-change
         args[3]->tcps_state == 8 ? "LAST_ACK" :
         args[3]->tcps_state == 9 ? "FIN_WAIT_2" :
         args[3]->tcps_state == 10 ? "TIME_WAIT" :
-        "UNKNOWN",
-        args[4]->tcps_state == 0 ? "CLOSED" :
-        args[4]->tcps_state == 1 ? "LISTEN" :
-        args[4]->tcps_state == 2 ? "SYN_SENT" :
-        args[4]->tcps_state == 3 ? "SYN_RCVD" :
-        args[4]->tcps_state == 4 ? "ESTABLISHED" :
-        args[4]->tcps_state == 5 ? "CLOSE_WAIT" :
-        args[4]->tcps_state == 6 ? "FIN_WAIT_1" :
-        args[4]->tcps_state == 7 ? "CLOSING" :
-        args[4]->tcps_state == 8 ? "LAST_ACK" :
-        args[4]->tcps_state == 9 ? "FIN_WAIT_2" :
-        args[4]->tcps_state == 10 ? "TIME_WAIT" :
         "UNKNOWN"] = count();
 }
 

@@ -1,9 +1,10 @@
 /*
- * Short-lived processes — processes that spawn and exit quickly.
+ * Process lifetime — create-to-exit duration by execname.
  *
- * Tracks process creation to exit time. Short-lived processes
- * (< 100ms) are often shell script churn, cron jobs, or health
- * checks. High rates waste fork/exec overhead.
+ * Tracks process creation to exit time and quantizes the
+ * lifetime distribution. Short-lived processes cluster in
+ * the low-microsecond buckets; long-running daemons in the
+ * high-second buckets. Use the histogram to spot churn.
  */
 
 proc:::create

@@ -81,9 +81,8 @@ One receiver, `otlp`, with both transports enabled.
 - **Port 4318** is the standard OTLP/HTTP port. It accepts POSTs to
   `/v1/logs`, `/v1/metrics`, and `/v1/traces`. Payloads can be either
   protobuf (`Content-Type: application/x-protobuf`) or JSON
-  (`Content-Type: application/json`). dtlm's planned exporter will
-  use JSON on this port — that's the `OTLPHTTPJSONExporter` name in
-  `DESIGN.md` §9.
+  (`Content-Type: application/json`). dtlm and hwtlm use JSON
+  on this port via `OTLPHTTPJSONExporter`.
 - **Port 4317** is the standard OTLP/gRPC port. We enabled it even
   though dtlm doesn't target gRPC today, because it's free — the
   receiver exposes both transports by default and disabling gRPC

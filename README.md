@@ -176,13 +176,74 @@ sudo dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms
 
 ---
 
+## hwtlm
+
+**Hardware telemetry for FreeBSD, with OpenTelemetry output.**
+
+`hwtlm` collects CPU power consumption (Intel RAPL), per-core
+temperatures, frequencies, C-state residency, ACPI thermal zones,
+and GPU state — and ships them as text, JSONL, or OTLP metrics.
+
+```sh
+# List available sensors
+hwtlm list
+
+# Sample every 2 seconds, text output
+sudo hwtlm watch --interval 2
+
+# Per-core breakdown
+sudo hwtlm watch --per-core --interval 1
+
+# Send to OTel collector
+sudo hwtlm watch --format otel --endpoint http://localhost:4318 --interval 5
+
+# Measure energy cost of running a command
+sudo hwtlm exec -- make -j20
+
+# Run for 30 seconds
+sudo hwtlm watch --duration 30
+```
+
+Requires the `cpuctl` kernel module for RAPL power data and
+`coretemp` for temperature readings:
+```sh
+sudo kldload cpuctl
+sudo kldload coretemp
+```
+
+Gracefully degrades on non-Intel systems — sysctl-based sensors
+(temperatures, frequencies) work on all architectures.
+
+---
+
+## OTel Configuration
+
+Both tools respect standard OpenTelemetry environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `OTEL_SERVICE_NAME` | Override `service.name` resource attribute |
+| `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes (`key=value,key=value`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector base URL (overrides `--endpoint` default) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (`key=value,key=value`) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Export timeout in milliseconds (default 10000) |
+
+Example with Grafana Cloud:
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-east-0.grafana.net/otlp
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n '<instance>:<token>' | base64)"
+sudo dtlm watch syscall-counts --format otel --duration 60
+```
+
+---
+
 ## Requirements
 
 - FreeBSD 15.0 or later
 - Swift 6.3 or later
 - DTrace enabled in the running kernel (default on `GENERIC`)
-- Root to run probes (libdtrace requires it)
-- For OTLP output: an OpenTelemetry collector on the network (e.g. `otelcol-contrib`)
+- Root for dtlm probes and hwtlm RAPL/cpuctl access
+- For OTLP output: an OpenTelemetry collector (e.g. `otelcol-contrib`)
 
 ## Building
 
@@ -190,10 +251,12 @@ sudo dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms
 swift build
 ```
 
+Builds both `dtlm` and `hwtlm` into `.build/debug/`.
+
 ## Testing
 
 ```sh
-# Unit + structural tests (no root needed, 93 tests)
+# Unit + structural tests (no root needed, 152 tests)
 swift test
 
 # Full integration sweep including libdtrace compilation of
@@ -206,9 +269,10 @@ sudo chown -R $(id -un):$(id -gn) .build
 
 ## Dependencies
 
-- [FreeBSDKit](https://github.com/SwiftBSD/FreeBSDKit) >= 0.2.6 (DTraceCore module)
+- [FreeBSDKit](https://github.com/SwiftBSD/FreeBSDKit) >= 0.2.6
 - [swift-argument-parser](https://github.com/apple/swift-argument-parser) >= 1.2.0
 - libz (system, for gzip compression)
+- cpuctl(4) kernel module (for hwtlm RAPL access)
 
 ## License
 

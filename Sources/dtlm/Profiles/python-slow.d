@@ -18,6 +18,8 @@ pid${pid}::function__return:entry
     this->elapsed_us = (timestamp - self->entry[self->depth]) / 1000;
     printf("python[%d]: %dus %s:%s\n",
         pid, this->elapsed_us, copyinstr(arg0), copyinstr(arg1));
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
     @slow[copyinstr(arg0), copyinstr(arg1)] = quantize(this->elapsed_us);
     self->entry[self->depth] = 0;
     self->depth--;

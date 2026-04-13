@@ -4,4 +4,6 @@ sched:::off-cpu
 /* @dtlm-predicate */
 {
     printf("%s[%d/tid %d]: sched off-cpu\n", execname, pid, tid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

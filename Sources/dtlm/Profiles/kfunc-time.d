@@ -14,6 +14,8 @@ fbt::${func}:return
 {
     this->elapsed_us = (timestamp - self->entry) / 1000;
     printf("%s[%d]: ${func} %dus\n", execname, pid, this->elapsed_us);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
     @latency["${func}-us"] = quantize(this->elapsed_us);
     self->entry = 0;
 }

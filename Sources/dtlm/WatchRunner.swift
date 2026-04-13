@@ -261,6 +261,52 @@ struct WatchRunner {
         let profileName = profile.name
         let errorBox = HandlerErrorBox()
 
+        // Accumulator for grouping printf body + subsequent stack
+        // frames into a single ProbeEvent. DTrace delivers each
+        // stack() / ustack() frame as a separate buffered output
+        // callback with whitespace-prefixed text. We detect these
+        // by checking if the line starts with whitespace, then
+        // flush the accumulated event when the next non-stack
+        // line arrives.
+        var pendingBody: String? = nil
+        var pendingKStack: [StackFrame] = []
+        var pendingUStack: [StackFrame] = []
+        var pendingTimestamp = Date()
+        var inUStack = false  // track which stack section we're in
+
+        // Flush the pending event to the exporter.
+        func flushPending() {
+            guard let body = pendingBody else { return }
+            // Best-effort execname extraction from the printf body.
+            // Most profiles format as "execname[pid/...]: ..." so
+            // the text before the first '[' is the process name.
+            let parsedExecname: String
+            if let bracket = body.firstIndex(of: "[") {
+                parsedExecname = String(body[body.startIndex..<bracket])
+            } else {
+                parsedExecname = ""
+            }
+            let event = ProbeEvent(
+                timestamp: pendingTimestamp,
+                profileName: profileName,
+                probeName: "",
+                pid: 0,
+                execname: parsedExecname,
+                printfBody: body,
+                stack: pendingKStack.isEmpty ? nil : pendingKStack,
+                ustack: pendingUStack.isEmpty ? nil : pendingUStack
+            )
+            pendingBody = nil
+            pendingKStack = []
+            pendingUStack = []
+            inUStack = false
+            do {
+                try exporterRef.emit(event: event)
+            } catch {
+                errorBox.error = error
+            }
+        }
+
         // Register the buffered output handler. libdtrace calls this
         // synchronously from dtrace_work() for every printf/printa
         // action output instead of writing to the FILE*. The handler
@@ -274,25 +320,45 @@ struct WatchRunner {
                 return true
             }
 
-            let text = data.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return true }
-
-            let event = ProbeEvent(
-                timestamp: Date(),
-                profileName: profileName,
-                probeName: "",
-                pid: 0,
-                execname: "",
-                printfBody: text,
-                stack: nil,
-                ustack: nil
+            // libdtrace may deliver multiple lines in a single
+            // callback (especially for stack() output). Split into
+            // individual lines and process each one.
+            let lines = data.output.split(
+                separator: "\n",
+                omittingEmptySubsequences: false
             )
-            do {
-                try exporterRef.emit(event: event)
-            } catch {
-                errorBox.error = error
-                return false  // abort consume
+            for line in lines {
+                let raw = String(line)
+                let trimmed = raw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard !trimmed.isEmpty else { continue }
+
+                // Stack frames from DTrace start with whitespace and
+                // typically contain ` (backtick) or 0x (hex address).
+                let isStackFrame = raw.first?.isWhitespace == true
+                    && (trimmed.contains("`") || trimmed.hasPrefix("0x"))
+
+                if isStackFrame {
+                    let frame = Self.parseStackFrame(trimmed)
+                    if inUStack {
+                        pendingUStack.append(frame)
+                    } else {
+                        pendingKStack.append(frame)
+                    }
+                } else if trimmed == "__DTLM_USTACK__" {
+                    // Marker between stack() and ustack() output.
+                    inUStack = true
+                } else {
+                    // Non-stack line — flush any pending event,
+                    // start accumulating a new one.
+                    flushPending()
+                    pendingBody = trimmed
+                    pendingTimestamp = Date()
+                }
             }
+
+            if errorBox.error != nil { return false }
             return true
         }
 
@@ -319,6 +385,10 @@ struct WatchRunner {
                 break loop
             }
         }
+
+        // Flush any pending event that was still accumulating
+        // when the poll loop ended (last event before shutdown).
+        flushPending()
 
         // Snapshot aggregations and walk them as typed records.
         // aggregateSnap() triggers the kernel snapshot, then
@@ -390,6 +460,39 @@ struct WatchRunner {
         if let err = errorBox.error {
             throw err
         }
+    }
+
+    /// Parse a DTrace stack frame line into a StackFrame.
+    ///
+    /// DTrace formats stack frames as:
+    ///   `module\`symbol+0xoffset`
+    ///   `symbol+0xoffset`
+    ///   `0xdeadbeef`
+    static func parseStackFrame(_ line: String) -> StackFrame {
+        let s = line.trimmingCharacters(in: .whitespaces)
+
+        // Try module`symbol+0xoffset
+        if let btIdx = s.firstIndex(of: "`") {
+            let module = String(s[s.startIndex..<btIdx])
+            let rest = String(s[s.index(after: btIdx)...])
+
+            if let plusIdx = rest.lastIndex(of: "+"),
+               rest[rest.index(after: plusIdx)...].hasPrefix("0x") {
+                let symbol = String(rest[rest.startIndex..<plusIdx])
+                let hexStr = String(rest[rest.index(plusIdx, offsetBy: 3)...])
+                let offset = UInt64(hexStr, radix: 16) ?? 0
+                return StackFrame(address: 0, module: module, symbol: symbol, offset: offset)
+            }
+            return StackFrame(address: 0, module: module, symbol: rest)
+        }
+
+        // Try bare hex address
+        if s.hasPrefix("0x"), let addr = UInt64(s.dropFirst(2), radix: 16) {
+            return StackFrame(address: addr)
+        }
+
+        // Fallback: treat as symbol name
+        return StackFrame(address: 0, symbol: s)
     }
 
     /// Map DTraceCore's AggregationAction to dtlm's AggregationKind.

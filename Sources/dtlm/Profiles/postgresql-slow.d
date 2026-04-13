@@ -15,6 +15,8 @@ pid${pid}::query__done:entry
 {
     this->elapsed_ms = (timestamp - self->start) / 1000000;
     printf("postgres[%d]: %dms %s\n", pid, this->elapsed_ms, self->query);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
     @latency["query-latency-ms"] = quantize(this->elapsed_ms);
     self->start = 0;
     self->query = 0;

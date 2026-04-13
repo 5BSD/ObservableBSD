@@ -8,10 +8,14 @@ pid${pid}::function__entry:entry
 {
     printf("python[%d]: -> %s:%s:%d\n",
         pid, copyinstr(arg0), copyinstr(arg1), arg2);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::function__return:entry
 {
     printf("python[%d]: <- %s:%s:%d\n",
         pid, copyinstr(arg0), copyinstr(arg1), arg2);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

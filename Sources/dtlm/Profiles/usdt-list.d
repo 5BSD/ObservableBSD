@@ -7,4 +7,6 @@ pid${pid}:::entry
 {
     printf("%s[%d]: %s:%s:%s:%s\n",
         execname, pid, probeprov, probemod, probefunc, probename);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

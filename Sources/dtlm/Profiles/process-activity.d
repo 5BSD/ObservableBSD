@@ -10,6 +10,7 @@ proc:::create
 /* @dtlm-predicate */
 {
     printf("%s[%d]: create\n", execname, pid);
+    /* @dtlm-stack */
     /* @dtlm-ustack */
 }
 
@@ -17,6 +18,7 @@ proc:::exec-success
 /* @dtlm-predicate */
 {
     printf("%s[%d]: exec-success\n", execname, pid);
+    /* @dtlm-stack */
     /* @dtlm-ustack */
 }
 
@@ -24,12 +26,15 @@ proc:::exec-failure
 /* @dtlm-predicate */
 {
     printf("%s[%d]: exec-failure\n", execname, pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 proc:::exit
 /* @dtlm-predicate */
 {
     printf("%s[%d]: exit\n", execname, pid);
+    /* @dtlm-stack */
     /* @dtlm-ustack */
 }
 
@@ -37,4 +42,6 @@ proc:::signal-send
 /* @dtlm-predicate */
 {
     printf("%s[%d]: signal-send\n", execname, pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

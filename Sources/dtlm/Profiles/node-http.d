@@ -8,20 +8,28 @@ pid${pid}::http__server__request:entry
 {
     printf("node[%d]: HTTP %s %s\n",
         pid, copyinstr(arg4), copyinstr(arg5));
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::http__server__response:entry
 {
     printf("node[%d]: HTTP response\n", pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::http__client__request:entry
 {
     printf("node[%d]: HTTP client %s %s\n",
         pid, copyinstr(arg4), copyinstr(arg5));
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::http__client__response:entry
 {
     printf("node[%d]: HTTP client response\n", pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

@@ -211,6 +211,12 @@ enum OutputFormat: String, ExpressibleByArgument, Sendable {
     /// endpoint. Feeds directly into Grafana, Jaeger, Loki, or any
     /// OTel-compatible backend.
     case otel
+
+    /// Collapsed stack format for flamegraph generation. Folds
+    /// identical stack traces and emits one line per unique stack
+    /// with a count. Pipe to `flamegraph.pl` or import into
+    /// speedscope. Requires `--with-stack` and/or `--with-ustack`.
+    case collapsed
 }
 
 struct FormatOption: ParsableArguments {
@@ -218,14 +224,17 @@ struct FormatOption: ParsableArguments {
     @Option(
         name: .customLong("format"),
         help: ArgumentHelp(
-            "Output format: text (default), json (JSONL), or otel (OTLP/HTTP).",
+            "Output format: text (default), json, otel, or collapsed.",
             discussion: """
                 'text' streams libdtrace's formatted output directly \
                 to stdout, including aggregation tables. 'json' wraps \
                 each line as a JSONL record with time/profile/body \
                 fields, suitable for piping to jq, Loki, Vector, etc. \
                 'otel' batches events as OTLP LogRecords and POSTs \
-                them to an OpenTelemetry collector (see --endpoint).
+                them to an OpenTelemetry collector (see --endpoint). \
+                'collapsed' folds stack traces into the format used \
+                by flamegraph.pl and speedscope (requires --with-stack \
+                and/or --with-ustack).
                 """
         )
     )

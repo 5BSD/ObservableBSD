@@ -9,6 +9,8 @@ pid${pid}::method__entry:entry
     printf("ruby[%d]: -> %s#%s (%s:%d)\n",
         pid, copyinstr(arg0), copyinstr(arg1),
         copyinstr(arg2), arg3);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::method__return:entry
@@ -16,4 +18,6 @@ pid${pid}::method__return:entry
     printf("ruby[%d]: <- %s#%s (%s:%d)\n",
         pid, copyinstr(arg0), copyinstr(arg1),
         copyinstr(arg2), arg3);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

@@ -11,6 +11,7 @@ syscall:::entry
 /* @dtlm-predicate */
 {
     printf("%s[%d]: syscall %s entry\n", execname, pid, probefunc);
+    /* @dtlm-stack */
     /* @dtlm-ustack */
 }
 
@@ -18,6 +19,8 @@ syscall:::return
 /* @dtlm-predicate */
 {
     printf("%s[%d]: syscall %s return = %d\n", execname, pid, probefunc, (int)arg1);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 proc:::create,
@@ -27,6 +30,7 @@ proc:::exit
 /* @dtlm-predicate */
 {
     printf("%s[%d]: proc %s\n", execname, pid, probename);
+    /* @dtlm-stack */
     /* @dtlm-ustack */
 }
 
@@ -34,4 +38,6 @@ proc:::signal-send
 /* @dtlm-predicate */
 {
     printf("%s[%d]: proc signal-send sig=%d\n", execname, pid, (int)arg2);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }

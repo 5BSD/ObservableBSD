@@ -7,6 +7,8 @@
 pid${pid}::query__start:entry
 {
     printf("mysql[%d]: query-start %s\n", pid, copyinstr(arg0));
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
     self->qstart = timestamp;
 }
 
@@ -15,6 +17,8 @@ pid${pid}::query__done:entry
 {
     this->elapsed_ms = (timestamp - self->qstart) / 1000000;
     printf("mysql[%d]: query-done %dms\n", pid, this->elapsed_ms);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
     @latency["query-latency-ms"] = quantize(this->elapsed_ms);
     self->qstart = 0;
 }
@@ -22,11 +26,15 @@ pid${pid}::query__done:entry
 pid${pid}::connection__start:entry
 {
     printf("mysql[%d]: connection-start\n", pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 pid${pid}::connection__done:entry
 {
     printf("mysql[%d]: connection-done\n", pid);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
 }
 
 dtrace:::END

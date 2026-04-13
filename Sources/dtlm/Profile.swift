@@ -121,9 +121,22 @@ struct Profile: Sendable {
             of: "/* @dtlm-stack */",
             with: withStack ? "stack();" : ""
         )
+        // When both stack types are captured, inject a marker
+        // printf between them so the structured backend can
+        // distinguish kernel frames from user frames.
+        let ustackAction: String
+        if withUstack {
+            if withStack {
+                ustackAction = "printf(\"__DTLM_USTACK__\\n\"); ustack();"
+            } else {
+                ustackAction = "ustack();"
+            }
+        } else {
+            ustackAction = ""
+        }
         rendered = rendered.replacingOccurrences(
             of: "/* @dtlm-ustack */",
-            with: withUstack ? "ustack();" : ""
+            with: ustackAction
         )
 
         // 4. CLI-supplied duration injection.

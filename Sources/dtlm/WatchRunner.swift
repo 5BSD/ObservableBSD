@@ -67,36 +67,16 @@ struct WatchRunner {
             durationSeconds: durationSeconds
         )
 
-        // Open the libdtrace handle.
         let handle: DTraceHandle = try DTraceHandle.open()
-        defer {
-            // Best-effort cleanup. We don't propagate errors here
-            // because the run is already over by the time we hit it.
-            try? handle.stop()
-        }
+        defer { try? handle.stop() }
 
-        // dtrace(1)-equivalent option defaults. Without these,
-        // dtrace_go() refuses to start with "Enabling exceeds size
-        // of buffer" because the principal buffer hasn't been
-        // sized.
-        //
-        //   - bufsize=4m  : per-CPU principal buffer for trace data
-        //   - aggsize=4m  : aggregation buffer for @-aggregations
-        //   - switchrate=50ms : how often the kernel swaps buffers
-        //                       so the consumer can read them, AND
-        //                       the maximum latency between an
-        //                       in-script exit(0) firing and dtlm
-        //                       noticing the session is done. We use
-        //                       50ms (vs dtrace(1)'s 1sec default)
-        //                       to keep --duration short profiles
-        //                       responsive — a profile with
-        //                       --duration 0.1 should take ~150ms,
-        //                       not ~1.1s.
+        // Required libdtrace defaults. switchrate=50ms (vs dtrace(1)'s
+        // 1s) keeps --duration short profiles responsive.
         try handle.setBufferSize(bufsize ?? "4m")
         try handle.setAggregationBufferSize("4m")
         try handle.setSwitchRate(switchrate ?? "50ms")
 
-        // Quiet mode: suppress libdtrace's default banner. The
+        // Suppress libdtrace banner. The
         // script's printfs still come through the buffered-output
         // handler.
         try handle.setQuiet()
@@ -115,14 +95,9 @@ struct WatchRunner {
 
         _ = try handle.exec(program)
 
-        // Tell the exporter to start. TextExporter no-ops here.
-        // Future network exporters (OTel, Prometheus) will use this
-        // to open their connections.
         try exporter.start()
 
-        // Install a SIGINT handler so Ctrl-C stops the loop cleanly
-        // instead of bailing in the middle of a work() call. Shared
-        // by both backends.
+        // SIGINT/SIGTERM stop the loop cleanly.
         let stopFlag = StopFlag()
         installSigintHandler(stopFlag)
 

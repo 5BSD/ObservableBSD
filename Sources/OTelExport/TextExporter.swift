@@ -80,16 +80,5 @@ public final class TextExporter: Exporter {
         output.write(data)
     }
 
-    private func formatFrame(_ frame: StackFrame) -> String {
-        if let module = frame.module, let symbol = frame.symbol {
-            if let offset = frame.offset {
-                return "\(module)`\(symbol)+0x\(String(offset, radix: 16))"
-            }
-            return "\(module)`\(symbol)"
-        }
-        if let symbol = frame.symbol {
-            return symbol
-        }
-        return String(format: "0x%016llx", frame.address)
-    }
+    private func formatFrame(_ frame: StackFrame) -> String { frame.formatted }
 }

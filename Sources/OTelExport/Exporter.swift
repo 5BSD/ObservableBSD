@@ -301,3 +301,46 @@ public func escapeJSON(_ s: String) -> String {
     }
     return out
 }
+
+// MARK: - Stack frame formatting
+
+extension StackFrame {
+    /// Format as `module\`symbol+0xoffset`, `symbol`, or `0xaddress`.
+    public var formatted: String {
+        if let module, let symbol {
+            if let offset {
+                return "\(module)`\(symbol)+0x\(String(offset, radix: 16))"
+            }
+            return "\(module)`\(symbol)"
+        }
+        if let symbol { return symbol }
+        return String(format: "0x%016llx", address)
+    }
+}
+
+// MARK: - Host detection
+
+public enum HostInfo {
+    public static var hostName: String {
+        var buf = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buf, buf.count) == 0 else { return "localhost" }
+        let bytes = buf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    public static var osVersion: String {
+        var uts = utsname()
+        guard uname(&uts) == 0 else { return "" }
+        return withUnsafePointer(to: &uts.release) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
+        }
+    }
+
+    public static var machineArch: String {
+        var uts = utsname()
+        guard uname(&uts) == 0 else { return "" }
+        return withUnsafePointer(to: &uts.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
+        }
+    }
+}

@@ -74,10 +74,10 @@ struct WatchCommand: ParsableCommand {
             let otelEnv = OTelEnvironment()
             let resource = ResourceAttributes(
                 serviceName: otelEnv.serviceName ?? "hwtlm",
-                hostName: hostName(),
-                hostArch: machineArch(),
+                hostName: HostInfo.hostName,
+                hostArch: HostInfo.machineArch,
                 osName: "freebsd",
-                osVersion: osVersionString(),
+                osVersion: HostInfo.osVersion,
                 serviceVersion: "0.1.0",
                 custom: otelEnv.resourceAttributes
             )
@@ -271,30 +271,4 @@ struct WatchCommand: ParsableCommand {
 
     // MARK: - Helpers
 
-    private func hostName() -> String {
-        var buf = [CChar](repeating: 0, count: 256)
-        guard Glibc.gethostname(&buf, buf.count) == 0 else { return "localhost" }
-        let bytes = buf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
-    private func osVersionString() -> String {
-        var uts = utsname()
-        guard Glibc.uname(&uts) == 0 else { return "" }
-        return withUnsafePointer(to: &uts.release) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
-                String(cString: $0)
-            }
-        }
-    }
-
-    private func machineArch() -> String {
-        var uts = utsname()
-        guard Glibc.uname(&uts) == 0 else { return "" }
-        return withUnsafePointer(to: &uts.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
-                String(cString: $0)
-            }
-        }
-    }
 }

@@ -29,6 +29,12 @@ struct ListCommand: ParsableCommand {
     @Flag(name: .customLong("per-core"), help: "Show per-core detail instead of summary.")
     var perCore: Bool = false
 
+    func validate() throws {
+        if format == .otel {
+            throw ValidationError("--format otel is only supported by `hwtlm watch`")
+        }
+    }
+
     func run() throws {
         let cpuCount = CpuctlReader.detectCPUCount()
         let rapl = RAPLSampler()

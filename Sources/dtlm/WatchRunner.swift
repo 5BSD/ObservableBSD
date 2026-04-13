@@ -253,20 +253,19 @@ struct WatchRunner {
         // Flush the pending event to the exporter.
         func flushPending() {
             guard let body = pendingBody else { return }
-            // Best-effort execname extraction from the printf body.
+            // Best-effort metadata extraction from the printf body.
             // Most profiles format as "execname[pid/...]: ..." so
-            // the text before the first '[' is the process name.
-            let parsedExecname: String
-            if let bracket = body.firstIndex(of: "[") {
-                parsedExecname = String(body[body.startIndex..<bracket])
-            } else {
-                parsedExecname = ""
-            }
+            // we parse execname and pid from the text.
+            let (parsedExecname, parsedPid) = Self.parseMetadata(from: body)
+            // probeName is left empty because the structured backend's
+            // buffered output callback doesn't receive the probe
+            // description — libdtrace only provides the formatted
+            // printf text. The profile name is already in profileName.
             let event = ProbeEvent(
                 timestamp: pendingTimestamp,
                 profileName: profileName,
                 probeName: "",
-                pid: 0,
+                pid: parsedPid,
                 execname: parsedExecname,
                 printfBody: body,
                 stack: pendingKStack.isEmpty ? nil : pendingKStack,
@@ -474,6 +473,26 @@ struct WatchRunner {
         return StackFrame(address: 0, symbol: s)
     }
 
+    /// Parse execname and pid from the printf body.
+    ///
+    /// Most profiles format as `execname[pid/...]` or `execname[pid]`.
+    /// Returns `("", 0)` if the pattern doesn't match.
+    static func parseMetadata(from body: String) -> (execname: String, pid: Int32) {
+        guard let bracket = body.firstIndex(of: "[") else {
+            return ("", 0)
+        }
+        let execname = String(body[body.startIndex..<bracket])
+        // Parse pid: digits immediately after '['
+        let afterBracket = body[body.index(after: bracket)...]
+        var pidStr = ""
+        for ch in afterBracket {
+            if ch.isNumber { pidStr.append(ch) }
+            else { break }
+        }
+        let pid = Int32(pidStr) ?? 0
+        return (execname, pid)
+    }
+
     /// Map DTraceCore's AggregationAction to dtlm's AggregationKind.
     private func mapAction(_ action: DTraceHandle.AggregationAction) -> AggregationKind {
         switch action {
@@ -515,24 +534,22 @@ private final class HandlerErrorBox: @unchecked Sendable {
 
 // MARK: - Stop flag for SIGINT handling
 
-/// Tiny class wrapping a flag so the SIGINT handler can flip it.
-/// Reference type so the closure capture writes through.
+// Global sig_atomic_t flag — the only type guaranteed safe to
+// write from a POSIX signal handler. No Swift object access,
+// no locks, no reference counting in the handler.
+nonisolated(unsafe) private var signalReceived: sig_atomic_t = 0
+
+/// Thin wrapper so the poll loop can check the flag conveniently.
 final class StopFlag: @unchecked Sendable {
-    private var _flag: Bool = false
-    var isSet: Bool { _flag }
-    func set() { _flag = true }
+    var isSet: Bool { signalReceived != 0 }
+    func set() { signalReceived = 1 }
 }
 
-// Global slot for the active StopFlag, because signal handlers
-// can't capture state. Only one WatchRunner runs at a time per
-// process so this is safe.
-nonisolated(unsafe) private var globalStopFlag: StopFlag?
-
 private func installSigintHandler(_ flag: StopFlag) {
-    globalStopFlag = flag
+    signalReceived = 0
     var sa = sigaction()
     sa.__sigaction_u.__sa_handler = { _ in
-        globalStopFlag?.set()
+        signalReceived = 1
     }
     sigemptyset(&sa.sa_mask)
     sa.sa_flags = 0

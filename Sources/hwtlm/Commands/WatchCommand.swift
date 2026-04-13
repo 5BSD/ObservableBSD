@@ -9,12 +9,14 @@ import Foundation
 import Glibc
 import OTelExport
 
+// Global sig_atomic_t flag — the only type guaranteed safe to
+// write from a POSIX signal handler.
+private nonisolated(unsafe) var signalReceived: sig_atomic_t = 0
+
 private final class StopFlag: @unchecked Sendable {
-    private var _stopped = false
-    var isSet: Bool { _stopped }
-    func set() { _stopped = true }
+    var isSet: Bool { signalReceived != 0 }
+    func set() { signalReceived = 1 }
 }
-private nonisolated(unsafe) var globalStopFlag: StopFlag?
 
 // MARK: - hwtlm watch
 
@@ -65,14 +67,14 @@ struct WatchCommand: ParsableCommand {
         let cpuCount = CpuctlReader.detectCPUCount()
         let rapl = RAPLSampler()
 
-        let count: Int?
-        if let duration { count = max(1, Int(duration / interval)) }
-        else { count = nil }
+        let deadline: Date?
+        if let duration { deadline = Date().addingTimeInterval(duration) }
+        else { deadline = nil }
 
         let stopFlag = StopFlag()
-        globalStopFlag = stopFlag
+        signalReceived = 0
         var sa = sigaction()
-        sa.__sigaction_u.__sa_handler = { _ in globalStopFlag?.set() }
+        sa.__sigaction_u.__sa_handler = { _ in signalReceived = 1 }
         sigemptyset(&sa.sa_mask)
         sa.sa_flags = 0
         sigaction(SIGINT, &sa, nil)
@@ -91,16 +93,25 @@ struct WatchCommand: ParsableCommand {
                 serviceVersion: "0.1.0",
                 custom: otelEnv.resourceAttributes
             )
-            let endpointStr = otelEnv.endpoint ?? endpoint
+            // An explicit --endpoint flag takes precedence over
+            // OTEL_EXPORTER_OTLP_ENDPOINT; the env var only
+            // overrides the compiled-in default.
+            let cliIsDefault = endpoint == "http://localhost:4318"
+            let endpointStr = (cliIsDefault ? otelEnv.endpoint : nil) ?? endpoint
+            guard let endpointURL = URL(string: endpointStr),
+                  endpointURL.scheme == "http" || endpointURL.scheme == "https" else {
+                throw ValidationError("OTLP endpoint must be an http:// or https:// URL, got: '\(endpointStr)'")
+            }
             let timeout = otelEnv.timeoutMs.map { TimeInterval($0) / 1000.0 } ?? 10.0
             let exporter = OTLPHTTPJSONExporter(
-                endpoint: URL(string: endpointStr)!,
+                endpoint: endpointURL,
                 profileName: "hardware",
                 resource: resource,
                 batchSize: 50,
                 flushInterval: Double(interval),
                 exportTimeout: timeout,
-                headers: otelEnv.headers
+                headers: otelEnv.headers,
+                compression: otelEnv.compression
             )
             try exporter.start()
             otelExporter = exporter
@@ -134,7 +145,7 @@ struct WatchCommand: ParsableCommand {
         // Sampling loop
         if let rapl {
             do {
-                try rapl.run(count: count, intervalSeconds: interval) { snapshot in
+                try rapl.run(deadline: deadline, intervalSeconds: interval) { snapshot in
                     guard !stopFlag.isSet else { throw ExitCode.success }
                     let sys = SysctlReader.snapshot(cpuCount: cpuCount)
                     try emitSample(rapl: snapshot, sys: sys, otel: otelExporter)
@@ -147,14 +158,13 @@ struct WatchCommand: ParsableCommand {
             }
         } else {
             let intervalMicros = useconds_t(interval * 1_000_000)
-            var taken = 0
             do {
-                while count == nil || taken < count! {
+                while true {
                     usleep(intervalMicros)
                     guard !stopFlag.isSet else { throw ExitCode.success }
                     let sys = SysctlReader.snapshot(cpuCount: cpuCount)
                     try emitSample(rapl: nil, sys: sys, otel: otelExporter)
-                    taken += 1
+                    if let deadline, Date() >= deadline { break }
                 }
             } catch let code as ExitCode where code == .success { }
             catch {
@@ -208,7 +218,7 @@ struct WatchCommand: ParsableCommand {
                 try exporter.emit(snapshot: AggregationSnapshot(
                     timestamp: sample.timestamp,
                     profileName: "power",
-                    aggregationName: sample.domain.rawValue + "_watts",
+                    aggregationName: sample.domain.rawValue + "_milliwatts",
                     kind: .avg,
                     dataPoints: [DataPoint(
                         keys: [sample.domain.rawValue],
@@ -247,7 +257,7 @@ struct WatchCommand: ParsableCommand {
                             timestamp: now, profileName: "cpu",
                             aggregationName: "cstate_\(level.name.lowercased())_pct",
                             kind: .avg,
-                            dataPoints: [DataPoint(keys: [cpuKey], value: .scalar(Int64(residency.percentages[i] * 100)))]
+                            dataPoints: [DataPoint(keys: [cpuKey], value: .scalar(Int64(residency.percentages[i])))]
                         ))
                     }
                 }

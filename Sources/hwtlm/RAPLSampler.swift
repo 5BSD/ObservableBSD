@@ -114,23 +114,23 @@ final class RAPLSampler {
         return RAPLSnapshot(timestamp: now, samples: samples)
     }
 
-    /// Sample `count` times at the given interval. If `count` is nil,
-    /// runs until interrupted.
+    /// Sample at the given interval until the deadline (or forever
+    /// if nil). The deadline is a wall-clock bound — the loop stops
+    /// after the first sample whose timestamp exceeds it.
     func run(
-        count: Int?,
+        deadline: Date?,
         intervalSeconds: Double = 1.0,
         handler: (RAPLSnapshot) throws -> Void
     ) throws {
         _ = try sampleOnce()
 
         let intervalMicros = useconds_t(intervalSeconds * 1_000_000)
-        var taken = 0
 
-        while count == nil || taken < count! {
+        while true {
             usleep(intervalMicros)
             guard let snapshot = try sampleOnce() else { continue }
             try handler(snapshot)
-            taken += 1
+            if let deadline, Date() >= deadline { break }
         }
     }
 

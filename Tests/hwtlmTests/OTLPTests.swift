@@ -38,7 +38,7 @@ final class OTLPTests: XCTestCase {
         let snapshot = AggregationSnapshot(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             profileName: "power",
-            aggregationName: "package_watts",
+            aggregationName: "package_milliwatts",
             kind: .avg,
             dataPoints: [DataPoint(keys: ["package"], value: .scalar(6200))]
         )
@@ -57,7 +57,7 @@ final class OTLPTests: XCTestCase {
         let snapshot = AggregationSnapshot(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             profileName: "power",
-            aggregationName: "package_watts",
+            aggregationName: "package_milliwatts",
             kind: .avg,
             dataPoints: [DataPoint(keys: ["package"], value: .scalar(6200))]
         )
@@ -79,7 +79,7 @@ final class OTLPTests: XCTestCase {
         XCTAssertEqual(metrics.count, 1)
 
         let metric = metrics[0]
-        XCTAssertEqual(metric["name"] as? String, "hwtlm.power.package_watts")
+        XCTAssertEqual(metric["name"] as? String, "hwtlm.power.package_milliwatts")
 
         // avg kind maps to gauge
         XCTAssertNotNil(metric["gauge"], "avg aggregation should produce a gauge metric")
@@ -139,7 +139,7 @@ final class OTLPTests: XCTestCase {
         let power = AggregationSnapshot(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             profileName: "power",
-            aggregationName: "package_watts",
+            aggregationName: "package_milliwatts",
             kind: .avg,
             dataPoints: [DataPoint(keys: ["package"], value: .scalar(6200))]
         )
@@ -167,7 +167,7 @@ final class OTLPTests: XCTestCase {
         XCTAssertEqual(metrics.count, 3, "should have 3 metrics in batch")
 
         let names = metrics.compactMap { $0["name"] as? String }
-        XCTAssertTrue(names.contains("hwtlm.power.package_watts"))
+        XCTAssertTrue(names.contains("hwtlm.power.package_milliwatts"))
         XCTAssertTrue(names.contains("hwtlm.system.cpu_temp_max"))
         XCTAssertTrue(names.contains("hwtlm.system.cpu_freq_max_mhz"))
     }
@@ -179,7 +179,7 @@ final class OTLPTests: XCTestCase {
         let snapshot = AggregationSnapshot(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             profileName: "power",
-            aggregationName: "package_watts",
+            aggregationName: "package_milliwatts",
             kind: .avg,
             dataPoints: [DataPoint(keys: ["package"], value: .scalar(6200))]
         )

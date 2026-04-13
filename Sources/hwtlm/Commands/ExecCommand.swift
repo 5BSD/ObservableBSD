@@ -47,6 +47,9 @@ struct ExecCommand: ParsableCommand {
         if args.isEmpty {
             throw ValidationError("provide a command to run after '--'")
         }
+        if format == .otel {
+            throw ValidationError("--format otel is only supported by `hwtlm watch`")
+        }
     }
 
     func run() throws {

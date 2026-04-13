@@ -37,8 +37,8 @@ struct WatchCommand: ParsableCommand {
 
     @Argument(
         help: ArgumentHelp(
-            "Name of the profile to run, or a path to a .d file.",
-            discussion: "Use `dtlm list` to see every available profile."
+            "Name of the profile to run.",
+            discussion: "Use `dtlm list` to see every available profile. For an arbitrary .d file, use `-f`."
         )
     )
     var profile: String?
@@ -131,9 +131,11 @@ struct WatchCommand: ParsableCommand {
             )
             backend = .structured
         case .otel:
-            // OTEL_EXPORTER_OTLP_ENDPOINT overrides the CLI default
-            // but not an explicit --endpoint flag.
-            let endpointStr = otelEnv.endpoint ?? otel.endpoint
+            // An explicit --endpoint flag takes precedence over
+            // OTEL_EXPORTER_OTLP_ENDPOINT; the env var only
+            // overrides the compiled-in default.
+            let cliIsDefault = otel.endpoint == "http://localhost:4318"
+            let endpointStr = (cliIsDefault ? otelEnv.endpoint : nil) ?? otel.endpoint
             guard let url = URL(string: endpointStr),
                   url.scheme == "http" || url.scheme == "https" else {
                 throw ValidationError("--endpoint must be an http:// or https:// URL, got: '\(endpointStr)'")
@@ -144,7 +146,8 @@ struct WatchCommand: ParsableCommand {
                 profileName: profileToRun.name,
                 resource: resource,
                 exportTimeout: timeout,
-                headers: otelEnv.headers
+                headers: otelEnv.headers,
+                compression: otelEnv.compression
             )
             backend = .structured
         case .collapsed:

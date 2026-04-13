@@ -38,6 +38,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private var pendingDrops: UInt64 = 0
     private let maxRetries: Int
     private let headers: [String: String]
+    private let useGzip: Bool
     private let session: URLSession
 
     private let senderQueue = DispatchQueue(
@@ -67,6 +68,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         maxRetries: Int = 2,
         exportTimeout: TimeInterval = 10.0,
         headers: [String: String] = [:],
+        compression: String? = nil,
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
@@ -77,6 +79,8 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         self.flushInterval = flushInterval
         self.maxRetries = maxRetries
         self.headers = headers
+        // Default to gzip; honor "none" to disable.
+        self.useGzip = compression?.lowercased() != "none"
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = exportTimeout
         self.session = session ?? URLSession(configuration: config)
@@ -311,7 +315,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        if let compressed = gzip(data) {
+        if useGzip, let compressed = gzip(data) {
             request.httpBody = compressed
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
@@ -452,8 +456,6 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     // MARK: - Metrics envelope
 
     func buildMetricsEnvelope(_ snapshots: [AggregationSnapshot]) -> String {
-        let timeNano = dateToUnixNano(Date())
-
         var json = "{\"resourceMetrics\":[{\"resource\":{\"attributes\":["
         json += resourceAttributesJSON()
         json += "]},\"scopeMetrics\":[{\"scope\":{\"name\":\"\(escapeJSON(scopeName))\",\"version\":\"\(escapeJSON(resource.serviceVersion))\"},"
@@ -468,20 +470,22 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
 
             json += "{\"name\":\"\(metricName)\","
 
+            let snapshotTimeNano = dateToUnixNano(snapshot.timestamp)
+
             switch snapshot.kind {
             case .count, .sum:
                 json += "\"sum\":{\"dataPoints\":["
-                json += buildScalarDataPoints(snapshot, timeNano: timeNano)
+                json += buildScalarDataPoints(snapshot, timeNano: snapshotTimeNano)
                 json += "],\"aggregationTemporality\":2,\"isMonotonic\":true}}"
 
             case .min, .max, .avg, .stddev:
                 json += "\"gauge\":{\"dataPoints\":["
-                json += buildScalarDataPoints(snapshot, timeNano: timeNano)
+                json += buildScalarDataPoints(snapshot, timeNano: snapshotTimeNano)
                 json += "]}}"
 
             case .quantize, .lquantize, .llquantize:
                 json += "\"histogram\":{\"dataPoints\":["
-                json += buildHistogramDataPoints(snapshot, timeNano: timeNano)
+                json += buildHistogramDataPoints(snapshot, timeNano: snapshotTimeNano)
                 json += "],\"aggregationTemporality\":2}}"
             }
         }

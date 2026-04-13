@@ -30,7 +30,7 @@ struct GenerateCommand: ParsableCommand {
     )
 
     @Argument(
-        help: "Name of the profile to render, or use `-f` for an explicit path."
+        help: "Name of the profile to render. Use `-f` for an explicit .d file."
     )
     var profile: String?
 

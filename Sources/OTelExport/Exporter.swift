@@ -188,6 +188,7 @@ public struct ResourceAttributes: Sendable {
     public let serviceName: String
     public let serviceInstanceId: String?
     public let hostName: String
+    public let hostArch: String
     public let osName: String
     public let osVersion: String
     public let serviceVersion: String
@@ -197,6 +198,7 @@ public struct ResourceAttributes: Sendable {
         serviceName: String,
         serviceInstanceId: String? = nil,
         hostName: String,
+        hostArch: String = "",
         osName: String,
         osVersion: String,
         serviceVersion: String,
@@ -205,10 +207,71 @@ public struct ResourceAttributes: Sendable {
         self.serviceName = serviceName
         self.serviceInstanceId = serviceInstanceId
         self.hostName = hostName
+        self.hostArch = hostArch
         self.osName = osName
         self.osVersion = osVersion
         self.serviceVersion = serviceVersion
         self.custom = custom
+    }
+}
+
+// MARK: - OTel environment variable support
+
+/// Read OTel-standard environment variables and apply them as
+/// overrides to the resource and exporter configuration.
+///
+/// Supports:
+///   - `OTEL_SERVICE_NAME` — overrides `service.name`
+///   - `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs
+///     merged into resource custom attributes
+///   - `OTEL_EXPORTER_OTLP_ENDPOINT` — base URL for the collector
+///   - `OTEL_EXPORTER_OTLP_HEADERS` — comma-separated `key=value`
+///     pairs sent as HTTP headers (auth tokens, etc.)
+///   - `OTEL_EXPORTER_OTLP_COMPRESSION` — `gzip` or `none`
+///   - `OTEL_EXPORTER_OTLP_TIMEOUT` — export timeout in milliseconds
+public struct OTelEnvironment: Sendable {
+    public let serviceName: String?
+    public let resourceAttributes: [String: String]
+    public let endpoint: String?
+    public let headers: [String: String]
+    public let compression: String?
+    public let timeoutMs: Int?
+
+    public init() {
+        let env = ProcessInfo.processInfo.environment
+        self.serviceName = env["OTEL_SERVICE_NAME"]
+        self.endpoint = env["OTEL_EXPORTER_OTLP_ENDPOINT"]
+        self.compression = env["OTEL_EXPORTER_OTLP_COMPRESSION"]
+
+        if let timeoutStr = env["OTEL_EXPORTER_OTLP_TIMEOUT"] {
+            self.timeoutMs = Int(timeoutStr)
+        } else {
+            self.timeoutMs = nil
+        }
+
+        // Parse key=value pairs from OTEL_RESOURCE_ATTRIBUTES
+        var resAttrs: [String: String] = [:]
+        if let raw = env["OTEL_RESOURCE_ATTRIBUTES"] {
+            for pair in raw.split(separator: ",") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    resAttrs[String(parts[0])] = String(parts[1])
+                }
+            }
+        }
+        self.resourceAttributes = resAttrs
+
+        // Parse key=value pairs from OTEL_EXPORTER_OTLP_HEADERS
+        var hdrs: [String: String] = [:]
+        if let raw = env["OTEL_EXPORTER_OTLP_HEADERS"] {
+            for pair in raw.split(separator: ",") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    hdrs[String(parts[0])] = String(parts[1])
+                }
+            }
+        }
+        self.headers = hdrs
     }
 }
 

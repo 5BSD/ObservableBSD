@@ -37,6 +37,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     private var metricsBatch: [AggregationSnapshot] = []
     private var pendingDrops: UInt64 = 0
     private let maxRetries: Int
+    private let headers: [String: String]
     private let session: URLSession
 
     private let senderQueue = DispatchQueue(
@@ -58,6 +59,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         flushInterval: Double = 0.5,
         maxRetries: Int = 2,
         exportTimeout: TimeInterval = 10.0,
+        headers: [String: String] = [:],
         session: URLSession? = nil
     ) {
         self.endpoint = endpoint
@@ -67,6 +69,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         self.batchSize = batchSize
         self.flushInterval = flushInterval
         self.maxRetries = maxRetries
+        self.headers = headers
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = exportTimeout
         self.session = session ?? URLSession(configuration: config)
@@ -210,6 +213,7 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             ("service.name", resource.serviceName),
             ("service.version", resource.serviceVersion),
             ("host.name", resource.hostName),
+            ("host.arch", resource.hostArch),
             ("os.type", resource.osName),
             ("os.version", resource.osVersion),
             ("telemetry.sdk.name", "observablebsd"),
@@ -296,6 +300,9 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("OTel-OTLP-Exporter-Swift/\(resource.serviceVersion)", forHTTPHeaderField: "User-Agent")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
 
         if let compressed = gzip(data) {
             request.httpBody = compressed

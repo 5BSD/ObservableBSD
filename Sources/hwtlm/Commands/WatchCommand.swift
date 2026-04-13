@@ -40,7 +40,7 @@ struct WatchCommand: ParsableCommand {
     var perCore: Bool = false
 
     @Option(name: .customLong("format"), help: "Output format: text (default), json, or otel.")
-    var format: String = "text"
+    var format: HWOutputFormat = .text
 
     @Option(name: .customLong("endpoint"), help: "OTLP/HTTP collector base URL (default: http://localhost:4318).")
     var endpoint: String = "http://localhost:4318"
@@ -48,10 +48,7 @@ struct WatchCommand: ParsableCommand {
     func validate() throws {
         if interval <= 0 { throw ValidationError("--interval must be positive") }
         if let d = duration, d <= 0 { throw ValidationError("--duration must be positive") }
-        if format != "text" && format != "json" && format != "otel" {
-            throw ValidationError("--format must be 'text', 'json', or 'otel'")
-        }
-        if format == "otel" {
+        if format == .otel {
             guard let url = URL(string: endpoint),
                   url.scheme == "http" || url.scheme == "https" else {
                 throw ValidationError("--endpoint must be an http:// or https:// URL")
@@ -73,20 +70,27 @@ struct WatchCommand: ParsableCommand {
 
         // OTLP exporter
         let otelExporter: OTLPHTTPJSONExporter?
-        if format == "otel" {
+        if format == .otel {
+            let otelEnv = OTelEnvironment()
             let resource = ResourceAttributes(
-                serviceName: "hwtlm",
+                serviceName: otelEnv.serviceName ?? "hwtlm",
                 hostName: hostName(),
+                hostArch: machineArch(),
                 osName: "freebsd",
                 osVersion: osVersionString(),
-                serviceVersion: "0.1.0"
+                serviceVersion: "0.1.0",
+                custom: otelEnv.resourceAttributes
             )
+            let endpointStr = otelEnv.endpoint ?? endpoint
+            let timeout = otelEnv.timeoutMs.map { TimeInterval($0) / 1000.0 } ?? 10.0
             let exporter = OTLPHTTPJSONExporter(
-                endpoint: URL(string: endpoint)!,
+                endpoint: URL(string: endpointStr)!,
                 profileName: "hardware",
                 resource: resource,
                 batchSize: 50,
-                flushInterval: Double(interval)
+                flushInterval: Double(interval),
+                exportTimeout: timeout,
+                headers: otelEnv.headers
             )
             try exporter.start()
             otelExporter = exporter
@@ -98,7 +102,7 @@ struct WatchCommand: ParsableCommand {
         }
 
         // Header
-        if format == "text" {
+        if format == .text {
             if let rapl {
                 FileHandle.standardError.write(Data(
                     "CPU: \(rapl.microarch.rawValue) (\(cpuCount) logical CPUs)\n".utf8
@@ -161,15 +165,15 @@ struct WatchCommand: ParsableCommand {
         otel: OTLPHTTPJSONExporter?
     ) throws {
         switch format {
-        case "otel":
+        case .otel:
             try emitOTLP(rapl: rapl, sys: sys, exporter: otel!)
-        case "json":
+        case .json:
             if perCore {
                 print(HWFormatter.perCoreJsonLine(rapl: rapl, sys: sys))
             } else {
                 print(HWFormatter.jsonLine(rapl: rapl, sys: sys))
             }
-        default:
+        case .text:
             if perCore {
                 print(HWFormatter.perCoreTextBlock(rapl: rapl, sys: sys))
             } else {
@@ -278,6 +282,16 @@ struct WatchCommand: ParsableCommand {
         var uts = utsname()
         guard Glibc.uname(&uts) == 0 else { return "" }
         return withUnsafePointer(to: &uts.release) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    private func machineArch() -> String {
+        var uts = utsname()
+        guard Glibc.uname(&uts) == 0 else { return "" }
+        return withUnsafePointer(to: &uts.machine) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
                 String(cString: $0)
             }

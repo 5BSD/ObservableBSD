@@ -122,14 +122,16 @@ struct WatchCommand: ParsableCommand {
             params[String(parts[0])] = String(parts[1])
         }
 
+        let otelEnv = OTelEnvironment()
         let resource = ResourceAttributes(
-            serviceName: "dtlm",
+            serviceName: otelEnv.serviceName ?? "dtlm",
             serviceInstanceId: nil,
             hostName: ProcessInfo.processInfo.hostName,
+            hostArch: ProcessInfo.processInfo.machineArch,
             osName: "freebsd",
             osVersion: ProcessInfo.processInfo.osVersionString,
             serviceVersion: "0.1.0",
-            custom: [:]
+            custom: otelEnv.resourceAttributes
         )
 
         // Pick the exporter and the run-loop backend based on the
@@ -148,15 +150,27 @@ struct WatchCommand: ParsableCommand {
             )
             backend = .structured
         case .otel:
-            guard let url = URL(string: otel.endpoint),
+            // OTEL_EXPORTER_OTLP_ENDPOINT overrides the CLI default
+            // but not an explicit --endpoint flag.
+            let endpointStr = otelEnv.endpoint ?? otel.endpoint
+            guard let url = URL(string: endpointStr),
                   url.scheme == "http" || url.scheme == "https" else {
-                throw ValidationError("--endpoint must be an http:// or https:// URL, got: '\(otel.endpoint)'")
+                throw ValidationError("--endpoint must be an http:// or https:// URL, got: '\(endpointStr)'")
             }
+            let timeout = otelEnv.timeoutMs.map { TimeInterval($0) / 1000.0 } ?? 10.0
             exporter = OTLPHTTPJSONExporter(
                 endpoint: url,
                 profileName: profileToRun.name,
-                resource: resource
+                resource: resource,
+                exportTimeout: timeout,
+                headers: otelEnv.headers
             )
+            backend = .structured
+        case .collapsed:
+            if !stack.withStack && !stack.withUstack {
+                throw ValidationError("--format collapsed requires --with-stack and/or --with-ustack")
+            }
+            exporter = CollapsedStackExporter()
             backend = .structured
         }
 
@@ -203,6 +217,17 @@ private extension ProcessInfo {
         var uts = utsname()
         guard Glibc.uname(&uts) == 0 else { return "" }
         return withUnsafePointer(to: &uts.release) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    /// Machine architecture from `uname(2)` (e.g. "amd64", "aarch64").
+    var machineArch: String {
+        var uts = utsname()
+        guard Glibc.uname(&uts) == 0 else { return "" }
+        return withUnsafePointer(to: &uts.machine) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(SYS_NMLN)) {
                 String(cString: $0)
             }

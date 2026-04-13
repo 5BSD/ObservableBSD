@@ -418,7 +418,7 @@ final class IntegrationTests: XCTestCase {
                 extraArgs = ["--param", "pid=\(targetPid)", "--param", "lib=libc.so.7", "--param", "func=malloc"]
             case "dns-latency":
                 extraArgs = ["--param", "pid=\(targetPid)"]
-            case "sqlite-latency":
+            case "sqlite-latency", "casper-audit":
                 extraArgs = ["--param", "pid=\(targetPid)"]
             default:
                 extraArgs = []

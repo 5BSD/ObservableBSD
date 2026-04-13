@@ -50,6 +50,13 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
     /// Retryable HTTP status codes per the OTLP spec.
     private static let retryableStatusCodes: Set<Int> = [429, 502, 503, 504]
 
+    /// - Parameters:
+    ///   - batchSize: Flush when this many records accumulate. OTel SDK
+    ///     spec default is 512; we use 200 for lower latency in
+    ///     interactive use.
+    ///   - flushInterval: Time-based flush cadence in seconds. OTel SDK
+    ///     spec default is 1.0s; we use 0.5s for responsiveness.
+    ///   - exportTimeout: Per-batch export timeout. OTel spec default is 10s.
     public init(
         endpoint: URL,
         scopeName: String? = nil,
@@ -324,14 +331,14 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             let sem = DispatchSemaphore(value: 0)
             let resultBox = PostResultBox()
 
-            let task = session.dataTask(with: request) { _, response, error in
+            let task = session.dataTask(with: request) { responseData, response, error in
                 if let error {
                     resultBox.error = "otlp: POST /\(path) failed: \(error.localizedDescription)"
-                    resultBox.retryable = true  // connection failure is retryable
+                    resultBox.retryable = true
                 } else if let http = response as? HTTPURLResponse {
                     if (200..<300).contains(http.statusCode) {
-                        // Success — check for partial_success in response
-                        // (logged as warning, not an error)
+                        // Check partial_success per OTLP spec.
+                        Self.checkPartialSuccess(responseData, path: path)
                     } else {
                         resultBox.error = "otlp: POST /\(path) returned \(http.statusCode)"
                         resultBox.retryable = Self.retryableStatusCodes.contains(http.statusCode)
@@ -370,6 +377,27 @@ public final class OTLPHTTPJSONExporter: Exporter, @unchecked Sendable {
             if let retryAfter = resultBox.retryAfterSeconds, retryAfter > 0 {
                 Thread.sleep(forTimeInterval: retryAfter)
             }
+        }
+    }
+
+    /// Check for partial_success in an HTTP 200 response per OTLP spec.
+    /// If the collector accepted the request but rejected some records,
+    /// the response body contains a partial_success object with a count
+    /// of rejected records. We log a warning but do NOT retry.
+    private static func checkPartialSuccess(_ data: Data?, path: String) {
+        guard let data, !data.isEmpty else { return }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let partial = json["partialSuccess"] as? [String: Any] else { return }
+
+        // Check for rejected records in logs or metrics responses.
+        let rejected = (partial["rejectedLogRecords"] as? Int)
+            ?? (partial["rejectedDataPoints"] as? Int)
+            ?? 0
+        if rejected > 0 {
+            let msg = partial["errorMessage"] as? String ?? ""
+            FileHandle.standardError.write(Data(
+                "otlp: /\(path) partial success: \(rejected) records rejected\(msg.isEmpty ? "" : " (\(msg))")\n".utf8
+            ))
         }
     }
 

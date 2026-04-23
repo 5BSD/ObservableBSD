@@ -211,6 +211,22 @@ sudo kldload cpuctl
 sudo kldload coretemp
 ```
 
+If HWT or `bptrace` testing panics the kernel, inspect the latest
+crash dump with:
+```sh
+doas cat /var/crash/info.last
+
+doas lldb -c /var/crash/vmcore.last /boot/kernel/kernel \
+  -o 'bt' \
+  -o 'frame select 9' \
+  -o 'frame variable dev dsw ref com' \
+  -o 'expr -f hex -- dev' \
+  -o 'expr -f hex -- dev->si_devsw' \
+  -o 'expr -f hex -- ((struct cdevsw *)dev->si_devsw)->d_ioctl' \
+  -o 'expr -f hex -- ((struct cdevsw *)dev->si_devsw)->d_name' \
+  -o 'quit'
+```
+
 Gracefully degrades on non-Intel systems — sysctl-based sensors
 (temperatures, frequencies) work on all architectures.
 

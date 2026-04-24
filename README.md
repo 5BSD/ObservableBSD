@@ -17,7 +17,7 @@ FreeBSD, covering four areas:
 |------|--------|--------|
 | [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
 | [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
-| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress (step 5 of 6) |
+| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress |
 
 All tools emit OpenTelemetry-native output so their data flows into the
 same collectors, dashboards, and alerting pipelines.
@@ -243,18 +243,20 @@ panicking the kernel.
 
 ### Current step
 
-**Step 5 of 6: instruction-level PT decoding with ELF image.**
+**Instruction-level PT decoding with symbolization.**
 
-Completed so far:
-- Step 1: HWT/PT session bring-up and clean shutdown
-- Step 2: Booted `GENERIC-HWT` kernel with `options HWT_HOOKS`;
-  confirmed `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records appear
-- Step 3: Raw PT buffer snapshot to `.pt` file before context teardown
-- Step 4: PT packet decoding via libipt (packet-level, no image)
-- Step 5: Instruction-level decoding — ELF program headers are parsed
-  from EXEC/MMAP record paths to build a `pt_image`, then libipt's
-  instruction decoder resolves actual calls, returns, jumps, and
-  syscalls with addresses
+Completed:
+- HWT/PT session bring-up and clean shutdown (avoids kernel panics)
+- `GENERIC-HWT` kernel with `options HWT_HOOKS` for full tracing
+- Raw PT buffer snapshot to `.pt` file before context teardown
+- Packet-level PT decoding via libipt (fallback mode)
+- Instruction-level decoding — ELF program headers parsed via
+  libelf/gelf to build `pt_image`, dynamic linker resolved via
+  PT_INTERP, libipt instruction decoder resolves calls, returns,
+  jumps, and syscalls
+- Symbolization — ELF symbol tables (`.dynsym` / `.symtab`) loaded
+  via libelf, runtime addresses computed with ASLR slide, binary
+  search lookup with `binary:function+offset` output
 
 ### Kernel setup
 
@@ -269,10 +271,10 @@ in `/boot/GENERIC-HWT` and is currently booted.  The config lives at
 3. ~~Snapshot raw PT buffer to disk.~~ Done (`-o` flag / default
    `bptrace-<pid>.pt`).
 4. ~~Decode PT packets via libipt.~~ Done (packet-level fallback).
-5. ~~Instruction-level decoding with ELF image.~~ Done (CALL,
-   RETURN, SYSCALL with addresses).
-6. Add symbolization and higher-level output formatting (function
-   names, call trees, OTel spans).
+5. ~~Instruction-level decoding with ELF image.~~ Done.
+6. ~~Symbolization via ELF symbol tables.~~ Done
+   (`binary:function+offset`).
+7. Higher-level output: call trees, flame graphs, OTel spans.
 
 ### Known-good smoke test
 
@@ -283,8 +285,8 @@ doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -- /bin/sleep 1
 Expected on `GENERIC-HWT`:
 - `THREAD_CREATE`, `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records
 - `Saved NNNNN bytes of PT data to bptrace-<pid>.pt` on stderr
-- Decoded instructions: `CALL`, `RETURN`, `SYSCALL`, `SYSRET` with IPs
-- Summary: `N instructions, M calls, K returns, J syscalls, E nomap, F errors`
+- Decoded instructions with symbols: `CALL ld-elf.so.1:dlopen+0x1a`
+- Summary: `N instructions, M calls, K returns, J syscalls, ... N symbols`
 - Clean exit, no kernel crash
 
 Use `-o <path>` to write the PT data to a specific file:

@@ -174,7 +174,7 @@ void	 fmt_record_json(const struct bptrace_record *rec, pid_t pid);
 /* decode.c — PT packet / instruction decoder                          */
 /* ------------------------------------------------------------------ */
 
-#define	MAX_IMAGE_SECTIONS	32
+#define	MAX_IMAGE_SECTIONS	256
 
 /*
  * Binary image section collected from EXEC / MMAP HWT records.
@@ -185,6 +185,23 @@ struct pt_image_info {
 	uint64_t	load_addr;	/* addr from EXEC/MMAP record */
 	uint64_t	base_addr;	/* baseaddr (interp base for EXEC) */
 	int		type;		/* HWT_RECORD_EXECUTABLE or _MMAP */
+};
+
+/*
+ * Symbol table — maps runtime addresses to function names.
+ * Built from ELF .dynsym / .symtab sections during image construction.
+ */
+struct sym_entry {
+	uint64_t	addr;		/* runtime virtual address */
+	uint64_t	size;		/* symbol size (0 if unknown) */
+	char		*name;		/* function name (strdup'd) */
+	char		*binary;	/* binary basename (strdup'd) */
+};
+
+struct sym_table {
+	struct sym_entry	*entries;
+	int			count;
+	int			capacity;
 };
 
 int	 decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt);

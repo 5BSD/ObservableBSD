@@ -23,7 +23,7 @@
 
 #include "bptrace.h"
 
-#define	DEFAULT_BUFSIZE		"4m"
+#define	DEFAULT_BUFSIZE		"64m"
 #define	MAX_POLL_RECORDS	256
 
 /* Global flag set by SIGINT handler. */
@@ -44,8 +44,9 @@ int
 cmd_trace(int argc, char **argv)
 {
 	struct bptrace_record records[MAX_POLL_RECORDS];
-	struct pt_image_info sections[MAX_IMAGE_SECTIONS];
+	struct pt_image_info *sections;
 	int nsections;
+	int sections_cap;
 	struct hwt_ctx ctx;
 	struct timespec start, now;
 	char pathbuf[1024];
@@ -80,7 +81,9 @@ cmd_trace(int argc, char **argv)
 	maxrecords = 0;
 	last_buf_page = -1;
 	last_buf_offset = 0;
+	sections = NULL;
 	nsections = 0;
+	sections_cap = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
@@ -283,18 +286,26 @@ cmd_trace(int argc, char **argv)
 			}
 			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
 			    records[i].type == HWT_RECORD_MMAP) &&
-			    records[i].fullpath[0] != '\0' &&
-			    nsections < MAX_IMAGE_SECTIONS) {
-				strlcpy(sections[nsections].path,
-				    records[i].fullpath,
-				    sizeof(sections[nsections].path));
-				sections[nsections].load_addr =
-				    records[i].addr;
-				sections[nsections].base_addr =
-				    records[i].baseaddr;
-				sections[nsections].type =
-				    records[i].type;
-				nsections++;
+			    records[i].fullpath[0] != '\0') {
+				if (nsections >= sections_cap) {
+					sections_cap = sections_cap == 0 ?
+					    32 : sections_cap * 2;
+					sections = reallocf(sections,
+					    sections_cap *
+					    sizeof(*sections));
+				}
+				if (sections != NULL) {
+					strlcpy(sections[nsections].path,
+					    records[i].fullpath,
+					    sizeof(sections[nsections].path));
+					sections[nsections].load_addr =
+					    records[i].addr;
+					sections[nsections].base_addr =
+					    records[i].baseaddr;
+					sections[nsections].type =
+					    records[i].type;
+					nsections++;
+				}
 			}
 
 			if (pause_on_mmap &&
@@ -336,18 +347,26 @@ cmd_trace(int argc, char **argv)
 			}
 			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
 			    records[i].type == HWT_RECORD_MMAP) &&
-			    records[i].fullpath[0] != '\0' &&
-			    nsections < MAX_IMAGE_SECTIONS) {
-				strlcpy(sections[nsections].path,
-				    records[i].fullpath,
-				    sizeof(sections[nsections].path));
-				sections[nsections].load_addr =
-				    records[i].addr;
-				sections[nsections].base_addr =
-				    records[i].baseaddr;
-				sections[nsections].type =
-				    records[i].type;
-				nsections++;
+			    records[i].fullpath[0] != '\0') {
+				if (nsections >= sections_cap) {
+					sections_cap = sections_cap == 0 ?
+					    32 : sections_cap * 2;
+					sections = reallocf(sections,
+					    sections_cap *
+					    sizeof(*sections));
+				}
+				if (sections != NULL) {
+					strlcpy(sections[nsections].path,
+					    records[i].fullpath,
+					    sizeof(sections[nsections].path));
+					sections[nsections].load_addr =
+					    records[i].addr;
+					sections[nsections].base_addr =
+					    records[i].baseaddr;
+					sections[nsections].type =
+					    records[i].type;
+					nsections++;
+				}
 			}
 		}
 	}
@@ -387,6 +406,7 @@ cmd_trace(int argc, char **argv)
 	signal(SIGINT, SIG_DFL);
 
 	hwt_ctx_close(&ctx);
+	free(sections);
 	free(detected_backend);
 	return (0);
 }

@@ -20,7 +20,9 @@
 #include <fcntl.h>
 #include <gelf.h>
 #include <libelf.h>
+#include <libgen.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -524,12 +526,24 @@ is_user_addr(uint64_t addr)
 	return (true);
 }
 
+/* Forward declarations for sym_table (defined below). */
+static void sym_table_add_elf(struct sym_table *, const char *, int64_t);
+static void sym_table_sort(struct sym_table *);
+
 static struct pt_image *
-build_pt_image(const struct pt_image_info *sections, int nsections)
+build_pt_image(const struct pt_image_info *sections, int nsections,
+    struct sym_table *st)
 {
 	struct pt_image *image;
 	char interp[MAXPATHLEN];
+	GElf_Phdr phdr;
+	uint64_t base_vaddr;
+	int64_t slide;
 	int total, i;
+	size_t j, phdrnum;
+	bool found_base;
+	Elf *elf;
+	int fd;
 
 	if (elf_version(EV_CURRENT) == EV_NONE) {
 		warnx("elf_version: %s", elf_errmsg(-1));
@@ -546,6 +560,42 @@ build_pt_image(const struct pt_image_info *sections, int nsections)
 		    sections[i].load_addr);
 
 		/*
+		 * Compute slide for symbol addresses.
+		 * Same logic as add_elf_to_image: read the first
+		 * PT_LOAD's p_vaddr and compute the offset.
+		 */
+		fd = open(sections[i].path, O_RDONLY);
+		if (fd >= 0) {
+			elf = elf_begin(fd, ELF_C_READ, NULL);
+			if (elf != NULL) {
+				found_base = false;
+				base_vaddr = 0;
+				if (elf_getphdrnum(elf, &phdrnum) == 0) {
+					for (j = 0; j < phdrnum; j++) {
+						if (gelf_getphdr(elf, (int)j,
+						    &phdr) == NULL)
+							continue;
+						if (phdr.p_type == PT_LOAD) {
+							base_vaddr =
+							    phdr.p_vaddr;
+							found_base = true;
+							break;
+						}
+					}
+				}
+				if (found_base) {
+					slide = (int64_t)
+					    sections[i].load_addr -
+					    (int64_t)base_vaddr;
+					sym_table_add_elf(st,
+					    sections[i].path, slide);
+				}
+				elf_end(elf);
+			}
+			close(fd);
+		}
+
+		/*
 		 * For EXEC records, base_addr is where the kernel
 		 * mapped the ELF interpreter (dynamic linker).
 		 * Read PT_INTERP from the executable and add the
@@ -558,9 +608,50 @@ build_pt_image(const struct pt_image_info *sections, int nsections)
 			    interp, sizeof(interp)) == 0) {
 				total += add_elf_to_image(image,
 				    interp, sections[i].base_addr);
+
+				/* Also load interpreter symbols. */
+				fd = open(interp, O_RDONLY);
+				if (fd >= 0) {
+					elf = elf_begin(fd, ELF_C_READ, NULL);
+					if (elf != NULL) {
+						found_base = false;
+						base_vaddr = 0;
+						if (elf_getphdrnum(elf,
+						    &phdrnum) == 0) {
+							for (j = 0;
+							    j < phdrnum;
+							    j++) {
+								if (gelf_getphdr(
+								    elf, (int)j,
+								    &phdr)
+								    == NULL)
+									continue;
+								if (phdr.p_type
+								    == PT_LOAD) {
+									base_vaddr
+									    = phdr.p_vaddr;
+									found_base
+									    = true;
+									break;
+								}
+							}
+						}
+						if (found_base) {
+							slide = (int64_t)
+							    sections[i].base_addr -
+							    (int64_t)base_vaddr;
+							sym_table_add_elf(st,
+							    interp, slide);
+						}
+						elf_end(elf);
+					}
+					close(fd);
+				}
 			}
 		}
 	}
+
+	sym_table_sort(st);
 
 	if (total == 0) {
 		warnx("no executable segments found in %d binaries",
@@ -570,6 +661,201 @@ build_pt_image(const struct pt_image_info *sections, int nsections)
 	}
 
 	return (image);
+}
+
+/* ------------------------------------------------------------------ */
+/* Symbol table                                                        */
+/* ------------------------------------------------------------------ */
+
+#define	SYM_INIT_CAP	256
+
+static void
+sym_table_init(struct sym_table *st)
+{
+
+	memset(st, 0, sizeof(*st));
+}
+
+static void
+sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
+    const char *name, const char *binary)
+{
+	struct sym_entry *e;
+
+	if (name == NULL || name[0] == '\0')
+		return;
+
+	if (st->count >= st->capacity) {
+		int newcap = st->capacity == 0 ? SYM_INIT_CAP :
+		    st->capacity * 2;
+		st->entries = reallocf(st->entries,
+		    newcap * sizeof(*st->entries));
+		if (st->entries == NULL) {
+			st->count = 0;
+			st->capacity = 0;
+			return;
+		}
+		st->capacity = newcap;
+	}
+
+	e = &st->entries[st->count++];
+	e->addr = addr;
+	e->size = size;
+	e->name = strdup(name);
+	e->binary = strdup(binary);
+}
+
+/*
+ * Read function symbols from an ELF binary and add them to the
+ * symbol table with runtime addresses adjusted by slide.
+ *
+ * Reads both SHT_SYMTAB (.symtab, if not stripped) and SHT_DYNSYM
+ * (.dynsym, always present for dynamic binaries).
+ */
+static void
+sym_table_add_elf(struct sym_table *st, const char *path, int64_t slide)
+{
+	Elf *elf;
+	Elf_Scn *scn;
+	GElf_Shdr shdr;
+	Elf_Data *data;
+	GElf_Sym sym;
+	const char *name, *bn;
+	char *pathcopy;
+	size_t nsyms;
+	int fd;
+	size_t i;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	elf = elf_begin(fd, ELF_C_READ, NULL);
+	if (elf == NULL) {
+		close(fd);
+		return;
+	}
+
+	/* Get the basename for the binary column. */
+	pathcopy = strdup(path);
+	bn = basename(pathcopy);
+
+	scn = NULL;
+	while ((scn = elf_nextscn(elf, scn)) != NULL) {
+		if (gelf_getshdr(scn, &shdr) == NULL)
+			continue;
+		if (shdr.sh_type != SHT_SYMTAB &&
+		    shdr.sh_type != SHT_DYNSYM)
+			continue;
+		if (shdr.sh_entsize == 0)
+			continue;
+
+		data = elf_getdata(scn, NULL);
+		if (data == NULL)
+			continue;
+
+		nsyms = shdr.sh_size / shdr.sh_entsize;
+		for (i = 0; i < nsyms; i++) {
+			if (gelf_getsym(data, (int)i, &sym) == NULL)
+				continue;
+			if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
+				continue;
+			if (sym.st_value == 0)
+				continue;
+
+			name = elf_strptr(elf, shdr.sh_link, sym.st_name);
+			sym_table_add(st, sym.st_value + slide,
+			    sym.st_size, name, bn);
+		}
+	}
+
+	free(pathcopy);
+	elf_end(elf);
+	close(fd);
+}
+
+static int
+sym_entry_cmp(const void *a, const void *b)
+{
+	const struct sym_entry *sa = a, *sb = b;
+
+	if (sa->addr < sb->addr)
+		return (-1);
+	if (sa->addr > sb->addr)
+		return (1);
+	return (0);
+}
+
+static void
+sym_table_sort(struct sym_table *st)
+{
+
+	if (st->count > 1)
+		qsort(st->entries, st->count, sizeof(*st->entries),
+		    sym_entry_cmp);
+
+}
+
+/*
+ * Look up a symbol containing the given IP.
+ * Binary search for the largest entry.addr <= ip.
+ * If the symbol has a known size, verify ip < addr + size.
+ */
+static const struct sym_entry *
+sym_table_lookup(const struct sym_table *st, uint64_t ip)
+{
+	const struct sym_entry *entries;
+	int lo, hi, mid, best;
+
+	if (st->count == 0)
+		return (NULL);
+
+	entries = st->entries;
+	lo = 0;
+	hi = st->count - 1;
+	best = -1;
+
+	while (lo <= hi) {
+		mid = lo + (hi - lo) / 2;
+		if (entries[mid].addr <= ip) {
+			best = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	if (best < 0)
+		return (NULL);
+
+	/*
+	 * Accept the nearest symbol if within a reasonable range.
+	 *
+	 * With only .dynsym available (stripped binaries), most IPs
+	 * land in unexported internal functions between exported ones.
+	 * Returning the nearest preceding symbol with the offset gives
+	 * the user a useful reference point.
+	 *
+	 * Reject if the IP is more than 1 MB past the symbol — at that
+	 * distance the symbol is from a different binary region.
+	 */
+	if (ip - entries[best].addr > 1024 * 1024)
+		return (NULL);
+
+	return (&entries[best]);
+}
+
+static void
+sym_table_free(struct sym_table *st)
+{
+	int i;
+
+	for (i = 0; i < st->count; i++) {
+		free(st->entries[i].name);
+		free(st->entries[i].binary);
+	}
+	free(st->entries);
+	memset(st, 0, sizeof(*st));
 }
 
 /* ------------------------------------------------------------------ */
@@ -605,7 +891,9 @@ decode_pt_insn(const void *buf, size_t len,
 	struct pt_config config;
 	struct pt_insn_decoder *decoder;
 	struct pt_image *image;
+	struct sym_table st;
 	struct pt_insn insn;
+	const struct sym_entry *sym;
 	const char *label;
 	int status;
 	int total, calls, returns, syscalls, nomaps, errors;
@@ -620,8 +908,11 @@ decode_pt_insn(const void *buf, size_t len,
 		return (decode_pt_buffer(buf, len, fmt));
 	}
 
-	image = build_pt_image(sections, nsections);
+	sym_table_init(&st);
+
+	image = build_pt_image(sections, nsections, &st);
 	if (image == NULL) {
+		sym_table_free(&st);
 		warnx("image build failed — falling back to packet decode");
 		return (decode_pt_buffer(buf, len, fmt));
 	}
@@ -713,24 +1004,54 @@ decode_pt_insn(const void *buf, size_t len,
 		if (label == NULL)
 			continue;
 
-		if (fmt == FMT_JSON)
-			printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\"}\n",
-			    label,
-			    (unsigned long)insn.ip);
-		else
-			printf("  %-9s 0x%016lx\n",
-			    label,
-			    (unsigned long)insn.ip);
+		sym = sym_table_lookup(&st, insn.ip);
+
+		if (fmt == FMT_JSON) {
+			if (sym != NULL)
+				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\","
+				    "\"sym\":\"%s\",\"off\":%lu,"
+				    "\"bin\":\"%s\"}\n",
+				    label,
+				    (unsigned long)insn.ip,
+				    sym->name,
+				    (unsigned long)(insn.ip - sym->addr),
+				    sym->binary);
+			else
+				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\"}\n",
+				    label,
+				    (unsigned long)insn.ip);
+		} else {
+			if (sym != NULL) {
+				uint64_t off = insn.ip - sym->addr;
+				if (off == 0)
+					printf("  %-9s %s:%s\n",
+					    label, sym->binary,
+					    sym->name);
+				else
+					printf("  %-9s %s:%s+0x%lx\n",
+					    label, sym->binary,
+					    sym->name,
+					    (unsigned long)off);
+			} else {
+				printf("  %-9s 0x%016lx\n",
+				    label,
+				    (unsigned long)insn.ip);
+			}
+		}
 	}
 
 	pt_insn_free_decoder(decoder);
 	pt_image_free(image);
 
-	if (fmt == FMT_TEXT)
+	if (fmt == FMT_TEXT) {
+		fflush(stdout);
 		fprintf(stderr,
 		    "%d instructions, %d calls, %d returns, "
-		    "%d syscalls, %d nomap, %d errors\n",
-		    total, calls, returns, syscalls, nomaps, errors);
+		    "%d syscalls, %d nomap, %d errors, %d symbols\n",
+		    total, calls, returns, syscalls, nomaps, errors,
+		    st.count);
+	}
 
+	sym_table_free(&st);
 	return (total > 0 ? 0 : -1);
 }

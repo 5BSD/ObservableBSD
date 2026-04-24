@@ -144,7 +144,7 @@ hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	 * (hwt_ioctl.c returns EINVAL otherwise).  Round up.
 	 */
 	if (bufsize == 0)
-		bufsize = 4 * 1024 * 1024;
+		bufsize = 64 * 1024 * 1024;
 	bufsize = (bufsize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 	ctx->bufsize = bufsize;
 

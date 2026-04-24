@@ -300,6 +300,8 @@ ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 int	 cmd_list(int argc, char **argv);
 int	 cmd_exec(int argc, char **argv);
 int	 cmd_trace(int argc, char **argv);
+int	 cmd_info(int argc, char **argv);
+int	 cmd_decode(int argc, char **argv);
 
 /* ------------------------------------------------------------------ */
 /* bsdtrace.c — shared helpers                                         */

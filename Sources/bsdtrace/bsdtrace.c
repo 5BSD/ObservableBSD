@@ -135,6 +135,10 @@ main(int argc, char **argv)
 		return (cmd_exec(argc - 1, argv + 1));
 	if (strcmp(argv[1], "trace") == 0)
 		return (cmd_trace(argc - 1, argv + 1));
+	if (strcmp(argv[1], "info") == 0)
+		return (cmd_info(argc - 1, argv + 1));
+	if (strcmp(argv[1], "decode") == 0)
+		return (cmd_decode(argc - 1, argv + 1));
 
 	if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
 		printf("bsdtrace %s\n", BSDTRACE_VERSION);

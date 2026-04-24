@@ -295,23 +295,51 @@ Each trace produces two files:
 | `-n` | exec, trace | Dry run — validate setup without tracing |
 | `-p` | exec, trace | Pause target on mmap/exec events |
 
-### Planned features
+### Roadmap
 
+**Analysis — make traces useful:**
+- **Call tree output** — aggregated, indented call tree with function
+  counts and nesting depth.  "main → init → parse_config → crash"
+  instead of thousands of flat CALL/RETURN lines.
+- **Function summary** — top functions by call count, unique call
+  sites, hot path identification.
+- **Timing from TSC** — PT timestamps (TSC/MTC/CYC packets) give
+  wall-clock and cycle-accurate timing per function call.
+- **Flame graph generation** — folded stacks output for
+  [FlameGraph](https://github.com/brendangregg/FlameGraph) or
+  Speedscope visualization.
+- **Syscall name resolution** — map syscall IPs to names
+  (`nanosleep`, `read`, `mmap`) instead of `libsys.so.7+0x1234`.
+
+**Offline decode — trace once, analyze many times:**
+- **`bsdtrace decode`** — re-decode a saved `.pt` + `.meta` file pair
+  with software filters (`-F function`, `-r range`, `--calls-only`,
+  `--summary`, `--flamegraph`).
 - **`bsdtrace info`** — show binary layout (text segments, exported
-  functions with offsets) for both static ELF files and running
-  processes (`--pid`).  Helps users discover address ranges for
-  hardware filtering.
-- **`bsdtrace decode`** — offline re-decode a saved `.pt` + `.meta`
-  file pair with software filters (`-F function`, `-r range`).
-  Analyze the same capture with different filters without re-tracing.
+  functions with offsets).  Static ELF files and running processes
+  (`--pid`).
+
+**Collection — focused capture:**
 - **Hardware IP range filter** (`-r`) — restrict what PT records at
   the hardware level for long-running focused traces.
 - **`--no-aslr`** — disable ASLR for deterministic addresses when
   combined with hardware filtering.
-- **Split debug info** — auto-load from `/usr/lib/debug/` for full
-  symbolization of stripped system binaries.
-- **Buffer overflow warning** — detect when the PT circular buffer
-  wraps (already implemented, warns on stderr).
+- **Snapshot / flight recorder mode** — circular buffer with trigger
+  capture (e.g., SIGUSR2).  Always keeps the most recent window of
+  execution; dump on demand or on crash.
+
+**Symbols — better names:**
+- **Split debug info** — auto-load from `/usr/lib/debug/` and
+  `.gnu_debuglink` for full symbolization of stripped binaries.
+- **Source annotation** — IP → file:line via DWARF debug info
+  (requires libdwarf).
+
+**Export — integration with other tools:**
+- **Chrome trace JSON** — export for Perfetto UI visualization
+  (timeline view with threads, calls, durations).
+- **OTLP spans** — export function calls as OpenTelemetry spans to
+  Jaeger, Grafana Tempo, or any OTel backend.  Bridges bsdtrace
+  into the same observability stack as dtlm and hwtlm.
 
 ### Kernel setup
 

@@ -204,6 +204,16 @@ struct sym_table {
 	int			capacity;
 };
 
+/*
+ * Binary load range — for showing binary+offset when no symbol matches.
+ */
+struct bin_range {
+	char		name[64];	/* basename of binary */
+	uint64_t	lo;		/* lowest runtime text address */
+	uint64_t	hi;		/* highest runtime text address */
+	uint64_t	base;		/* load base (slide origin) */
+};
+
 int	 decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,

@@ -829,18 +829,23 @@ sym_table_lookup(const struct sym_table *st, uint64_t ip)
 		return (NULL);
 
 	/*
-	 * Accept the nearest symbol if within a reasonable range.
+	 * Only return the symbol if the IP is plausibly within it.
 	 *
-	 * With only .dynsym available (stripped binaries), most IPs
-	 * land in unexported internal functions between exported ones.
-	 * Returning the nearest preceding symbol with the offset gives
-	 * the user a useful reference point.
+	 * For symbols with known size: exact [addr, addr+size) check.
+	 * For symbols with size 0: accept if within 4 KB (a generous
+	 * upper bound for a single function).
 	 *
-	 * Reject if the IP is more than 1 MB past the symbol — at that
-	 * distance the symbol is from a different binary region.
+	 * IPs in unexported internal functions between exported ones
+	 * will not match — the caller should fall back to showing the
+	 * binary name with an offset from the load base.
 	 */
-	if (ip - entries[best].addr > 1024 * 1024)
-		return (NULL);
+	if (entries[best].size > 0) {
+		if (ip >= entries[best].addr + entries[best].size)
+			return (NULL);
+	} else {
+		if (ip - entries[best].addr > 4096)
+			return (NULL);
+	}
 
 	return (&entries[best]);
 }
@@ -880,6 +885,196 @@ insn_class_str(enum pt_insn_class iclass)
 }
 
 /* ------------------------------------------------------------------ */
+/* Binary name fallback for unsymbolized IPs                           */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Binary range tracking for unsymbolized IP fallback                   */
+/* ------------------------------------------------------------------ */
+
+#define	MAX_BIN_RANGES	64
+
+/*
+ * Build binary ranges by finding the text (PF_X) PT_LOAD segment
+ * in each section's ELF.  Also handles the interpreter.
+ */
+static int
+build_bin_ranges(const struct pt_image_info *sections, int nsections,
+    struct bin_range *ranges)
+{
+	Elf *elf;
+	GElf_Phdr phdr;
+	size_t phdrnum;
+	uint64_t base_vaddr;
+	int64_t slide;
+	int fd, nranges;
+	size_t j;
+	bool found_base;
+	char interp[MAXPATHLEN];
+	char *pathcopy, *bn;
+	int i;
+
+	nranges = 0;
+
+	for (i = 0; i < nsections && nranges < MAX_BIN_RANGES; i++) {
+		/* Process the binary itself. */
+		fd = open(sections[i].path, O_RDONLY);
+		if (fd < 0)
+			continue;
+		elf = elf_begin(fd, ELF_C_READ, NULL);
+		if (elf == NULL) {
+			close(fd);
+			continue;
+		}
+
+		found_base = false;
+		base_vaddr = 0;
+		if (elf_getphdrnum(elf, &phdrnum) == 0) {
+			for (j = 0; j < phdrnum; j++) {
+				if (gelf_getphdr(elf, (int)j, &phdr) == NULL)
+					continue;
+				if (phdr.p_type == PT_LOAD) {
+					base_vaddr = phdr.p_vaddr;
+					found_base = true;
+					break;
+				}
+			}
+		}
+
+		if (found_base) {
+			slide = (int64_t)sections[i].load_addr -
+			    (int64_t)base_vaddr;
+
+			for (j = 0; j < phdrnum && nranges < MAX_BIN_RANGES;
+			    j++) {
+				if (gelf_getphdr(elf, (int)j, &phdr) == NULL)
+					continue;
+				if (phdr.p_type != PT_LOAD ||
+				    !(phdr.p_flags & PF_X) ||
+				    phdr.p_filesz == 0)
+					continue;
+
+				pathcopy = strdup(sections[i].path);
+				bn = basename(pathcopy);
+				strlcpy(ranges[nranges].name, bn,
+				    sizeof(ranges[nranges].name));
+				free(pathcopy);
+				ranges[nranges].lo = phdr.p_vaddr + slide;
+				ranges[nranges].hi = phdr.p_vaddr + slide +
+				    phdr.p_filesz;
+				ranges[nranges].base =
+				    sections[i].load_addr;
+				nranges++;
+			}
+		}
+
+		/* Also handle interpreter for EXEC records. */
+		if (sections[i].type == HWT_RECORD_EXECUTABLE &&
+		    sections[i].base_addr != 0 &&
+		    sections[i].base_addr < 0x0000800000000000ULL &&
+		    sections[i].base_addr != sections[i].load_addr) {
+			if (elf_get_interp(sections[i].path,
+			    interp, sizeof(interp)) == 0) {
+				Elf *elf2;
+				int fd2 = open(interp, O_RDONLY);
+				if (fd2 >= 0) {
+					elf2 = elf_begin(fd2, ELF_C_READ,
+					    NULL);
+					if (elf2 != NULL) {
+						found_base = false;
+						base_vaddr = 0;
+						if (elf_getphdrnum(elf2,
+						    &phdrnum) == 0) {
+							for (j = 0;
+							    j < phdrnum; j++) {
+								if (gelf_getphdr(
+								    elf2,
+								    (int)j,
+								    &phdr)
+								    == NULL)
+									continue;
+								if (phdr.p_type
+								    == PT_LOAD) {
+									base_vaddr
+									    = phdr.p_vaddr;
+									found_base
+									    = true;
+									break;
+								}
+							}
+						}
+						if (found_base) {
+							slide = (int64_t)
+							    sections[i].base_addr -
+							    (int64_t)base_vaddr;
+							for (j = 0;
+							    j < phdrnum &&
+							    nranges <
+							    MAX_BIN_RANGES;
+							    j++) {
+								if (gelf_getphdr(
+								    elf2,
+								    (int)j,
+								    &phdr)
+								    == NULL)
+									continue;
+								if (phdr.p_type
+								    != PT_LOAD ||
+								    !(phdr.p_flags
+								    & PF_X) ||
+								    phdr.p_filesz
+								    == 0)
+									continue;
+								strlcpy(
+								    ranges[nranges].name,
+								    "ld-elf.so.1",
+								    sizeof(
+								    ranges[nranges].name));
+								ranges[nranges].lo
+								    = phdr.p_vaddr
+								    + slide;
+								ranges[nranges].hi
+								    = phdr.p_vaddr
+								    + slide
+								    + phdr.p_filesz;
+								ranges[nranges].base
+								    = sections[i].base_addr;
+								nranges++;
+							}
+						}
+						elf_end(elf2);
+					}
+					close(fd2);
+				}
+			}
+		}
+
+		elf_end(elf);
+		close(fd);
+	}
+
+	return (nranges);
+}
+
+/*
+ * Find which binary an IP belongs to by checking text ranges.
+ */
+static const char *
+find_binary_for_ip(const struct bin_range *ranges, int nranges,
+    uint64_t ip, uint64_t *offset)
+{
+	int i;
+
+	for (i = 0; i < nranges; i++) {
+		if (ip >= ranges[i].lo && ip < ranges[i].hi) {
+			*offset = ip - ranges[i].lo;
+			return (ranges[i].name);
+		}
+	}
+	return (NULL);
+}
+
+/* ------------------------------------------------------------------ */
 /* Instruction decoder                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -892,6 +1087,8 @@ decode_pt_insn(const void *buf, size_t len,
 	struct pt_insn_decoder *decoder;
 	struct pt_image *image;
 	struct sym_table st;
+	struct bin_range ranges[MAX_BIN_RANGES];
+	int nranges;
 	struct pt_insn insn;
 	const struct sym_entry *sym;
 	const char *label;
@@ -916,6 +1113,8 @@ decode_pt_insn(const void *buf, size_t len,
 		warnx("image build failed — falling back to packet decode");
 		return (decode_pt_buffer(buf, len, fmt));
 	}
+
+	nranges = build_bin_ranges(sections, nsections, ranges);
 
 	pt_config_init(&config);
 	config.begin = __DECONST(uint8_t *, buf);
@@ -1033,9 +1232,19 @@ decode_pt_insn(const void *buf, size_t len,
 					    sym->name,
 					    (unsigned long)off);
 			} else {
-				printf("  %-9s 0x%016lx\n",
-				    label,
-				    (unsigned long)insn.ip);
+				const char *bn;
+				uint64_t boff;
+
+				bn = find_binary_for_ip(ranges,
+				    nranges, insn.ip, &boff);
+				if (bn != NULL)
+					printf("  %-9s %s+0x%lx\n",
+					    label, bn,
+					    (unsigned long)boff);
+				else
+					printf("  %-9s 0x%016lx\n",
+					    label,
+					    (unsigned long)insn.ip);
 			}
 		}
 	}

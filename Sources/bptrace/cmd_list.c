@@ -36,14 +36,18 @@ sysctl_string(const char *name, char *buf, size_t bufsz)
 /* ------------------------------------------------------------------ */
 
 static void
-list_text(int hwt_avail, const char *backend, const char *cpu_model,
-    const char *machine)
+list_text(int hwt_avail, int hooks, const char *backend,
+    const char *cpu_model, const char *machine)
 {
 
 	printf("HWT Framework\n");
 	printf("────────────────────────────────────────\n");
 	printf("  /dev/hwt:       %s\n",
 	    hwt_avail ? "available" : "not found (kldload hwt)");
+	printf("  Kernel hooks:   %s\n",
+	    hooks > 0 ? "enabled" :
+	    hooks == 0 ? "missing (boot kernel with HWT_HOOKS)" :
+	    "unknown");
 	printf("  Backend:        %s\n",
 	    backend ? backend : "none loaded");
 	printf("  CPU:            %s\n", cpu_model);
@@ -94,6 +98,15 @@ list_text(int hwt_avail, const char *backend, const char *cpu_model,
 			    "sudo kldload spe\n");
 		}
 	}
+
+	if (hooks == 0) {
+		printf("\nThe running kernel lacks HWT_HOOKS.\n");
+		printf("  HWT_IOC_ALLOC can still create a context, but "
+		    "exec/mmap records and scheduler-driven tracing are "
+		    "not available.\n");
+		printf("  Boot a kernel built with:\n");
+		printf("    options HWT_HOOKS\n");
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,11 +114,17 @@ list_text(int hwt_avail, const char *backend, const char *cpu_model,
 /* ------------------------------------------------------------------ */
 
 static void
-list_json(int hwt_avail, const char *backend, const char *cpu_model,
-    const char *machine)
+list_json(int hwt_avail, int hooks, const char *backend,
+    const char *cpu_model, const char *machine)
 {
 
 	printf("{\"hwt_available\":%s", hwt_avail ? "true" : "false");
+	if (hooks > 0)
+		printf(",\"kernel_hooks\":true");
+	else if (hooks == 0)
+		printf(",\"kernel_hooks\":false");
+	else
+		printf(",\"kernel_hooks\":null");
 	if (backend != NULL)
 		printf(",\"backend\":\"%s\"", backend);
 	else
@@ -130,6 +149,7 @@ cmd_list(int argc, char **argv)
 	char machine[64];
 	char *backend;
 	int hwt_avail;
+	int hooks;
 	int ch;
 
 	fmt = FMT_TEXT;
@@ -155,6 +175,7 @@ cmd_list(int argc, char **argv)
 	}
 
 	hwt_avail = hwt_available();
+	hooks = hwt_hooks_enabled();
 	backend = hwt_detect_backend();
 
 	if (sysctl_string("hw.model", cpu_model, sizeof(cpu_model)) != 0)
@@ -163,9 +184,9 @@ cmd_list(int argc, char **argv)
 		strlcpy(machine, "unknown", sizeof(machine));
 
 	if (fmt == FMT_JSON)
-		list_json(hwt_avail, backend, cpu_model, machine);
+		list_json(hwt_avail, hooks, backend, cpu_model, machine);
 	else
-		list_text(hwt_avail, backend, cpu_model, machine);
+		list_text(hwt_avail, hooks, backend, cpu_model, machine);
 
 	free(backend);
 	return (0);

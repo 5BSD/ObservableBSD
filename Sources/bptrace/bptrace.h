@@ -146,6 +146,7 @@ struct hwt_ctx {
 /* ------------------------------------------------------------------ */
 
 int	 hwt_available(void);
+int	 hwt_hooks_enabled(void);
 char	*hwt_detect_backend(void);
 
 int	 hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
@@ -158,6 +159,8 @@ int	 hwt_ctx_poll_records(struct hwt_ctx *ctx,
 	    bool wait, int *nout);
 int	 hwt_ctx_wakeup(struct hwt_ctx *ctx);
 void	*hwt_ctx_map_buffer(struct hwt_ctx *ctx);
+ssize_t	 hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
+	    int last_page, vm_offset_t last_offset);
 void	 hwt_ctx_close(struct hwt_ctx *ctx);
 
 /* ------------------------------------------------------------------ */

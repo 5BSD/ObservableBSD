@@ -17,7 +17,7 @@ FreeBSD, covering four areas:
 |------|--------|--------|
 | [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
 | [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
-| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | Planned |
+| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress (step 3 of 4) |
 
 All tools emit OpenTelemetry-native output so their data flows into the
 same collectors, dashboards, and alerting pipelines.
@@ -229,6 +229,66 @@ doas lldb -c /var/crash/vmcore.last /boot/kernel/kernel \
 
 Gracefully degrades on non-Intel systems — sysctl-based sensors
 (temperatures, frequencies) work on all architectures.
+
+---
+
+## bptrace
+
+**Process tracing via FreeBSD Hardware Trace (HWT).**
+
+`bptrace` is now in active bring-up rather than planning. The HWT/PT
+session lifecycle works end to end: allocate context, set backend
+config, start tracing, poll HWT records, and stop cleanly without
+panicking the kernel.
+
+### Current step
+
+**Step 3 of 4: snapshot raw Intel PT buffer to disk.**
+
+Completed so far:
+- Step 1: HWT/PT session bring-up and clean shutdown
+- Step 2: Booted `GENERIC-HWT` kernel with `options HWT_HOOKS`;
+  confirmed `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records appear
+  (19 records from `/bin/sleep 1`)
+- `bptrace exec` and `bptrace trace` now mmap the PT trace buffer
+  via `hwt_ctx_map_buffer()` and write the raw Intel PT data to a
+  `.pt` file before tearing down the context
+
+### Kernel setup
+
+The custom kernel `GENERIC-HWT` (with `options HWT_HOOKS`) is installed
+in `/boot/GENERIC-HWT` and is currently booted.  The config lives at
+`KernelConf/GENERIC-HWT`.
+
+### Next steps
+
+1. ~~Boot a kernel with `options HWT_HOOKS`.~~ Done.
+2. ~~Confirm `EXEC` / `MMAP` records appear.~~ Done (19 records).
+3. ~~Snapshot raw PT buffer to disk.~~ Done (`-o` flag / default
+   `bptrace-<pid>.pt`).
+4. Add Intel PT buffer decoding so `bptrace` can emit control-flow
+   events instead of only HWT metadata.
+5. Add symbolization and higher-level output formatting once decoded
+   PT events are available.
+
+### Known-good smoke test
+
+```sh
+doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -- /bin/sleep 1
+```
+
+Expected on `GENERIC-HWT`:
+- `THREAD_CREATE`, `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records
+- `Saved NNNNN bytes of PT data to bptrace-<pid>.pt` on stderr
+- The `.pt` file contains raw Intel PT packets (non-zero bytes)
+- Clean exit, no kernel crash
+
+Use `-o <path>` to write the PT data to a specific file:
+
+```sh
+doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -o /tmp/test.pt -- /bin/sleep 1
+hexdump -C /tmp/test.pt | head
+```
 
 ---
 

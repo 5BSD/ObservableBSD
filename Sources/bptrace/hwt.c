@@ -30,6 +30,7 @@
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/hwt.h>
 
 #include <err.h>
@@ -56,6 +57,33 @@ hwt_available(void)
 		return (0);
 	close(fd);
 	return (1);
+}
+
+int
+hwt_hooks_enabled(void)
+{
+	char *conftxt;
+	size_t len;
+	int enabled;
+
+	len = 0;
+	if (sysctlbyname("kern.conftxt", NULL, &len, NULL, 0) != 0)
+		return (-1);
+	if (len == 0)
+		return (-1);
+
+	conftxt = calloc(1, len + 1);
+	if (conftxt == NULL)
+		return (-1);
+
+	if (sysctlbyname("kern.conftxt", conftxt, &len, NULL, 0) != 0) {
+		free(conftxt);
+		return (-1);
+	}
+
+	enabled = strstr(conftxt, "options\tHWT_HOOKS") != NULL;
+	free(conftxt);
+	return (enabled ? 1 : 0);
 }
 
 char *
@@ -451,6 +479,58 @@ hwt_ctx_map_buffer(struct hwt_ctx *ctx)
 	}
 	ctx->trace_buf = ptr;
 	return (ptr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Buffer snapshot                                                     */
+/* ------------------------------------------------------------------ */
+
+ssize_t
+hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
+    int last_page, vm_offset_t last_offset)
+{
+	const uint8_t *buf;
+	size_t total;
+	ssize_t nw;
+	size_t off;
+	int fd;
+
+	if (last_page < 0) {
+		warnx("no BUFFER records seen — nothing to snapshot");
+		return (0);
+	}
+
+	buf = hwt_ctx_map_buffer(ctx);
+	if (buf == NULL)
+		return (-1);
+
+	total = (size_t)last_page * PAGE_SIZE + last_offset;
+	if (total > ctx->bufsize)
+		total = ctx->bufsize;
+	if (total == 0) {
+		warnx("PT buffer is empty (0 bytes)");
+		return (0);
+	}
+
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		warn("open %s", path);
+		return (-1);
+	}
+
+	off = 0;
+	while (off < total) {
+		nw = write(fd, buf + off, total - off);
+		if (nw < 0) {
+			warn("write %s", path);
+			close(fd);
+			return (-1);
+		}
+		off += nw;
+	}
+
+	close(fd);
+	return ((ssize_t)total);
 }
 
 /* ------------------------------------------------------------------ */

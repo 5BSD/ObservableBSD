@@ -106,9 +106,15 @@ cmd_exec(int argc, char **argv)
 	double timeout;
 	size_t bufsize;
 	pid_t child;
+	char pt_path[64];
+	const char *pt_output;
+	int last_buf_page;
+	vm_offset_t last_buf_offset;
+	int hooks;
 	int maxrecords;
 	int totalrecords;
 	int exitcode;
+	int empty_drains;
 	int nrecs;
 	int status;
 	int ch, i;
@@ -121,13 +127,16 @@ cmd_exec(int argc, char **argv)
 	bufsize_str = DEFAULT_BUFSIZE;
 	backend_name = NULL;
 	detected_backend = NULL;
+	pt_output = NULL;
 	timeout = DEFAULT_TIMEOUT;
 	maxrecords = 0;
+	last_buf_page = -1;
+	last_buf_offset = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:t:m:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:np")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -152,6 +161,9 @@ cmd_exec(int argc, char **argv)
 			break;
 		case 'm':
 			maxrecords = atoi(optarg);
+			break;
+		case 'o':
+			pt_output = optarg;
 			break;
 		case 'n':
 			dryrun = true;
@@ -199,6 +211,21 @@ cmd_exec(int argc, char **argv)
 		    "bptrace: no HWT backend loaded — "
 		    "run: sudo kldload pt\n");
 		return (1);
+	}
+
+	hooks = hwt_hooks_enabled();
+	if (hooks == 0) {
+		fprintf(stderr,
+		    "bptrace: running kernel lacks HWT_HOOKS; "
+		    "only alloc-time THREAD_CREATE records are available. "
+		    "Boot a kernel built with 'options HWT_HOOKS'.\n");
+		free(detected_backend);
+		return (dryrun ? 0 : 1);
+	}
+	if (hooks < 0) {
+		fprintf(stderr,
+		    "bptrace: warning: unable to verify HWT_HOOKS in "
+		    "the running kernel; continuing\n");
 	}
 
 	/* Fork child stopped. */
@@ -258,8 +285,9 @@ cmd_exec(int argc, char **argv)
 	child_done = false;
 	exitcode = 0;
 	totalrecords = 0;
+	empty_drains = 0;
 
-	while (!child_done) {
+	for (;;) {
 		/* Check timeout. */
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		double elapsed = (now.tv_sec - start.tv_sec) +
@@ -310,6 +338,25 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
+			if (records[i].type == HWT_RECORD_BUFFER) {
+				last_buf_page = records[i].curpage;
+				last_buf_offset = records[i].offset;
+			}
+		}
+
+		/*
+		 * Once the child exits, keep draining a few times before
+		 * closing ctx_fd.  We cannot rely on a post-stop drain
+		 * because the PT-safe stop path closes the device.
+		 */
+		if (child_done) {
+			if (nrecs == 0) {
+				empty_drains++;
+				if (empty_drains >= 3)
+					break;
+			} else {
+				empty_drains = 0;
+			}
 		}
 
 		usleep(nrecs > 0 ? 100 : 1000);
@@ -325,8 +372,11 @@ cmd_exec(int argc, char **argv)
 			exitcode = 128 + WTERMSIG(status);
 	}
 
-	/* Stop tracing and do a final record drain. */
-	hwt_ctx_stop(&ctx);
+	/*
+	 * Final drain while the context fd is still open.
+	 * The loop above handles most draining, but one more pass
+	 * catches any records that arrived after the last poll.
+	 */
 	nrecs = 0;
 	if (hwt_ctx_poll_records(&ctx, records, MAX_POLL_RECORDS,
 	    false, &nrecs) == 0) {
@@ -334,8 +384,32 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
+			if (records[i].type == HWT_RECORD_BUFFER) {
+				last_buf_page = records[i].curpage;
+				last_buf_offset = records[i].offset;
+			}
 		}
 	}
+
+	/* Snapshot PT buffer before stop closes the context fd. */
+	if (last_buf_page >= 0) {
+		ssize_t saved;
+
+		if (pt_output == NULL) {
+			snprintf(pt_path, sizeof(pt_path),
+			    "bptrace-%d.pt", (int)child);
+			pt_output = pt_path;
+		}
+		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,
+		    last_buf_page, last_buf_offset);
+		if (saved > 0)
+			fprintf(stderr,
+			    "Saved %zd bytes of PT data to %s\n",
+			    saved, pt_output);
+	}
+
+	/* Stop tracing (closes ctx_fd; no drain possible after this). */
+	hwt_ctx_stop(&ctx);
 
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "\n%d records collected, exit code %d\n",

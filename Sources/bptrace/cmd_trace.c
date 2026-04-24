@@ -47,6 +47,10 @@ cmd_trace(int argc, char **argv)
 	struct hwt_ctx ctx;
 	struct timespec start, now;
 	char pathbuf[1024];
+	char pt_path[64];
+	const char *pt_output;
+	int last_buf_page;
+	vm_offset_t last_buf_offset;
 	enum bptrace_fmt fmt;
 	const char *bufsize_str;
 	const char *backend_name;
@@ -55,24 +59,30 @@ cmd_trace(int argc, char **argv)
 	double duration;
 	size_t bufsize;
 	pid_t pid;
+	int hooks;
 	int maxrecords;
 	int totalrecords;
+	int empty_drains;
 	int nrecs;
 	int ch, i;
 	bool dryrun;
 	bool pause_on_mmap;
+	bool target_gone;
 
 	fmt = FMT_TEXT;
 	bufsize_str = DEFAULT_BUFSIZE;
 	backend_name = NULL;
 	detected_backend = NULL;
+	pt_output = NULL;
 	duration = 0;
 	maxrecords = 0;
+	last_buf_page = -1;
+	last_buf_offset = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:m:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:m:o:np")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -97,6 +107,9 @@ cmd_trace(int argc, char **argv)
 			break;
 		case 'm':
 			maxrecords = atoi(optarg);
+			break;
+		case 'o':
+			pt_output = optarg;
 			break;
 		case 'n':
 			dryrun = true;
@@ -152,6 +165,21 @@ cmd_trace(int argc, char **argv)
 		return (1);
 	}
 
+	hooks = hwt_hooks_enabled();
+	if (hooks == 0) {
+		fprintf(stderr,
+		    "bptrace: running kernel lacks HWT_HOOKS; "
+		    "only alloc-time THREAD_CREATE records are available. "
+		    "Boot a kernel built with 'options HWT_HOOKS'.\n");
+		free(detected_backend);
+		return (dryrun ? 0 : 1);
+	}
+	if (hooks < 0) {
+		fprintf(stderr,
+		    "bptrace: warning: unable to verify HWT_HOOKS in "
+		    "the running kernel; continuing\n");
+	}
+
 	execname = process_name(pid, pathbuf, sizeof(pathbuf));
 	if (execname == NULL)
 		execname = "?";
@@ -195,6 +223,8 @@ cmd_trace(int argc, char **argv)
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	totalrecords = 0;
+	empty_drains = 0;
+	target_gone = false;
 
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "Tracing PID %d (%s)...\n",
@@ -202,7 +232,7 @@ cmd_trace(int argc, char **argv)
 
 	while (!trace_interrupted) {
 		/* Check duration. */
-		if (duration > 0) {
+		if (!target_gone && duration > 0) {
 			clock_gettime(CLOCK_MONOTONIC, &now);
 			double elapsed = (now.tv_sec - start.tv_sec) +
 			    (now.tv_nsec - start.tv_nsec) / 1e9;
@@ -211,19 +241,23 @@ cmd_trace(int argc, char **argv)
 		}
 
 		/* Check max records. */
-		if (maxrecords > 0 && totalrecords >= maxrecords) {
+		if (!target_gone && maxrecords > 0 && totalrecords >= maxrecords) {
 			fprintf(stderr,
 			    "max-records: %d reached, stopping trace\n",
 			    maxrecords);
 			break;
 		}
 
-		/* Check target still alive. */
-		if (kill(pid, 0) != 0) {
+		/*
+		 * Once the target exits, keep draining a few times before
+		 * closing ctx_fd.  We cannot rely on a post-stop drain
+		 * because the PT-safe stop path closes the device.
+		 */
+		if (!target_gone && kill(pid, 0) != 0) {
+			target_gone = true;
 			if (fmt == FMT_TEXT)
 				fprintf(stderr,
 				    "Target process %d exited\n", (int)pid);
-			break;
 		}
 
 		/* Drain records. */
@@ -240,17 +274,35 @@ cmd_trace(int argc, char **argv)
 			else
 				fmt_record_text(&records[i], pid);
 
+			if (records[i].type == HWT_RECORD_BUFFER) {
+				last_buf_page = records[i].curpage;
+				last_buf_offset = records[i].offset;
+			}
+
 			if (pause_on_mmap &&
 			    (records[i].type == HWT_RECORD_MMAP ||
 			     records[i].type == HWT_RECORD_EXECUTABLE))
 				hwt_ctx_wakeup(&ctx);
 		}
 
+		if (target_gone) {
+			if (nrecs == 0) {
+				empty_drains++;
+				if (empty_drains >= 3)
+					break;
+			} else {
+				empty_drains = 0;
+			}
+		}
+
 		usleep(nrecs > 0 ? 100 : 1000);
 	}
 
-	/* Stop and final drain. */
-	hwt_ctx_stop(&ctx);
+	/*
+	 * Final drain while the context fd is still open.
+	 * The loop above handles most draining, but one more pass
+	 * catches any records that arrived after the last poll.
+	 */
 	nrecs = 0;
 	if (hwt_ctx_poll_records(&ctx, records, MAX_POLL_RECORDS,
 	    false, &nrecs) == 0) {
@@ -260,8 +312,32 @@ cmd_trace(int argc, char **argv)
 				fmt_record_json(&records[i], pid);
 			else
 				fmt_record_text(&records[i], pid);
+			if (records[i].type == HWT_RECORD_BUFFER) {
+				last_buf_page = records[i].curpage;
+				last_buf_offset = records[i].offset;
+			}
 		}
 	}
+
+	/* Snapshot PT buffer before stop closes the context fd. */
+	if (last_buf_page >= 0) {
+		ssize_t saved;
+
+		if (pt_output == NULL) {
+			snprintf(pt_path, sizeof(pt_path),
+			    "bptrace-%d.pt", (int)pid);
+			pt_output = pt_path;
+		}
+		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,
+		    last_buf_page, last_buf_offset);
+		if (saved > 0)
+			fprintf(stderr,
+			    "Saved %zd bytes of PT data to %s\n",
+			    saved, pt_output);
+	}
+
+	/* Stop tracing (closes ctx_fd; no drain possible after this). */
+	hwt_ctx_stop(&ctx);
 
 	if (fmt == FMT_TEXT) {
 		clock_gettime(CLOCK_MONOTONIC, &now);

@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * bptrace trace — attach HWT tracing to a running process.
+ * bsdtrace trace — attach HWT tracing to a running process.
  *
  * Attaches thread-mode tracing to the given PID and streams
  * records until interrupted (Ctrl-C), duration elapsed, or
@@ -21,7 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 #define	DEFAULT_BUFSIZE		"64m"
 #define	MAX_POLL_RECORDS	256
@@ -43,7 +43,7 @@ sigint_handler(int sig __unused)
 int
 cmd_trace(int argc, char **argv)
 {
-	struct bptrace_record records[MAX_POLL_RECORDS];
+	struct bsdtrace_record records[MAX_POLL_RECORDS];
 	struct trace_state ts;
 	struct hwt_ctx ctx;
 	struct timespec start, now;
@@ -52,7 +52,7 @@ cmd_trace(int argc, char **argv)
 	char pt_path[64];
 	char meta_path[80];
 	const char *pt_output;
-	enum bptrace_fmt fmt;
+	enum bsdtrace_fmt fmt;
 	const char *bufsize_str;
 	const char *backend_name;
 	const char *execname;
@@ -92,7 +92,7 @@ cmd_trace(int argc, char **argv)
 				fmt = FMT_TEXT;
 			else {
 				fprintf(stderr,
-				    "bptrace trace: unknown format '%s'\n",
+				    "bsdtrace trace: unknown format '%s'\n",
 				    optarg);
 				return (1);
 			}
@@ -123,7 +123,7 @@ cmd_trace(int argc, char **argv)
 			break;
 		default:
 			fprintf(stderr,
-			    "usage: bptrace trace [opts] pid\n");
+			    "usage: bsdtrace trace [opts] pid\n");
 			return (1);
 		}
 	}
@@ -131,27 +131,27 @@ cmd_trace(int argc, char **argv)
 	argv += optind;
 
 	if (argc < 1) {
-		fprintf(stderr, "bptrace trace: PID required\n");
+		fprintf(stderr, "bsdtrace trace: PID required\n");
 		return (1);
 	}
 
 	pid = (pid_t)atoi(argv[0]);
 	if (pid <= 0) {
-		fprintf(stderr, "bptrace trace: PID must be positive\n");
+		fprintf(stderr, "bsdtrace trace: PID must be positive\n");
 		return (1);
 	}
 
 	/* Verify target exists. */
 	if (kill(pid, 0) != 0) {
 		fprintf(stderr,
-		    "bptrace trace: process %d not found or not accessible\n",
+		    "bsdtrace trace: process %d not found or not accessible\n",
 		    (int)pid);
 		return (1);
 	}
 
 	if (!hwt_available()) {
 		fprintf(stderr,
-		    "bptrace: /dev/hwt not found — run: sudo kldload hwt\n");
+		    "bsdtrace: /dev/hwt not found — run: sudo kldload hwt\n");
 		return (1);
 	}
 
@@ -164,7 +164,7 @@ cmd_trace(int argc, char **argv)
 	}
 	if (backend_name == NULL) {
 		fprintf(stderr,
-		    "bptrace: no HWT backend loaded — "
+		    "bsdtrace: no HWT backend loaded — "
 		    "run: sudo kldload pt\n");
 		return (1);
 	}
@@ -172,7 +172,7 @@ cmd_trace(int argc, char **argv)
 	hooks = hwt_hooks_enabled();
 	if (hooks == 0) {
 		fprintf(stderr,
-		    "bptrace: running kernel lacks HWT_HOOKS; "
+		    "bsdtrace: running kernel lacks HWT_HOOKS; "
 		    "only alloc-time THREAD_CREATE records are available. "
 		    "Boot a kernel built with 'options HWT_HOOKS'.\n");
 		free(detected_backend);
@@ -180,7 +180,7 @@ cmd_trace(int argc, char **argv)
 	}
 	if (hooks < 0) {
 		fprintf(stderr,
-		    "bptrace: warning: unable to verify HWT_HOOKS in "
+		    "bsdtrace: warning: unable to verify HWT_HOOKS in "
 		    "the running kernel; continuing\n");
 	}
 
@@ -227,7 +227,7 @@ cmd_trace(int argc, char **argv)
 
 	/* Open metadata sidecar and init trace state. */
 	snprintf(meta_path, sizeof(meta_path),
-	    "bptrace-%d.meta", (int)pid);
+	    "bsdtrace-%d.meta", (int)pid);
 	meta = meta_writer_open(meta_path);
 	trace_state_init(&ts, meta);
 
@@ -328,7 +328,7 @@ cmd_trace(int argc, char **argv)
 
 		if (pt_output == NULL) {
 			snprintf(pt_path, sizeof(pt_path),
-			    "bptrace-%d.pt", (int)pid);
+			    "bsdtrace-%d.pt", (int)pid);
 			pt_output = pt_path;
 		}
 		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,

@@ -3,14 +3,14 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * bptrace — process tracing via FreeBSD Hardware Trace (HWT).
+ * bsdtrace — process tracing via FreeBSD Hardware Trace (HWT).
  *
  * Shared header: types, prototypes, and the PT backend config struct
  * (which is not installed as a public kernel header).
  */
 
-#ifndef BPTRACE_H
-#define BPTRACE_H
+#ifndef BSDTRACE_H
+#define BSDTRACE_H
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -88,7 +88,7 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
     "hwt_wakeup ABI mismatch");
 
 /*
- * RTIT_CTL bits used by bptrace.
+ * RTIT_CTL bits used by bsdtrace.
  *
  * Defined in <x86/specialreg.h> but guarded here in case that
  * header is unavailable on non-x86 builds.
@@ -103,7 +103,7 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
 /* ------------------------------------------------------------------ */
 
 /* Output format. */
-enum bptrace_fmt {
+enum bsdtrace_fmt {
 	FMT_TEXT,
 	FMT_JSON
 };
@@ -112,7 +112,7 @@ enum bptrace_fmt {
  * Parsed HWT record — mirrors the kernel's hwt_record_user_entry
  * but flattened so callers don't need to navigate the union.
  */
-struct bptrace_record {
+struct bsdtrace_record {
 	enum hwt_record_type	type;
 	char			fullpath[MAXPATHLEN];
 	uintptr_t		addr;
@@ -156,7 +156,7 @@ int	 hwt_ctx_set_config(struct hwt_ctx *ctx, bool pause_on_mmap);
 int	 hwt_ctx_start(struct hwt_ctx *ctx);
 int	 hwt_ctx_stop(struct hwt_ctx *ctx);
 int	 hwt_ctx_poll_records(struct hwt_ctx *ctx,
-	    struct bptrace_record *records, int maxrecords,
+	    struct bsdtrace_record *records, int maxrecords,
 	    bool wait, int *nout);
 int	 hwt_ctx_wakeup(struct hwt_ctx *ctx);
 void	*hwt_ctx_map_buffer(struct hwt_ctx *ctx);
@@ -168,8 +168,8 @@ void	 hwt_ctx_close(struct hwt_ctx *ctx);
 /* format.c — output formatting                                        */
 /* ------------------------------------------------------------------ */
 
-void	 fmt_record_text(const struct bptrace_record *rec, pid_t pid);
-void	 fmt_record_json(const struct bptrace_record *rec, pid_t pid);
+void	 fmt_record_text(const struct bsdtrace_record *rec, pid_t pid);
+void	 fmt_record_json(const struct bsdtrace_record *rec, pid_t pid);
 
 /* ------------------------------------------------------------------ */
 /* decode.c — PT packet / instruction decoder                          */
@@ -215,10 +215,10 @@ struct bin_range {
 	uint64_t	base;		/* load base (slide origin) */
 };
 
-int	 decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt);
+int	 decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
-	    enum bptrace_fmt fmt);
+	    enum bsdtrace_fmt fmt);
 
 /* ------------------------------------------------------------------ */
 /* meta.c — .meta sidecar writer/reader                                */
@@ -228,7 +228,7 @@ struct meta_writer;
 
 struct meta_writer *meta_writer_open(const char *path);
 void	 meta_writer_record(struct meta_writer *mw,
-	    const struct bptrace_record *rec);
+	    const struct bsdtrace_record *rec);
 void	 meta_writer_close(struct meta_writer *mw);
 
 int	 meta_read_sections(const char *path,
@@ -243,7 +243,7 @@ int	 cmd_exec(int argc, char **argv);
 int	 cmd_trace(int argc, char **argv);
 
 /* ------------------------------------------------------------------ */
-/* Shared helpers (bptrace.c)                                          */
+/* Shared helpers (bsdtrace.c)                                          */
 /* ------------------------------------------------------------------ */
 
 /*
@@ -264,10 +264,10 @@ struct trace_state {
 
 void	 trace_state_init(struct trace_state *ts, struct meta_writer *meta);
 void	 trace_state_process(struct trace_state *ts,
-	    const struct bptrace_record *rec);
+	    const struct bsdtrace_record *rec);
 void	 trace_state_free(struct trace_state *ts);
 
 size_t	 parse_size(const char *s);
 const char *process_name(pid_t pid, char *buf, size_t bufsz);
 
-#endif /* !BPTRACE_H */
+#endif /* !BSDTRACE_H */

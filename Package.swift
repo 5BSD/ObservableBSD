@@ -6,7 +6,7 @@
 // Executable targets:
 //   - dtlm    — DTrace-based instruments and profiling
 //   - hwtlm   — Hardware telemetry (power, temperature, frequency)
-//   - bptrace — Process tracing via HWT (Intel PT / ARM CoreSight)
+//   - bsdtrace — Process tracing via HWT (Intel PT / ARM CoreSight)
 //
 // Shared library:
 //   - OTelExport — Exporter protocol, data types, and three
@@ -20,7 +20,7 @@ let package = Package(
     products: [
         .executable(name: "dtlm", targets: ["dtlm"]),
         .executable(name: "hwtlm", targets: ["hwtlm"]),
-        .executable(name: "bptrace", targets: ["bptrace"]),
+        .executable(name: "bsdtrace", targets: ["bsdtrace"]),
         .library(name: "OTelExport", targets: ["OTelExport"]),
     ],
     dependencies: [
@@ -77,7 +77,7 @@ let package = Package(
             exclude: ["ARM.md"]
         ),
         .executableTarget(
-            name: "bptrace",
+            name: "bsdtrace",
             dependencies: [],
             cSettings: [
                 .unsafeFlags(["-I/usr/local/include/libipt"]),

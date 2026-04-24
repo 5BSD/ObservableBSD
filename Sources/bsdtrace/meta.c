@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 /* ------------------------------------------------------------------ */
 /* Writer                                                              */
@@ -45,7 +45,7 @@ meta_writer_open(const char *path)
 }
 
 void
-meta_writer_record(struct meta_writer *mw, const struct bptrace_record *rec)
+meta_writer_record(struct meta_writer *mw, const struct bsdtrace_record *rec)
 {
 
 	if (mw == NULL || mw->fp == NULL)

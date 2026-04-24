@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * bptrace — process tracing via FreeBSD Hardware Trace (HWT).
+ * bsdtrace — process tracing via FreeBSD Hardware Trace (HWT).
  *
  * Entry point, usage, subcommand dispatch, and shared helpers.
  */
@@ -19,20 +19,20 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
-#define	BPTRACE_VERSION	"0.1.0"
+#define	BSDTRACE_VERSION	"0.1.0"
 
 static void
 usage(void)
 {
 
 	fprintf(stderr,
-	    "usage: bptrace list    [-f text|json]\n"
-	    "       bptrace exec    [-f text|json] [-b backend] [-s bufsize]\n"
+	    "usage: bsdtrace list    [-f text|json]\n"
+	    "       bsdtrace exec    [-f text|json] [-b backend] [-s bufsize]\n"
 	    "                       [-t timeout] [-m maxrec] [-o ptfile] [-np]\n"
 	    "                       -- cmd [args...]\n"
-	    "       bptrace trace   [-f text|json] [-b backend] [-s bufsize]\n"
+	    "       bsdtrace trace   [-f text|json] [-b backend] [-s bufsize]\n"
 	    "                       [-d duration] [-m maxrec] [-o ptfile] [-np]\n"
 	    "                       pid\n"
 	    "\n"
@@ -43,7 +43,7 @@ usage(void)
 	    "  -t timeout   Maximum trace duration in seconds (exec, default: 30)\n"
 	    "  -d duration  Trace duration in seconds (trace, 0 = until Ctrl-C)\n"
 	    "  -m maxrec    Stop after N records (0 = unlimited)\n"
-	    "  -o ptfile    Output path for raw PT data (default: bptrace-<pid>.pt)\n"
+	    "  -o ptfile    Output path for raw PT data (default: bsdtrace-<pid>.pt)\n"
 	    "  -T tid       Thread index to trace (default: 0)\n"
 	    "  -n           Dry run: validate setup without tracing\n"
 	    "  -p           Pause target on mmap/exec events\n"
@@ -70,7 +70,7 @@ trace_state_init(struct trace_state *ts, struct meta_writer *meta)
 
 void
 trace_state_process(struct trace_state *ts,
-    const struct bptrace_record *rec)
+    const struct bsdtrace_record *rec)
 {
 
 	meta_writer_record(ts->meta, rec);
@@ -199,11 +199,11 @@ main(int argc, char **argv)
 		return (cmd_trace(argc - 1, argv + 1));
 
 	if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
-		printf("bptrace %s\n", BPTRACE_VERSION);
+		printf("bsdtrace %s\n", BSDTRACE_VERSION);
 		return (0);
 	}
 
-	fprintf(stderr, "bptrace: unknown command '%s'\n", argv[1]);
+	fprintf(stderr, "bsdtrace: unknown command '%s'\n", argv[1]);
 	usage();
 	/* NOTREACHED */
 	return (1);

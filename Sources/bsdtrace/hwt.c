@@ -42,7 +42,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 /* ------------------------------------------------------------------ */
 /* Detection                                                           */
@@ -335,7 +335,7 @@ hwt_ctx_stop(struct hwt_ctx *ctx)
 
 int
 hwt_ctx_poll_records(struct hwt_ctx *ctx,
-    struct bptrace_record *records, int maxrecords,
+    struct bsdtrace_record *records, int maxrecords,
     bool wait, int *nout)
 {
 	struct hwt_record_user_entry *entries;
@@ -400,7 +400,7 @@ hwt_ctx_poll_records(struct hwt_ctx *ctx,
 	 */
 	for (i = 0; i < nentries; i++) {
 		struct hwt_record_user_entry *e = &entries[i];
-		struct bptrace_record *r = &records[i];
+		struct bsdtrace_record *r = &records[i];
 
 		memset(r, 0, sizeof(*r));
 		r->type = e->record_type;

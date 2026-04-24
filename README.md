@@ -17,7 +17,7 @@ FreeBSD, covering four areas:
 |------|--------|--------|
 | [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
 | [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
-| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress |
+| [`bsdtrace`](#bsdtrace) | Hardware-assisted execution tracing — understand what your software does | In progress |
 
 All tools emit OpenTelemetry-native output so their data flows into the
 same collectors, dashboards, and alerting pipelines.
@@ -211,7 +211,7 @@ sudo kldload cpuctl
 sudo kldload coretemp
 ```
 
-If HWT or `bptrace` testing panics the kernel, inspect the latest
+If HWT or `bsdtrace` testing panics the kernel, inspect the latest
 crash dump with:
 ```sh
 doas cat /var/crash/info.last
@@ -232,71 +232,113 @@ Gracefully degrades on non-Intel systems — sysctl-based sensors
 
 ---
 
-## bptrace
+## bsdtrace
 
-**Process tracing via FreeBSD Hardware Trace (HWT).**
+**Understand what your software does — hardware-assisted execution tracing for FreeBSD.**
 
-`bptrace` is now in active bring-up rather than planning. The HWT/PT
-session lifecycle works end to end: allocate context, set backend
-config, start tracing, poll HWT records, and stop cleanly without
-panicking the kernel.
+`bsdtrace` uses Intel Processor Trace (PT) via FreeBSD's HWT framework
+to capture every branch a program takes, then decodes the trace into
+symbolized control-flow events: function calls, returns, jumps, and
+syscalls.  Traces are saved for offline analysis — capture once,
+analyze as many times as you need.
 
-### Current step
+### Subcommands
 
-**Instruction-level PT decoding with symbolization.**
+| Command | Purpose |
+|---------|---------|
+| `bsdtrace exec` | Run a command under tracing |
+| `bsdtrace trace` | Attach to a running process |
+| `bsdtrace list` | Show HWT availability and backend capabilities |
+| `bsdtrace info` | Show binary layout — text segments, functions, offsets *(planned)* |
+| `bsdtrace decode` | Offline re-decode a saved trace with filters *(planned)* |
 
-Completed:
-- HWT/PT session bring-up and clean shutdown (avoids kernel panics)
-- `GENERIC-HWT` kernel with `options HWT_HOOKS` for full tracing
-- Raw PT buffer snapshot to `.pt` file before context teardown
-- Packet-level PT decoding via libipt (fallback mode)
-- Instruction-level decoding — ELF program headers parsed via
-  libelf/gelf to build `pt_image`, dynamic linker resolved via
-  PT_INTERP, libipt instruction decoder resolves calls, returns,
-  jumps, and syscalls
-- Symbolization — ELF symbol tables (`.dynsym` / `.symtab`) loaded
-  via libelf, runtime addresses computed with ASLR slide, binary
-  search lookup with `binary:function+offset` output
+### Quick start
+
+```sh
+# Trace a command (saves .pt + .meta files for offline analysis)
+doas bsdtrace exec -t 5 -- /bin/sleep 1
+
+# Attach to a running process for 10 seconds
+doas bsdtrace trace -d 10 $(pidof nginx)
+
+# Check HWT/PT availability
+bsdtrace list
+```
+
+### Output
+
+```
+  CALL      ld-elf.so.1:dlopen+0x1a
+  RETURN    ld-elf.so.1:dlclose+0x42
+  CALL      libc.so.7:exit
+  SYSCALL   libsys.so.7+0x1234
+  CJMP      libc.so.7:nanosleep+0x8
+375467 instructions, 14240 calls, 3520 returns, 4 syscalls
+```
+
+Each trace produces two files:
+- `bsdtrace-<pid>.pt` — raw Intel PT data (replayable)
+- `bsdtrace-<pid>.meta` — binary mapping metadata (JSONL)
+
+### Options
+
+| Flag | Commands | Description |
+|------|----------|-------------|
+| `-f text\|json` | all | Output format (default: text) |
+| `-s bufsize` | exec, trace | PT buffer size (default: 64m) |
+| `-t timeout` | exec | Max trace duration in seconds (default: 30) |
+| `-d duration` | trace | Trace duration (0 = until Ctrl-C) |
+| `-m maxrec` | exec, trace | Stop after N HWT records |
+| `-o ptfile` | exec, trace | Output path for .pt file |
+| `-T tid` | exec, trace | Thread index to trace (default: 0) |
+| `-b backend` | exec, trace | HWT backend (default: auto-detect) |
+| `-n` | exec, trace | Dry run — validate setup without tracing |
+| `-p` | exec, trace | Pause target on mmap/exec events |
+
+### Planned features
+
+- **`bsdtrace info`** — show binary layout (text segments, exported
+  functions with offsets) for both static ELF files and running
+  processes (`--pid`).  Helps users discover address ranges for
+  hardware filtering.
+- **`bsdtrace decode`** — offline re-decode a saved `.pt` + `.meta`
+  file pair with software filters (`-F function`, `-r range`).
+  Analyze the same capture with different filters without re-tracing.
+- **Hardware IP range filter** (`-r`) — restrict what PT records at
+  the hardware level for long-running focused traces.
+- **`--no-aslr`** — disable ASLR for deterministic addresses when
+  combined with hardware filtering.
+- **Split debug info** — auto-load from `/usr/lib/debug/` for full
+  symbolization of stripped system binaries.
+- **Buffer overflow warning** — detect when the PT circular buffer
+  wraps (already implemented, warns on stderr).
 
 ### Kernel setup
 
-The custom kernel `GENERIC-HWT` (with `options HWT_HOOKS`) is installed
-in `/boot/GENERIC-HWT` and is currently booted.  The config lives at
-`KernelConf/GENERIC-HWT`.
-
-### Next steps
-
-1. ~~Boot a kernel with `options HWT_HOOKS`.~~ Done.
-2. ~~Confirm `EXEC` / `MMAP` records appear.~~ Done (19 records).
-3. ~~Snapshot raw PT buffer to disk.~~ Done (`-o` flag / default
-   `bptrace-<pid>.pt`).
-4. ~~Decode PT packets via libipt.~~ Done (packet-level fallback).
-5. ~~Instruction-level decoding with ELF image.~~ Done.
-6. ~~Symbolization via ELF symbol tables.~~ Done
-   (`binary:function+offset`).
-7. Load split debug info from `/usr/lib/debug/` and `.gnu_debuglink`
-   for full symbolization of stripped system binaries.
-8. Higher-level output: call trees, flame graphs, OTel spans.
-
-### Known-good smoke test
+Requires a kernel with `options HWT_HOOKS` and two kernel modules:
 
 ```sh
-doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -- /bin/sleep 1
+sudo kldload hwt
+sudo kldload pt
 ```
 
-Expected on `GENERIC-HWT`:
-- `THREAD_CREATE`, `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records
-- `Saved NNNNN bytes of PT data to bptrace-<pid>.pt` on stderr
-- Decoded instructions with symbols: `CALL ld-elf.so.1:dlopen+0x1a`
-- Summary: `N instructions, M calls, K returns, J syscalls, ... N symbols`
-- Clean exit, no kernel crash
+The custom kernel config lives at `KernelConf/GENERIC-HWT`.
 
-Use `-o <path>` to write the PT data to a specific file:
+### How it works
 
-```sh
-doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -o /tmp/test.pt -- /bin/sleep 1
-hexdump -C /tmp/test.pt | head
-```
+1. **Collection**: HWT allocates a PT context for the target process.
+   The CPU's PT hardware records every branch into a circular buffer.
+   HWT kernel hooks generate metadata records (EXEC, MMAP, MUNMAP)
+   as the process loads binaries.
+2. **Snapshot**: Before teardown, the PT buffer is mmap'd and saved
+   to disk alongside the metadata records.
+3. **Decode**: The raw PT data is fed to libipt's instruction decoder.
+   ELF program headers (parsed via libelf/gelf) build a binary image
+   so libipt can resolve compressed IPs.  The dynamic linker is
+   resolved via PT_INTERP.
+4. **Symbolize**: ELF symbol tables (`.dynsym` / `.symtab`) provide
+   function names.  A sorted symbol table with ASLR-adjusted addresses
+   maps IPs to `binary:function+offset`.
 
 ---
 
@@ -335,7 +377,7 @@ sudo dtlm watch syscall-counts --format otel --duration 60
 swift build
 ```
 
-Builds both `dtlm` and `hwtlm` into `.build/debug/`.
+Builds `dtlm`, `hwtlm`, and `bsdtrace` into `.build/debug/`.
 
 ## Testing
 
@@ -356,7 +398,10 @@ sudo chown -R $(id -un):$(id -gn) .build
 - [FreeBSDKit](https://github.com/SwiftBSD/FreeBSDKit) >= 0.2.6
 - [swift-argument-parser](https://github.com/apple/swift-argument-parser) >= 1.2.0
 - libz (system, for gzip compression)
+- libipt (system, for Intel PT decoding — FreeBSD base)
+- libelf (system, for ELF parsing — FreeBSD base)
 - cpuctl(4) kernel module (for hwtlm RAPL access)
+- hwt(4) + pt(4) kernel modules (for bsdtrace)
 
 ## License
 

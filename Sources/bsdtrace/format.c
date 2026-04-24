@@ -14,7 +14,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -112,7 +112,7 @@ record_type_name(enum hwt_record_type t)
 /* ------------------------------------------------------------------ */
 
 void
-fmt_record_text(const struct bptrace_record *rec, pid_t pid)
+fmt_record_text(const struct bsdtrace_record *rec, pid_t pid)
 {
 
 	print_timestamp();
@@ -175,7 +175,7 @@ fmt_record_text(const struct bptrace_record *rec, pid_t pid)
 /* ------------------------------------------------------------------ */
 
 void
-fmt_record_json(const struct bptrace_record *rec, pid_t pid)
+fmt_record_json(const struct bsdtrace_record *rec, pid_t pid)
 {
 
 	printf("{\"timestamp\":\"");

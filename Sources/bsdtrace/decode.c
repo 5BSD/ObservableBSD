@@ -29,7 +29,7 @@
 #include <intel-pt.h>
 #include <pt_cpu.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -261,7 +261,7 @@ emit_packet_json(const struct pt_packet *pkt)
 /* ------------------------------------------------------------------ */
 
 int
-decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt)
+decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt)
 {
 	struct pt_config config;
 	struct pt_packet_decoder *decoder;
@@ -550,7 +550,7 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 		return (NULL);
 	}
 
-	image = pt_image_alloc("bptrace");
+	image = pt_image_alloc("bsdtrace");
 	if (image == NULL)
 		return (NULL);
 
@@ -1086,7 +1086,7 @@ find_binary_for_ip(const struct bin_range *ranges, int nranges,
 int
 decode_pt_insn(const void *buf, size_t len,
     const struct pt_image_info *sections, int nsections,
-    enum bptrace_fmt fmt)
+    enum bsdtrace_fmt fmt)
 {
 	struct pt_config config;
 	struct pt_insn_decoder *decoder;

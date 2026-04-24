@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * bptrace list — show HWT availability and backend capabilities.
+ * bsdtrace list — show HWT availability and backend capabilities.
  */
 
 #include <sys/types.h>
@@ -14,7 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "bptrace.h"
+#include "bsdtrace.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -144,7 +144,7 @@ list_json(int hwt_avail, int hooks, const char *backend,
 int
 cmd_list(int argc, char **argv)
 {
-	enum bptrace_fmt fmt;
+	enum bsdtrace_fmt fmt;
 	char cpu_model[256];
 	char machine[64];
 	char *backend;
@@ -163,13 +163,13 @@ cmd_list(int argc, char **argv)
 				fmt = FMT_TEXT;
 			else {
 				fprintf(stderr,
-				    "bptrace list: unknown format '%s'\n",
+				    "bsdtrace list: unknown format '%s'\n",
 				    optarg);
 				return (1);
 			}
 			break;
 		default:
-			fprintf(stderr, "usage: bptrace list [-f text|json]\n");
+			fprintf(stderr, "usage: bsdtrace list [-f text|json]\n");
 			return (1);
 		}
 	}

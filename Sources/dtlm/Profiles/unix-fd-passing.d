@@ -1,11 +1,10 @@
 /*
- * sendmsg/recvmsg activity by process.
+ * sendmsg/recvmsg activity by process (IPC monitor).
  *
- * Traces sendmsg and recvmsg syscalls with byte counts.
- * Useful for identifying IPC-heavy processes. Note: captures
- * all sendmsg/recvmsg calls regardless of address family —
- * does not distinguish AF_UNIX from AF_INET or inspect
- * ancillary data (SCM_RIGHTS).
+ * Traces all sendmsg and recvmsg syscalls with byte counts.
+ * Useful for identifying IPC-heavy processes. Captures all
+ * address families (AF_UNIX, AF_INET, etc.) — does not filter
+ * to Unix domain sockets or inspect ancillary data (SCM_RIGHTS).
  */
 
 syscall::sendmsg:entry

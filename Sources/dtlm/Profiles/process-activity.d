@@ -1,5 +1,5 @@
 /*
- * Process Activity — Apple Instruments Activity Monitor equivalent.
+ * Process Activity — lifecycle event stream.
  *
  * Tracks the process lifecycle: creation, exec, exit, signal delivery.
  * Useful for "what is starting and stopping on this host" forensic
@@ -41,7 +41,7 @@ proc:::exit
 proc:::signal-send
 /* @dtlm-predicate */
 {
-    printf("%s[%d]: signal-send sig=%d to pid=%d\n", execname, pid, (int)arg2, (int)arg1);
+    printf("%s[%d]: signal-send sig=%d to pid=%d\n", execname, pid, (int)arg2, args[1]->p_pid);
     /* @dtlm-stack */
     /* @dtlm-ustack */
 }

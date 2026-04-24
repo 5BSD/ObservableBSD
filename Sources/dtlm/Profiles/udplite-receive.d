@@ -1,4 +1,4 @@
-/* Print every udplite:::receive event */
+/* Print every udplite:::receive event (requires kernel UDP-Lite support) */
 
 udplite:::receive
 /* @dtlm-predicate */

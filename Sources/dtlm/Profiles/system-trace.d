@@ -1,5 +1,5 @@
 /*
- * System Trace — Apple Instruments equivalent.
+ * System Trace — full event stream.
  *
  * The kitchen-sink view: every syscall, every proc lifecycle event,
  * every sched on-cpu / off-cpu transition, every signal delivery,

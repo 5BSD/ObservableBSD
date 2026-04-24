@@ -1,4 +1,20 @@
-/* Print every tcp:::state-change with previous and current state */
+/* Print every TCP event — send, receive, and state change */
+
+tcp:::send
+/* @dtlm-predicate */
+{
+    printf("%s[%d]: tcp send %d bytes\n", execname, pid, args[2]->ip_plength);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}
+
+tcp:::receive
+/* @dtlm-predicate */
+{
+    printf("%s[%d]: tcp recv %d bytes\n", execname, pid, args[2]->ip_plength);
+    /* @dtlm-stack */
+    /* @dtlm-ustack */
+}
 
 tcp:::state-change
 /* @dtlm-predicate */

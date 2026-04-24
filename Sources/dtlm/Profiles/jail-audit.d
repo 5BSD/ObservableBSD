@@ -1,9 +1,9 @@
 /*
  * Jail audit — jail creation, attachment, and process transitions.
  *
- * Traces jail(2), jail_attach(2), and jail_remove(2) calls.
- * Useful for multi-tenant hosts to monitor jail lifecycle
- * and process containment. FreeBSD-specific.
+ * Traces jail(2), jail_attach(2), jail_remove(2), jail_set(2),
+ * and jail_get(2) calls. Useful for multi-tenant hosts to monitor
+ * jail lifecycle and process containment. FreeBSD-specific.
  */
 
 syscall::jail:entry
@@ -40,6 +40,3 @@ syscall::jail_get:entry
     printf("%s[%d]: jail_get\n", execname, pid);
 }
 
-dtrace:::END
-{
-}

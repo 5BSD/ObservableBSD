@@ -4,15 +4,15 @@
  * Aggregates connect/sendto/recvfrom/sendmsg/recvmsg failures
  * by process, syscall, and errno. Useful for diagnosing
  * connection refused, timeouts, and network unreachable.
+ * Note: FreeBSD has no send/recv syscalls — libc wraps them
+ * as sendto/recvfrom, which are traced here.
  */
 
 syscall::connect:return,
 syscall::sendto:return,
 syscall::recvfrom:return,
 syscall::sendmsg:return,
-syscall::recvmsg:return,
-syscall::send:return,
-syscall::recv:return
+syscall::recvmsg:return
 /arg1 == -1 /* @dtlm-predicate-and *//
 {
     @errors[execname, probefunc, errno] = count();

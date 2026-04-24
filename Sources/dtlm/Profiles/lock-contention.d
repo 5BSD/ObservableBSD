@@ -1,5 +1,5 @@
 /*
- * Lock Contention — Apple Instruments Spin/Mutex Contention equivalent.
+ * Lock Contention — spin and mutex contention by process.
  *
  * Aggregates the time spent blocked or spinning on every lock kind:
  * adaptive mutex, spin, rwlock (reader and writer). Quantized in ns

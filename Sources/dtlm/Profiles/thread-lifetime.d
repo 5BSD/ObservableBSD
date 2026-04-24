@@ -1,15 +1,16 @@
 /*
- * Thread lifetime — create to exit duration by process.
+ * Thread lifetime — first schedule to exit duration by process.
  *
- * Tracks how long threads live. Short-lived threads indicate
- * thread-per-request patterns or thread pool churn.
+ * Tracks how long threads live from their first on-cpu event
+ * to lwp-exit. Short-lived threads indicate thread-per-request
+ * patterns or thread pool churn.
  */
 
-proc:::lwp-create
-/* @dtlm-predicate */
+sched:::on-cpu
+/thread_start[tid] == 0 /* @dtlm-predicate-and *//
 {
     thread_start[tid] = timestamp;
-    printf("%s[%d/tid %d]: thread create\n", execname, pid, tid);
+    printf("%s[%d/tid %d]: thread first on-cpu\n", execname, pid, tid);
 }
 
 proc:::lwp-exit

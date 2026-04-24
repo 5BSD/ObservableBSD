@@ -7,15 +7,6 @@
  * kernel ifa_* and in_* functions.
  */
 
-fbt::rtrequest1_fib:entry
-/* @dtlm-predicate */
-{
-    printf("%s[%d]: rtrequest1_fib req=%d fib=%d\n",
-        execname, pid, arg0, arg3);
-    /* @dtlm-stack */
-    /* @dtlm-ustack */
-}
-
 fbt::rib_add_route:entry
 /* @dtlm-predicate */
 {

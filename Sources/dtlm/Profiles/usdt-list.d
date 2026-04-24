@@ -1,10 +1,10 @@
 /*
- * Discover pid-provider probes by firing them at runtime.
+ * Discover pid-provider (function-level) probes by firing them at runtime.
  *
- * Attaches to every entry probe in a process and prints the
- * full probe name on each firing. This is a runtime discovery
- * tool, not a static inventory — only probes that fire during
- * the duration window will appear.
+ * Attaches to every entry probe in a process via the pid provider
+ * and prints the full probe name on each firing. This traces all
+ * function entries, not just USDT static probes. This is a runtime
+ * discovery tool — only probes that fire during the window appear.
  *
  * For a static probe listing, use `dtlm probes --pid <pid>`.
  *

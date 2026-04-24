@@ -1,5 +1,5 @@
 /*
- * Kernel module audit — kldload, kldunload, modfind.
+ * Kernel module audit — kldload, kldunload, kldfirstmod, modfind, kldstat.
  *
  * Traces kernel module lifecycle events. Useful for host
  * forensics and drift detection — shows who loaded or

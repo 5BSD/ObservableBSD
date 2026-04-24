@@ -1,4 +1,4 @@
-/* Print sched sleep and wakeup transitions */
+/* Print sched execution transitions (sleep + wakeup) — dwatch parity */
 
 sched:::sleep,
 sched:::wakeup

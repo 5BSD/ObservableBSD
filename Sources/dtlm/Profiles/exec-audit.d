@@ -2,8 +2,8 @@
  * Exec audit — rich process start/exit with context.
  *
  * Traces proc:::exec-success and proc:::exit with parent PID,
- * UID, GID, and jail ID context. More detailed than exec-tree
- * for security auditing and compliance logging.
+ * UID, and GID context. More detailed than exec-tree for
+ * security auditing and compliance logging.
  */
 
 proc:::exec-success

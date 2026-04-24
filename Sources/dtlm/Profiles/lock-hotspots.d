@@ -29,4 +29,6 @@ dtrace:::END
     printa(@block_count);
     printf("\n--- Adaptive mutex spin time (ns) by stack ---\n");
     printa(@spin_time);
+    printf("\n--- Adaptive mutex spin count by stack ---\n");
+    printa(@spin_count);
 }

@@ -1,4 +1,4 @@
-/* Print every read(2)/write(2)/pread(2)/pwrite(2) entry with fd and length */
+/* Print every read/write/pread/pwrite entry with fd and length (alias of read-write) */
 
 syscall::read:entry
 /* @dtlm-predicate */

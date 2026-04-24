@@ -1,4 +1,4 @@
-/* Print every udplite:::send event */
+/* Print every udplite:::send event (requires kernel UDP-Lite support) */
 
 udplite:::send
 /* @dtlm-predicate */

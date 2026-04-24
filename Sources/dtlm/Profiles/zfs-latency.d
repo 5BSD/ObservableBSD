@@ -3,22 +3,26 @@
  *
  * Measures the time between zio_execute entry and zio_done
  * entry in the ZFS I/O pipeline. Aggregates latency as a
- * histogram by process. Requires zfs.ko loaded.
+ * histogram by process. Uses the zio pointer to correlate
+ * across threads (ZFS dispatches ZIOs asynchronously).
+ * Requires zfs.ko loaded.
  */
 
 fbt:zfs:zio_execute:entry
 /* @dtlm-predicate */
 {
-    self->zio_ts = timestamp;
+    zio_start[arg0] = timestamp;
+    zio_exec[arg0] = execname;
 }
 
 fbt:zfs:zio_done:entry
-/self->zio_ts/
+/zio_start[arg0]/
 {
-    this->elapsed_us = (timestamp - self->zio_ts) / 1000;
-    @latency[execname] = quantize(this->elapsed_us);
-    @iops[execname] = count();
-    self->zio_ts = 0;
+    this->elapsed_us = (timestamp - zio_start[arg0]) / 1000;
+    @latency[zio_exec[arg0]] = quantize(this->elapsed_us);
+    @iops[zio_exec[arg0]] = count();
+    zio_start[arg0] = 0;
+    zio_exec[arg0] = 0;
 }
 
 dtrace:::END

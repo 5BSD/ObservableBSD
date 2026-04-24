@@ -703,6 +703,11 @@ sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
 	e->size = size;
 	e->name = strdup(name);
 	e->binary = strdup(binary);
+	if (e->name == NULL || e->binary == NULL) {
+		free(e->name);
+		free(e->binary);
+		st->count--;
+	}
 }
 
 /*

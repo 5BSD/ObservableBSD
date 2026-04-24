@@ -246,6 +246,27 @@ int	 cmd_trace(int argc, char **argv);
 /* Shared helpers (bptrace.c)                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Per-trace accumulator — tracks image sections, buffer state, and
+ * metadata across the polling loop.  Shared between cmd_exec and
+ * cmd_trace to avoid code duplication.
+ */
+struct trace_state {
+	struct pt_image_info	*sections;
+	int			nsections;
+	int			sections_cap;
+	struct meta_writer	*meta;
+	int			last_buf_page;
+	int			max_buf_page;
+	bool			buf_wrapped;
+	vm_offset_t		last_buf_offset;
+};
+
+void	 trace_state_init(struct trace_state *ts, struct meta_writer *meta);
+void	 trace_state_process(struct trace_state *ts,
+	    const struct bptrace_record *rec);
+void	 trace_state_free(struct trace_state *ts);
+
 size_t	 parse_size(const char *s);
 const char *process_name(pid_t pid, char *buf, size_t bufsz);
 

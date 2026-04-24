@@ -29,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
+#include <sys/linker.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <sys/hwt.h>
@@ -90,19 +91,10 @@ char *
 hwt_detect_backend(void)
 {
 	static const char *backends[] = { "pt", "coresight", "spe" };
-	char cmd[64];
-	FILE *fp;
-	int status;
 	size_t i;
 
 	for (i = 0; i < nitems(backends); i++) {
-		snprintf(cmd, sizeof(cmd), "kldstat -qn %s 2>/dev/null",
-		    backends[i]);
-		fp = popen(cmd, "r");
-		if (fp == NULL)
-			continue;
-		status = pclose(fp);
-		if (status == 0)
+		if (kldfind(backends[i]) != -1)
 			return (strdup(backends[i]));
 	}
 	return (NULL);

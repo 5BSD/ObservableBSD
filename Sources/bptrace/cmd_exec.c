@@ -97,11 +97,10 @@ int
 cmd_exec(int argc, char **argv)
 {
 	struct bptrace_record records[MAX_POLL_RECORDS];
-	struct pt_image_info *sections;
-	int nsections;
-	int sections_cap;
+	struct trace_state ts;
 	struct hwt_ctx ctx;
 	struct timespec start, now;
+	struct meta_writer *meta;
 	enum bptrace_fmt fmt;
 	const char *bufsize_str;
 	const char *backend_name;
@@ -109,14 +108,9 @@ cmd_exec(int argc, char **argv)
 	double timeout;
 	size_t bufsize;
 	pid_t child;
-	struct meta_writer *meta;
 	char pt_path[64];
 	char meta_path[80];
 	const char *pt_output;
-	int last_buf_page;
-	int max_buf_page;
-	bool buf_wrapped;
-	vm_offset_t last_buf_offset;
 	int hooks;
 	int tid;
 	int maxrecords;
@@ -138,13 +132,6 @@ cmd_exec(int argc, char **argv)
 	pt_output = NULL;
 	timeout = DEFAULT_TIMEOUT;
 	maxrecords = 0;
-	last_buf_page = -1;
-	max_buf_page = -1;
-	buf_wrapped = false;
-	last_buf_offset = 0;
-	sections = NULL;
-	nsections = 0;
-	sections_cap = 0;
 	tid = 0;
 	dryrun = false;
 	pause_on_mmap = false;
@@ -295,10 +282,11 @@ cmd_exec(int argc, char **argv)
 		return (1);
 	}
 
-	/* Open metadata sidecar for offline decode. */
+	/* Open metadata sidecar and init trace state. */
 	snprintf(meta_path, sizeof(meta_path),
 	    "bptrace-%d.meta", (int)child);
 	meta = meta_writer_open(meta_path);
+	trace_state_init(&ts, meta);
 
 	kill(child, SIGCONT);
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -363,39 +351,7 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
-			meta_writer_record(meta, &records[i]);
-			if (records[i].type == HWT_RECORD_BUFFER) {
-				if (max_buf_page >= 0 &&
-				    records[i].curpage < max_buf_page)
-					buf_wrapped = true;
-				if (records[i].curpage > max_buf_page)
-					max_buf_page = records[i].curpage;
-				last_buf_page = records[i].curpage;
-				last_buf_offset = records[i].offset;
-			}
-			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
-			    records[i].type == HWT_RECORD_MMAP) &&
-			    records[i].fullpath[0] != '\0') {
-				if (nsections >= sections_cap) {
-					sections_cap = sections_cap == 0 ?
-					    32 : sections_cap * 2;
-					sections = reallocf(sections,
-					    sections_cap *
-					    sizeof(*sections));
-				}
-				if (sections != NULL) {
-					strlcpy(sections[nsections].path,
-					    records[i].fullpath,
-					    sizeof(sections[nsections].path));
-					sections[nsections].load_addr =
-					    records[i].addr;
-					sections[nsections].base_addr =
-					    records[i].baseaddr;
-					sections[nsections].type =
-					    records[i].type;
-					nsections++;
-				}
-			}
+			trace_state_process(&ts, &records[i]);
 		}
 
 		/*
@@ -438,44 +394,12 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
-			meta_writer_record(meta, &records[i]);
-			if (records[i].type == HWT_RECORD_BUFFER) {
-				if (max_buf_page >= 0 &&
-				    records[i].curpage < max_buf_page)
-					buf_wrapped = true;
-				if (records[i].curpage > max_buf_page)
-					max_buf_page = records[i].curpage;
-				last_buf_page = records[i].curpage;
-				last_buf_offset = records[i].offset;
-			}
-			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
-			    records[i].type == HWT_RECORD_MMAP) &&
-			    records[i].fullpath[0] != '\0') {
-				if (nsections >= sections_cap) {
-					sections_cap = sections_cap == 0 ?
-					    32 : sections_cap * 2;
-					sections = reallocf(sections,
-					    sections_cap *
-					    sizeof(*sections));
-				}
-				if (sections != NULL) {
-					strlcpy(sections[nsections].path,
-					    records[i].fullpath,
-					    sizeof(sections[nsections].path));
-					sections[nsections].load_addr =
-					    records[i].addr;
-					sections[nsections].base_addr =
-					    records[i].baseaddr;
-					sections[nsections].type =
-					    records[i].type;
-					nsections++;
-				}
-			}
+			trace_state_process(&ts, &records[i]);
 		}
 	}
 
 	/* Snapshot PT buffer before stop closes the context fd. */
-	if (last_buf_page >= 0) {
+	if (ts.last_buf_page >= 0) {
 		ssize_t saved;
 
 		if (pt_output == NULL) {
@@ -484,20 +408,20 @@ cmd_exec(int argc, char **argv)
 			pt_output = pt_path;
 		}
 		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,
-		    last_buf_page, last_buf_offset);
+		    ts.last_buf_page, ts.last_buf_offset);
 		if (saved > 0) {
 			fprintf(stderr,
 			    "Saved %zd bytes of PT data to %s\n",
 			    saved, pt_output);
 			decode_pt_insn(ctx.trace_buf, (size_t)saved,
-			    sections, nsections, fmt);
+			    ts.sections, ts.nsections, fmt);
 		}
 	}
 
 	/* Stop tracing (closes ctx_fd; no drain possible after this). */
 	hwt_ctx_stop(&ctx);
 
-	if (buf_wrapped)
+	if (ts.buf_wrapped)
 		fprintf(stderr,
 		    "warning: PT buffer wrapped (data lost) — "
 		    "increase with -s\n");
@@ -508,7 +432,7 @@ cmd_exec(int argc, char **argv)
 
 	hwt_ctx_close(&ctx);
 	meta_writer_close(meta);
-	free(sections);
+	trace_state_free(&ts);
 	free(detected_backend);
 	return (exitcode);
 }

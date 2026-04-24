@@ -11,6 +11,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/procctl.h>
 #include <sys/wait.h>
 
 #include <err.h>
@@ -40,7 +41,7 @@
  * No Swift runtime, no ARC, no closures — just C.
  */
 static pid_t
-fork_stopped(char **args)
+fork_stopped(char **args, bool no_aslr)
 {
 	pid_t pid;
 	int status;
@@ -52,6 +53,10 @@ fork_stopped(char **args)
 	}
 	if (pid == 0) {
 		/* Child — only async-signal-safe calls. */
+		if (no_aslr) {
+			int val = PROC_ASLR_FORCE_DISABLE;
+			procctl(P_PID, getpid(), PROC_ASLR_CTL, &val);
+		}
 		raise(SIGSTOP);
 		execvp(args[0], args);
 		_exit(127);
@@ -111,9 +116,11 @@ cmd_exec(int argc, char **argv)
 	char pt_path[64];
 	char meta_path[80];
 	const char *pt_output;
+	struct ip_filter filter;
 	int hooks;
 	int tid;
 	int maxrecords;
+	bool no_aslr;
 	int totalrecords;
 	int exitcode;
 	int empty_drains;
@@ -133,11 +140,13 @@ cmd_exec(int argc, char **argv)
 	timeout = DEFAULT_TIMEOUT;
 	maxrecords = 0;
 	tid = 0;
+	memset(&filter, 0, sizeof(filter));
+	no_aslr = false;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:T:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:r:T:Anp")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -166,8 +175,27 @@ cmd_exec(int argc, char **argv)
 		case 'o':
 			pt_output = optarg;
 			break;
+		case 'r':
+			if (filter.nranges >= 2) {
+				fprintf(stderr,
+				    "bsdtrace exec: max 2 IP ranges\n");
+				return (1);
+			}
+			if (sscanf(optarg, "0x%lx:0x%lx",
+			    &filter.ranges[filter.nranges].start,
+			    &filter.ranges[filter.nranges].end) != 2) {
+				fprintf(stderr,
+				    "bsdtrace exec: bad range '%s' "
+				    "(use 0xstart:0xend)\n", optarg);
+				return (1);
+			}
+			filter.nranges++;
+			break;
 		case 'T':
 			tid = atoi(optarg);
+			break;
+		case 'A':
+			no_aslr = true;
 			break;
 		case 'n':
 			dryrun = true;
@@ -233,7 +261,7 @@ cmd_exec(int argc, char **argv)
 	}
 
 	/* Fork child stopped. */
-	child = fork_stopped(cmd_argv);
+	child = fork_stopped(cmd_argv, no_aslr);
 	if (child < 0)
 		return (1);
 
@@ -245,6 +273,9 @@ cmd_exec(int argc, char **argv)
 		free(detected_backend);
 		return (1);
 	}
+
+	/* Apply hardware IP range filter if specified. */
+	ctx.filter = filter;
 
 	/*
 	 * CRITICAL: Set the PT backend config BEFORE starting.

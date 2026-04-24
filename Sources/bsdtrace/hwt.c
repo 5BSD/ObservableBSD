@@ -237,7 +237,23 @@ hwt_ctx_set_config_pt(struct hwt_ctx *ctx, bool pause_on_mmap)
 	 */
 	memset(&ptcfg, 0, sizeof(ptcfg));
 	ptcfg.rtit_ctl = RTIT_CTL_USER | RTIT_CTL_BRANCHEN;
-	ptcfg.nranges = 0;
+
+	/*
+	 * Hardware IP range filtering.
+	 *
+	 * ADDR0_CFG = 1 (FilterEn): trace only when IP is within range.
+	 * The 4-bit config field at RTIT_CTL bits 32-35 (ADDR0) and
+	 * 36-39 (ADDR1) selects the filter mode:
+	 *   0 = disabled
+	 *   1 = FilterEn (trace within range)
+	 *   2 = TraceStop (stop on entering range)
+	 */
+	ptcfg.nranges = ctx->filter.nranges;
+	for (int r = 0; r < ctx->filter.nranges && r < 2; r++) {
+		ptcfg.ip_ranges[r].start = ctx->filter.ranges[r].start;
+		ptcfg.ip_ranges[r].end = ctx->filter.ranges[r].end;
+		ptcfg.rtit_ctl |= (1ULL << RTIT_CTL_ADDR_CFG_S(r));
+	}
 
 	/*
 	 * Fill the hwt_set_config struct (__aligned(16)).

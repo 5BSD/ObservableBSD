@@ -99,6 +99,9 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
 #ifndef RTIT_CTL_BRANCHEN
 #define	RTIT_CTL_BRANCHEN	(1 << 13)
 #endif
+#ifndef RTIT_CTL_ADDR_CFG_S
+#define	RTIT_CTL_ADDR_CFG_S(n)	(32 + (n) * 4)
+#endif
 
 /* ------------------------------------------------------------------ */
 
@@ -129,6 +132,18 @@ struct bsdtrace_record {
  *
  * Lifecycle: alloc → set_config → start → poll/map → stop → close
  */
+/*
+ * IP range filter for hardware-level filtering.
+ * Up to 2 ranges supported by Intel PT (ADDR0, ADDR1).
+ */
+struct ip_filter {
+	int		nranges;
+	struct {
+		uint64_t	start;
+		uint64_t	end;
+	} ranges[2];
+};
+
 struct hwt_ctx {
 	int		ctl_fd;		/* /dev/hwt                       */
 	int		ctx_fd;		/* /dev/hwt_<ident>_<tid>         */
@@ -140,6 +155,7 @@ struct hwt_ctx {
 	char		backend_name[HWT_BACKEND_MAXNAMELEN];
 	size_t		bufsize;	/* trace buffer size in bytes     */
 	void		*trace_buf;	/* mmap'd trace buffer, or NULL   */
+	struct ip_filter filter;	/* hardware IP range filter       */
 };
 
 /* ------------------------------------------------------------------ */

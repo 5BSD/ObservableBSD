@@ -60,6 +60,7 @@ cmd_trace(int argc, char **argv)
 	double duration;
 	size_t bufsize;
 	pid_t pid;
+	struct ip_filter filter;
 	int hooks;
 	int tid;
 	int maxrecords;
@@ -79,11 +80,12 @@ cmd_trace(int argc, char **argv)
 	duration = 0;
 	maxrecords = 0;
 	tid = 0;
+	memset(&filter, 0, sizeof(filter));
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:m:o:T:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:m:o:r:T:np")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -111,6 +113,22 @@ cmd_trace(int argc, char **argv)
 			break;
 		case 'o':
 			pt_output = optarg;
+			break;
+		case 'r':
+			if (filter.nranges >= 2) {
+				fprintf(stderr,
+				    "bsdtrace trace: max 2 IP ranges\n");
+				return (1);
+			}
+			if (sscanf(optarg, "0x%lx:0x%lx",
+			    &filter.ranges[filter.nranges].start,
+			    &filter.ranges[filter.nranges].end) != 2) {
+				fprintf(stderr,
+				    "bsdtrace trace: bad range '%s' "
+				    "(use 0xstart:0xend)\n", optarg);
+				return (1);
+			}
+			filter.nranges++;
 			break;
 		case 'T':
 			tid = atoi(optarg);
@@ -194,6 +212,9 @@ cmd_trace(int argc, char **argv)
 		free(detected_backend);
 		return (1);
 	}
+
+	/* Apply hardware IP range filter if specified. */
+	ctx.filter = filter;
 
 	/*
 	 * CRITICAL: Set the PT backend config BEFORE starting.

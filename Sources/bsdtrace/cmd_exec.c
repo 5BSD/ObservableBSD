@@ -398,25 +398,13 @@ cmd_exec(int argc, char **argv)
 		}
 	}
 
-	/* Snapshot PT buffer before stop closes the context fd. */
-	if (ts.last_buf_page >= 0) {
-		ssize_t saved;
-
-		if (pt_output == NULL) {
-			snprintf(pt_path, sizeof(pt_path),
-			    "bsdtrace-%d.pt", (int)child);
-			pt_output = pt_path;
-		}
-		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,
-		    ts.last_buf_page, ts.last_buf_offset);
-		if (saved > 0) {
-			fprintf(stderr,
-			    "Saved %zd bytes of PT data to %s\n",
-			    saved, pt_output);
-			decode_pt_insn(ctx.trace_buf, (size_t)saved,
-			    ts.sections, ts.nsections, fmt);
-		}
+	/* Snapshot PT buffer and decode before stop closes the fd. */
+	if (pt_output == NULL) {
+		snprintf(pt_path, sizeof(pt_path),
+		    "bsdtrace-%d.pt", (int)child);
+		pt_output = pt_path;
 	}
+	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
 
 	/* Stop tracing (closes ctx_fd; no drain possible after this). */
 	hwt_ctx_stop(&ctx);

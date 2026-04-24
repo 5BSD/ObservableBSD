@@ -165,21 +165,11 @@ ssize_t	 hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
 void	 hwt_ctx_close(struct hwt_ctx *ctx);
 
 /* ------------------------------------------------------------------ */
-/* format.c — output formatting                                        */
+/* Shared types                                                        */
 /* ------------------------------------------------------------------ */
-
-void	 fmt_record_text(const struct bsdtrace_record *rec, pid_t pid);
-void	 fmt_record_json(const struct bsdtrace_record *rec, pid_t pid);
-
-/* ------------------------------------------------------------------ */
-/* decode.c — PT packet / instruction decoder                          */
-/* ------------------------------------------------------------------ */
-
-#define	MAX_IMAGE_SECTIONS	256
 
 /*
  * Binary image section collected from EXEC / MMAP HWT records.
- * Used to build the libipt pt_image for instruction-level decoding.
  */
 struct pt_image_info {
 	char		path[MAXPATHLEN];
@@ -190,7 +180,6 @@ struct pt_image_info {
 
 /*
  * Symbol table — maps runtime addresses to function names.
- * Built from ELF .dynsym / .symtab sections during image construction.
  */
 struct sym_entry {
 	uint64_t	addr;		/* runtime virtual address */
@@ -208,12 +197,72 @@ struct sym_table {
 /*
  * Binary load range — for showing binary+offset when no symbol matches.
  */
+#define	MAX_BIN_RANGES	64
+
 struct bin_range {
 	char		name[64];	/* basename of binary */
 	uint64_t	lo;		/* lowest runtime text address */
 	uint64_t	hi;		/* highest runtime text address */
 	uint64_t	base;		/* load base (slide origin) */
 };
+
+/*
+ * Per-trace accumulator — tracks image sections, buffer state, and
+ * metadata across the polling loop.
+ */
+struct trace_state {
+	struct pt_image_info	*sections;
+	int			nsections;
+	int			sections_cap;
+	struct meta_writer	*meta;
+	int			last_buf_page;
+	int			max_buf_page;
+	bool			buf_wrapped;
+	vm_offset_t		last_buf_offset;
+};
+
+/* ------------------------------------------------------------------ */
+/* format.c — output formatting                                        */
+/* ------------------------------------------------------------------ */
+
+void	 fmt_record_text(const struct bsdtrace_record *rec, pid_t pid);
+void	 fmt_record_json(const struct bsdtrace_record *rec, pid_t pid);
+
+/* ------------------------------------------------------------------ */
+/* elf.c — ELF parsing                                                 */
+/* ------------------------------------------------------------------ */
+
+struct pt_image;	/* forward decl (libipt) */
+struct _Elf;		/* forward decl (libelf) */
+typedef struct _Elf Elf;
+
+bool	 is_user_addr(uint64_t addr);
+int	 elf_base_vaddr(Elf *elf, uint64_t *base_out);
+int	 add_elf_to_image(struct pt_image *image, const char *path,
+	    uint64_t load_addr);
+int	 elf_get_interp(const char *path, char *interp, size_t interpsz);
+int	 build_bin_ranges(const struct pt_image_info *sections, int nsections,
+	    struct bin_range *ranges, int maxranges);
+const char *find_binary_for_ip(const struct bin_range *ranges, int nranges,
+	    uint64_t ip, uint64_t *offset);
+
+/* ------------------------------------------------------------------ */
+/* symbols.c — symbol table                                            */
+/* ------------------------------------------------------------------ */
+
+void	 sym_table_init(struct sym_table *st);
+void	 sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
+	    const char *name, const char *binary);
+void	 sym_table_add_elf(struct sym_table *st, const char *path,
+	    int64_t slide);
+void	 sym_table_sort(struct sym_table *st);
+const struct sym_entry *sym_table_lookup(const struct sym_table *st,
+	    uint64_t ip);
+void	 sym_table_free(struct sym_table *st);
+
+/* ------------------------------------------------------------------ */
+/* decode.c — PT packet / instruction decoder                          */
+/* ------------------------------------------------------------------ */
 
 int	 decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
@@ -230,12 +279,22 @@ struct meta_writer *meta_writer_open(const char *path);
 void	 meta_writer_record(struct meta_writer *mw,
 	    const struct bsdtrace_record *rec);
 void	 meta_writer_close(struct meta_writer *mw);
-
 int	 meta_read_sections(const char *path,
 	    struct pt_image_info **sections_out, int *nsections_out);
 
 /* ------------------------------------------------------------------ */
-/* cmd_list.c / cmd_exec.c / cmd_trace.c / cmd_info.c / cmd_decode.c   */
+/* trace.c — trace state and shared helpers                            */
+/* ------------------------------------------------------------------ */
+
+void	 trace_state_init(struct trace_state *ts, struct meta_writer *meta);
+void	 trace_state_process(struct trace_state *ts,
+	    const struct bsdtrace_record *rec);
+void	 trace_state_free(struct trace_state *ts);
+ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
+	    const char *pt_output, enum bsdtrace_fmt fmt);
+
+/* ------------------------------------------------------------------ */
+/* Commands                                                            */
 /* ------------------------------------------------------------------ */
 
 int	 cmd_list(int argc, char **argv);
@@ -243,29 +302,8 @@ int	 cmd_exec(int argc, char **argv);
 int	 cmd_trace(int argc, char **argv);
 
 /* ------------------------------------------------------------------ */
-/* Shared helpers (bsdtrace.c)                                          */
+/* bsdtrace.c — shared helpers                                         */
 /* ------------------------------------------------------------------ */
-
-/*
- * Per-trace accumulator — tracks image sections, buffer state, and
- * metadata across the polling loop.  Shared between cmd_exec and
- * cmd_trace to avoid code duplication.
- */
-struct trace_state {
-	struct pt_image_info	*sections;
-	int			nsections;
-	int			sections_cap;
-	struct meta_writer	*meta;
-	int			last_buf_page;
-	int			max_buf_page;
-	bool			buf_wrapped;
-	vm_offset_t		last_buf_offset;
-};
-
-void	 trace_state_init(struct trace_state *ts, struct meta_writer *meta);
-void	 trace_state_process(struct trace_state *ts,
-	    const struct bsdtrace_record *rec);
-void	 trace_state_free(struct trace_state *ts);
 
 size_t	 parse_size(const char *s);
 const char *process_name(pid_t pid, char *buf, size_t bufsz);

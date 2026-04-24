@@ -274,7 +274,9 @@ in `/boot/GENERIC-HWT` and is currently booted.  The config lives at
 5. ~~Instruction-level decoding with ELF image.~~ Done.
 6. ~~Symbolization via ELF symbol tables.~~ Done
    (`binary:function+offset`).
-7. Higher-level output: call trees, flame graphs, OTel spans.
+7. Load split debug info from `/usr/lib/debug/` and `.gnu_debuglink`
+   for full symbolization of stripped system binaries.
+8. Higher-level output: call trees, flame graphs, OTel spans.
 
 ### Known-good smoke test
 

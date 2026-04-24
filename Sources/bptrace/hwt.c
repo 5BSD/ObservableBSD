@@ -114,7 +114,7 @@ hwt_detect_backend(void)
 
 int
 hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
-    size_t bufsize, const char *backend)
+    int tid, size_t bufsize, const char *backend)
 {
 	struct hwt_alloc ha;
 	char devpath[64];
@@ -125,6 +125,7 @@ hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	ctx->ctx_fd = -1;
 	ctx->kq_fd = -1;
 	ctx->mode = mode;
+	ctx->tid = tid;
 	ctx->pid = pid;
 
 	if (backend == NULL || backend[0] == '\0') {
@@ -199,7 +200,8 @@ hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	 * starting at 0 (the main thread).  In CPU mode the suffix is
 	 * the cpu_id.  We always open thread/cpu 0.
 	 */
-	snprintf(devpath, sizeof(devpath), "/dev/hwt_%d_0", ctx->ident);
+	snprintf(devpath, sizeof(devpath), "/dev/hwt_%d_%d",
+	    ctx->ident, ctx->tid);
 	ctx->ctx_fd = open(devpath, O_RDWR);
 	if (ctx->ctx_fd < 0) {
 		warn("open %s", devpath);

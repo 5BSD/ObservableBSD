@@ -44,6 +44,7 @@ usage(void)
 	    "  -d duration  Trace duration in seconds (trace, 0 = until Ctrl-C)\n"
 	    "  -m maxrec    Stop after N records (0 = unlimited)\n"
 	    "  -o ptfile    Output path for raw PT data (default: bptrace-<pid>.pt)\n"
+	    "  -T tid       Thread index to trace (default: 0)\n"
 	    "  -n           Dry run: validate setup without tracing\n"
 	    "  -p           Pause target on mmap/exec events\n"
 	    "\n"

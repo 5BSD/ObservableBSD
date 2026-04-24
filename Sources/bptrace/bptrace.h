@@ -131,10 +131,11 @@ struct bptrace_record {
  */
 struct hwt_ctx {
 	int		ctl_fd;		/* /dev/hwt                       */
-	int		ctx_fd;		/* /dev/hwt_<ident>_0             */
+	int		ctx_fd;		/* /dev/hwt_<ident>_<tid>         */
 	int		kq_fd;		/* kqueue for event notification   */
 	int		ident;		/* kernel-assigned context ident   */
 	int		mode;		/* HWT_MODE_THREAD or _CPU        */
+	int		tid;		/* thread index (default 0)       */
 	pid_t		pid;		/* target PID (thread mode)       */
 	char		backend_name[HWT_BACKEND_MAXNAMELEN];
 	size_t		bufsize;	/* trace buffer size in bytes     */
@@ -150,7 +151,7 @@ int	 hwt_hooks_enabled(void);
 char	*hwt_detect_backend(void);
 
 int	 hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
-	    size_t bufsize, const char *backend);
+	    int tid, size_t bufsize, const char *backend);
 int	 hwt_ctx_set_config(struct hwt_ctx *ctx, bool pause_on_mmap);
 int	 hwt_ctx_start(struct hwt_ctx *ctx);
 int	 hwt_ctx_stop(struct hwt_ctx *ctx);
@@ -220,7 +221,21 @@ int	 decode_pt_insn(const void *buf, size_t len,
 	    enum bptrace_fmt fmt);
 
 /* ------------------------------------------------------------------ */
-/* cmd_list.c / cmd_exec.c / cmd_trace.c                               */
+/* meta.c — .meta sidecar writer/reader                                */
+/* ------------------------------------------------------------------ */
+
+struct meta_writer;
+
+struct meta_writer *meta_writer_open(const char *path);
+void	 meta_writer_record(struct meta_writer *mw,
+	    const struct bptrace_record *rec);
+void	 meta_writer_close(struct meta_writer *mw);
+
+int	 meta_read_sections(const char *path,
+	    struct pt_image_info **sections_out, int *nsections_out);
+
+/* ------------------------------------------------------------------ */
+/* cmd_list.c / cmd_exec.c / cmd_trace.c / cmd_info.c / cmd_decode.c   */
 /* ------------------------------------------------------------------ */
 
 int	 cmd_list(int argc, char **argv);

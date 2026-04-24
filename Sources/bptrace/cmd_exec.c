@@ -109,11 +109,16 @@ cmd_exec(int argc, char **argv)
 	double timeout;
 	size_t bufsize;
 	pid_t child;
+	struct meta_writer *meta;
 	char pt_path[64];
+	char meta_path[80];
 	const char *pt_output;
 	int last_buf_page;
+	int max_buf_page;
+	bool buf_wrapped;
 	vm_offset_t last_buf_offset;
 	int hooks;
+	int tid;
 	int maxrecords;
 	int totalrecords;
 	int exitcode;
@@ -134,15 +139,18 @@ cmd_exec(int argc, char **argv)
 	timeout = DEFAULT_TIMEOUT;
 	maxrecords = 0;
 	last_buf_page = -1;
+	max_buf_page = -1;
+	buf_wrapped = false;
 	last_buf_offset = 0;
 	sections = NULL;
 	nsections = 0;
 	sections_cap = 0;
+	tid = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:T:np")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -170,6 +178,9 @@ cmd_exec(int argc, char **argv)
 			break;
 		case 'o':
 			pt_output = optarg;
+			break;
+		case 'T':
+			tid = atoi(optarg);
 			break;
 		case 'n':
 			dryrun = true;
@@ -240,7 +251,7 @@ cmd_exec(int argc, char **argv)
 		return (1);
 
 	/* Allocate HWT context for the child. */
-	if (hwt_ctx_alloc(&ctx, HWT_MODE_THREAD, child,
+	if (hwt_ctx_alloc(&ctx, HWT_MODE_THREAD, child, tid,
 	    bufsize, backend_name) != 0) {
 		kill(child, SIGKILL);
 		waitpid(child, NULL, 0);
@@ -283,6 +294,11 @@ cmd_exec(int argc, char **argv)
 		free(detected_backend);
 		return (1);
 	}
+
+	/* Open metadata sidecar for offline decode. */
+	snprintf(meta_path, sizeof(meta_path),
+	    "bptrace-%d.meta", (int)child);
+	meta = meta_writer_open(meta_path);
 
 	kill(child, SIGCONT);
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -347,7 +363,13 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
+			meta_writer_record(meta, &records[i]);
 			if (records[i].type == HWT_RECORD_BUFFER) {
+				if (max_buf_page >= 0 &&
+				    records[i].curpage < max_buf_page)
+					buf_wrapped = true;
+				if (records[i].curpage > max_buf_page)
+					max_buf_page = records[i].curpage;
 				last_buf_page = records[i].curpage;
 				last_buf_offset = records[i].offset;
 			}
@@ -416,7 +438,13 @@ cmd_exec(int argc, char **argv)
 			totalrecords++;
 			emit_record(&records[i], child, fmt,
 			    pause_on_mmap, &ctx);
+			meta_writer_record(meta, &records[i]);
 			if (records[i].type == HWT_RECORD_BUFFER) {
+				if (max_buf_page >= 0 &&
+				    records[i].curpage < max_buf_page)
+					buf_wrapped = true;
+				if (records[i].curpage > max_buf_page)
+					max_buf_page = records[i].curpage;
 				last_buf_page = records[i].curpage;
 				last_buf_offset = records[i].offset;
 			}
@@ -469,11 +497,17 @@ cmd_exec(int argc, char **argv)
 	/* Stop tracing (closes ctx_fd; no drain possible after this). */
 	hwt_ctx_stop(&ctx);
 
+	if (buf_wrapped)
+		fprintf(stderr,
+		    "warning: PT buffer wrapped (data lost) — "
+		    "increase with -s\n");
+
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "\n%d records collected, exit code %d\n",
 		    totalrecords, exitcode);
 
 	hwt_ctx_close(&ctx);
+	meta_writer_close(meta);
 	free(sections);
 	free(detected_backend);
 	return (exitcode);

@@ -171,6 +171,12 @@ void	 fmt_record_text(const struct bptrace_record *rec, pid_t pid);
 void	 fmt_record_json(const struct bptrace_record *rec, pid_t pid);
 
 /* ------------------------------------------------------------------ */
+/* decode.c — PT packet decoder                                        */
+/* ------------------------------------------------------------------ */
+
+int	 decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt);
+
+/* ------------------------------------------------------------------ */
 /* cmd_list.c / cmd_exec.c / cmd_trace.c                               */
 /* ------------------------------------------------------------------ */
 

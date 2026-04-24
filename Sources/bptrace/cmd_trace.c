@@ -330,10 +330,12 @@ cmd_trace(int argc, char **argv)
 		}
 		saved = hwt_ctx_snapshot_buffer(&ctx, pt_output,
 		    last_buf_page, last_buf_offset);
-		if (saved > 0)
+		if (saved > 0) {
 			fprintf(stderr,
 			    "Saved %zd bytes of PT data to %s\n",
 			    saved, pt_output);
+			decode_pt_buffer(ctx.trace_buf, (size_t)saved, fmt);
+		}
 	}
 
 	/* Stop tracing (closes ctx_fd; no drain possible after this). */

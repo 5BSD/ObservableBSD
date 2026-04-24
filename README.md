@@ -17,7 +17,7 @@ FreeBSD, covering four areas:
 |------|--------|--------|
 | [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
 | [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
-| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress (step 3 of 4) |
+| `bptrace` | Process tracing via Hardware Trace (HWT) — Intel PT and ARM CoreSight | In progress (step 4 of 5) |
 
 All tools emit OpenTelemetry-native output so their data flows into the
 same collectors, dashboards, and alerting pipelines.
@@ -243,16 +243,16 @@ panicking the kernel.
 
 ### Current step
 
-**Step 3 of 4: snapshot raw Intel PT buffer to disk.**
+**Step 4 of 5: decode Intel PT packets.**
 
 Completed so far:
 - Step 1: HWT/PT session bring-up and clean shutdown
 - Step 2: Booted `GENERIC-HWT` kernel with `options HWT_HOOKS`;
   confirmed `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records appear
-  (19 records from `/bin/sleep 1`)
-- `bptrace exec` and `bptrace trace` now mmap the PT trace buffer
-  via `hwt_ctx_map_buffer()` and write the raw Intel PT data to a
-  `.pt` file before tearing down the context
+- Step 3: Raw PT buffer snapshot to `.pt` file before context teardown
+- Step 4: PT packet decoding via libipt — decodes the raw PT stream
+  into protocol-level packets (TIP, TNT, FUP, TSC, MODE, etc.)
+  showing branch targets, taken/not-taken decisions, and timestamps
 
 ### Kernel setup
 
@@ -266,10 +266,13 @@ in `/boot/GENERIC-HWT` and is currently booted.  The config lives at
 2. ~~Confirm `EXEC` / `MMAP` records appear.~~ Done (19 records).
 3. ~~Snapshot raw PT buffer to disk.~~ Done (`-o` flag / default
    `bptrace-<pid>.pt`).
-4. Add Intel PT buffer decoding so `bptrace` can emit control-flow
-   events instead of only HWT metadata.
-5. Add symbolization and higher-level output formatting once decoded
-   PT events are available.
+4. ~~Decode PT packets via libipt.~~ Done (TIP, TNT, FUP, TSC,
+   MODE, CBR, etc.).
+5. Add instruction-level decoding with ELF image support so `bptrace`
+   can resolve IPs to actual control-flow events (calls, returns,
+   branches).
+6. Add symbolization and higher-level output formatting once decoded
+   instruction events are available.
 
 ### Known-good smoke test
 
@@ -280,7 +283,8 @@ doas ./.build/x86_64-unknown-freebsd/debug/bptrace exec -t 2 -- /bin/sleep 1
 Expected on `GENERIC-HWT`:
 - `THREAD_CREATE`, `EXEC`, `MMAP`, `MUNMAP`, and `BUFFER` records
 - `Saved NNNNN bytes of PT data to bptrace-<pid>.pt` on stderr
-- The `.pt` file contains raw Intel PT packets (non-zero bytes)
+- Decoded PT packets: `PSB`, `TIP`, `TNT`, `FUP`, `MODE.Exec`, `TSC`, etc.
+- Summary line: `N packets decoded, M sync points, 0 errors`
 - Clean exit, no kernel crash
 
 Use `-o <path>` to write the PT data to a specific file:

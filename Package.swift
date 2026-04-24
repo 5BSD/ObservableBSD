@@ -78,7 +78,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "bptrace",
-            dependencies: []
+            dependencies: [],
+            cSettings: [
+                .unsafeFlags(["-I/usr/local/include/libipt"]),
+            ],
+            linkerSettings: [
+                .linkedLibrary("ipt"),
+            ]
         ),
         .testTarget(
             name: "dtlmTests",

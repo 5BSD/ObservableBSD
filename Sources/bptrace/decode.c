@@ -27,21 +27,6 @@
 /* ------------------------------------------------------------------ */
 
 static const char *
-ip_compression_str(enum pt_ip_compression ipc)
-{
-
-	switch (ipc) {
-	case pt_ipc_suppressed:	return ("suppressed");
-	case pt_ipc_update_16:	return ("update_16");
-	case pt_ipc_update_32:	return ("update_32");
-	case pt_ipc_sext_48:	return ("sext_48");
-	case pt_ipc_update_48:	return ("update_48");
-	case pt_ipc_full:	return ("full");
-	default:		return ("?");
-	}
-}
-
-static const char *
 exec_mode_str(enum pt_exec_mode mode)
 {
 

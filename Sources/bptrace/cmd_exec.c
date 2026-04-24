@@ -330,7 +330,10 @@ cmd_exec(int argc, char **argv)
 			 * Kill child, reap, then fall through to cleanup.
 			 */
 			kill(child, SIGKILL);
-			waitpid(child, NULL, 0);
+			waitpid(child, &status, 0);
+			child_done = true;
+			exitcode = WIFSIGNALED(status) ?
+			    128 + WTERMSIG(status) : 1;
 			break;
 		}
 

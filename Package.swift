@@ -84,6 +84,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedLibrary("ipt"),
+                .linkedLibrary("elf"),
             ]
         ),
         .testTarget(

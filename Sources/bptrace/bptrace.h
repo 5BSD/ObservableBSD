@@ -171,10 +171,26 @@ void	 fmt_record_text(const struct bptrace_record *rec, pid_t pid);
 void	 fmt_record_json(const struct bptrace_record *rec, pid_t pid);
 
 /* ------------------------------------------------------------------ */
-/* decode.c — PT packet decoder                                        */
+/* decode.c — PT packet / instruction decoder                          */
 /* ------------------------------------------------------------------ */
 
+#define	MAX_IMAGE_SECTIONS	32
+
+/*
+ * Binary image section collected from EXEC / MMAP HWT records.
+ * Used to build the libipt pt_image for instruction-level decoding.
+ */
+struct pt_image_info {
+	char		path[MAXPATHLEN];
+	uint64_t	load_addr;	/* addr from EXEC/MMAP record */
+	uint64_t	base_addr;	/* baseaddr (interp base for EXEC) */
+	int		type;		/* HWT_RECORD_EXECUTABLE or _MMAP */
+};
+
 int	 decode_pt_buffer(const void *buf, size_t len, enum bptrace_fmt fmt);
+int	 decode_pt_insn(const void *buf, size_t len,
+	    const struct pt_image_info *sections, int nsections,
+	    enum bptrace_fmt fmt);
 
 /* ------------------------------------------------------------------ */
 /* cmd_list.c / cmd_exec.c / cmd_trace.c                               */

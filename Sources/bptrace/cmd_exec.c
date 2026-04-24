@@ -97,6 +97,8 @@ int
 cmd_exec(int argc, char **argv)
 {
 	struct bptrace_record records[MAX_POLL_RECORDS];
+	struct pt_image_info sections[MAX_IMAGE_SECTIONS];
+	int nsections;
 	struct hwt_ctx ctx;
 	struct timespec start, now;
 	enum bptrace_fmt fmt;
@@ -132,6 +134,7 @@ cmd_exec(int argc, char **argv)
 	maxrecords = 0;
 	last_buf_page = -1;
 	last_buf_offset = 0;
+	nsections = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
@@ -345,6 +348,21 @@ cmd_exec(int argc, char **argv)
 				last_buf_page = records[i].curpage;
 				last_buf_offset = records[i].offset;
 			}
+			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
+			    records[i].type == HWT_RECORD_MMAP) &&
+			    records[i].fullpath[0] != '\0' &&
+			    nsections < MAX_IMAGE_SECTIONS) {
+				strlcpy(sections[nsections].path,
+				    records[i].fullpath,
+				    sizeof(sections[nsections].path));
+				sections[nsections].load_addr =
+				    records[i].addr;
+				sections[nsections].base_addr =
+				    records[i].baseaddr;
+				sections[nsections].type =
+				    records[i].type;
+				nsections++;
+			}
 		}
 
 		/*
@@ -391,6 +409,21 @@ cmd_exec(int argc, char **argv)
 				last_buf_page = records[i].curpage;
 				last_buf_offset = records[i].offset;
 			}
+			if ((records[i].type == HWT_RECORD_EXECUTABLE ||
+			    records[i].type == HWT_RECORD_MMAP) &&
+			    records[i].fullpath[0] != '\0' &&
+			    nsections < MAX_IMAGE_SECTIONS) {
+				strlcpy(sections[nsections].path,
+				    records[i].fullpath,
+				    sizeof(sections[nsections].path));
+				sections[nsections].load_addr =
+				    records[i].addr;
+				sections[nsections].base_addr =
+				    records[i].baseaddr;
+				sections[nsections].type =
+				    records[i].type;
+				nsections++;
+			}
 		}
 	}
 
@@ -409,7 +442,8 @@ cmd_exec(int argc, char **argv)
 			fprintf(stderr,
 			    "Saved %zd bytes of PT data to %s\n",
 			    saved, pt_output);
-			decode_pt_buffer(ctx.trace_buf, (size_t)saved, fmt);
+			decode_pt_insn(ctx.trace_buf, (size_t)saved,
+			    sections, nsections, fmt);
 		}
 	}
 

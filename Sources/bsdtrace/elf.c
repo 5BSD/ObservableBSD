@@ -242,6 +242,8 @@ build_bin_ranges(const struct pt_image_info *sections, int nsections,
 					continue;
 
 				pathcopy = strdup(sections[i].path);
+				if (pathcopy == NULL)
+					continue;
 				bn = basename(pathcopy);
 				strlcpy(ranges[nranges].name, bn,
 				    sizeof(ranges[nranges].name));

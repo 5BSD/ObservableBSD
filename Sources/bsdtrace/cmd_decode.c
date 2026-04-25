@@ -34,7 +34,7 @@ cmd_decode(int argc, char **argv)
 	enum bsdtrace_fmt fmt;
 	struct stat sb;
 	const char *pt_path;
-	char meta_path[MAXPATHLEN];
+	char meta_path[MAXPATHLEN] = "";
 	void *buf;
 	int nsections;
 	int fd;

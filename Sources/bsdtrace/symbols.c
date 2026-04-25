@@ -90,6 +90,11 @@ sym_table_add_elf(struct sym_table *st, const char *path, int64_t slide)
 	}
 
 	pathcopy = strdup(path);
+	if (pathcopy == NULL) {
+		elf_end(elf);
+		close(fd);
+		return;
+	}
 	bn = basename(pathcopy);
 
 	scn = NULL;

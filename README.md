@@ -249,8 +249,8 @@ analyze as many times as you need.
 | `bsdtrace exec` | Run a command under tracing |
 | `bsdtrace trace` | Attach to a running process |
 | `bsdtrace list` | Show HWT availability and backend capabilities |
-| `bsdtrace info` | Show binary layout — text segments, functions, offsets *(planned)* |
-| `bsdtrace decode` | Offline re-decode a saved trace with filters *(planned)* |
+| `bsdtrace info` | Show binary layout — text segments, functions, offsets |
+| `bsdtrace decode` | Offline re-decode a saved `.pt` + `.meta` file pair |
 
 ### Quick start
 

@@ -102,8 +102,9 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 		printf("\n");
 	}
 
-	/* Count and show function symbols. */
+	/* Count function symbols and note which table they came from. */
 	func_count = 0;
+	bool has_symtab = false;
 	scn = NULL;
 	while ((scn = elf_nextscn(elf, scn)) != NULL) {
 		if (gelf_getshdr(scn, &shdr) == NULL)
@@ -113,6 +114,9 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 			continue;
 		if (shdr.sh_entsize == 0)
 			continue;
+
+		if (shdr.sh_type == SHT_SYMTAB)
+			has_symtab = true;
 
 		data = elf_getdata(scn, NULL);
 		if (data == NULL)
@@ -131,12 +135,11 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 	}
 
 	printf("  Functions: %d", func_count);
-	if (func_count > 0) {
+	if (func_count > 0)
 		printf(" (from %s)\n",
-		    shdr.sh_type == SHT_SYMTAB ? ".symtab" : ".dynsym");
-	} else {
+		    has_symtab ? ".symtab" : ".dynsym");
+	else
 		printf("\n");
-	}
 
 	/* Print first 50 functions sorted by address. */
 	if (func_count > 0) {

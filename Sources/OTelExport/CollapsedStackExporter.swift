@@ -18,7 +18,7 @@ import Foundation
 /// Each unique stack path is one line, with a trailing count of how
 /// many times that exact stack was observed. Pipe directly to:
 ///
-///     dtlm watch sched-on-cpu --with-stack --format collapsed \
+///     bsdinstruments watch sched-on-cpu --with-stack --format collapsed \
 ///         --duration 10 | flamegraph.pl > out.svg
 ///
 /// Supports both kernel stacks (`--with-stack`) and user stacks

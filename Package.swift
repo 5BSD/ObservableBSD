@@ -4,7 +4,7 @@
 // OpenTelemetry telemetry.
 //
 // Executable targets:
-//   - dtlm    — DTrace-based instruments and profiling
+//   - bsdinstruments — DTrace-based instruments and profiling
 //   - hwtlm   — Hardware telemetry (power, temperature, frequency)
 //   - bsdtrace — Process tracing via HWT (Intel PT / ARM CoreSight)
 //
@@ -18,7 +18,7 @@ import PackageDescription
 let package = Package(
     name: "ObservableBSD",
     products: [
-        .executable(name: "dtlm", targets: ["dtlm"]),
+        .executable(name: "bsdinstruments", targets: ["bsdinstruments"]),
         .executable(name: "hwtlm", targets: ["hwtlm"]),
         .executable(name: "bsdtrace", targets: ["bsdtrace"]),
         .library(name: "OTelExport", targets: ["OTelExport"]),
@@ -56,7 +56,7 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "dtlm",
+            name: "bsdinstruments",
             dependencies: [
                 .product(name: "DTraceCore", package: "FreeBSDKit"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -88,8 +88,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "dtlmTests",
-            dependencies: ["dtlm", "OTelExport"]
+            name: "bsdinstrumentsTests",
+            dependencies: ["bsdinstruments", "OTelExport"]
         ),
         .testTarget(
             name: "hwtlmTests",

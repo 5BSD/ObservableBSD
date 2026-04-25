@@ -15,7 +15,7 @@ FreeBSD, covering four areas:
 
 | Tool | Domain | Status |
 |------|--------|--------|
-| [`dtlm`](#dtlm) | DTrace-based instruments and profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
+| [`bsdinstruments`](#bsdinstruments) | DTrace-based profiling — the FreeBSD equivalent of Apple Instruments | Shipped (v0.1.0) |
 | [`hwtlm`](#hwtlm) | Hardware telemetry — CPU power (Intel RAPL), temperatures, frequencies, GPU state | Shipped (v0.1.0) |
 | [`bsdtrace`](#bsdtrace) | Hardware-assisted execution tracing — understand what your software does | In progress |
 
@@ -24,11 +24,11 @@ same collectors, dashboards, and alerting pipelines.
 
 ---
 
-## dtlm
+## bsdinstruments
 
 **Apple Instruments for FreeBSD, with OpenTelemetry output.**
 
-`dtlm` bundles 171 DTrace profiling templates covering the equivalent
+`bsdinstruments` bundles 171 DTrace profiling templates covering the equivalent
 of Instruments' Time Profiler, System Trace, File Activity, Network
 Activity, Allocations, Thread States, and Lock Contention — for both
 kernel events and USDT-instrumented applications — and ships the
@@ -47,7 +47,7 @@ The OTLP exporter includes:
 - Async sender thread (HTTP doesn't block the DTrace consumer)
 - gzip compression via libz
 - Retry with exponential backoff (2 attempts)
-- Drop counter attribute (`dtlm.drops`) on data loss
+- Drop counter attribute (`bsdinstruments.drops`) on data loss
 - Typed metrics from DTrace aggregations (count/sum -> Sum, min/max/avg -> Gauge, quantize -> Histogram)
 
 ### Profile catalog (171 profiles)
@@ -76,64 +76,64 @@ The OTLP exporter includes:
 swift build
 
 # List every bundled profile
-.build/debug/dtlm list
+.build/debug/bsdinstruments list
 
 # Watch kill(2) syscalls system-wide
-sudo .build/debug/dtlm watch kill
+sudo .build/debug/bsdinstruments watch kill
 
 # Filter by process, run for 60 seconds
-sudo .build/debug/dtlm watch open --execname nginx --duration 60
+sudo .build/debug/bsdinstruments watch open --execname nginx --duration 60
 
 # JSONL output, pipe to jq
-sudo .build/debug/dtlm watch tcp-connect --format json | jq .
+sudo .build/debug/bsdinstruments watch tcp-connect --format json | jq .
 
 # Send to an OpenTelemetry collector
-sudo .build/debug/dtlm watch syscall-counts --format otel --duration 10
+sudo .build/debug/bsdinstruments watch syscall-counts --format otel --duration 10
 
 # Custom endpoint
-sudo .build/debug/dtlm watch sched-on-cpu --format otel --endpoint http://collector:4318 --duration 5
+sudo .build/debug/bsdinstruments watch sched-on-cpu --format otel --endpoint http://collector:4318 --duration 5
 
 # Trace malloc in a specific process
-sudo .build/debug/dtlm watch malloc-trace --param pid=1234
+sudo .build/debug/bsdinstruments watch malloc-trace --param pid=1234
 
 # Trace PostgreSQL queries
-sudo .build/debug/dtlm watch postgresql-queries --param pid=$(pgrep postgres)
+sudo .build/debug/bsdinstruments watch postgresql-queries --param pid=$(pgrep postgres)
 
 # Measure time in a kernel function
-sudo .build/debug/dtlm watch kfunc-time --param func=tcp_output --duration 10
+sudo .build/debug/bsdinstruments watch kfunc-time --param func=tcp_output --duration 10
 
 # Trace a user-space function with stacks
-sudo .build/debug/dtlm watch func-trace --param pid=5678 --param func=SSL_read --with-ustack
+sudo .build/debug/bsdinstruments watch func-trace --param pid=5678 --param func=SSL_read --with-ustack
 
 # Discover USDT probes in a running process
-sudo .build/debug/dtlm watch usdt-list --param pid=1234 --duration 1
+sudo .build/debug/bsdinstruments watch usdt-list --param pid=1234 --duration 1
 
 # Run an arbitrary .d file
-sudo .build/debug/dtlm watch -f /path/to/myscript.d
+sudo .build/debug/bsdinstruments watch -f /path/to/myscript.d
 
 # Tune DTrace buffers for high-rate profiles
-sudo .build/debug/dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms --duration 5
+sudo .build/debug/bsdinstruments watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms --duration 5
 
 # Print rendered D source (no root needed)
-.build/debug/dtlm generate kill --pid 1234
+.build/debug/bsdinstruments generate kill --pid 1234
 
 # List available DTrace probes
-sudo .build/debug/dtlm probes --provider tcp
+sudo .build/debug/bsdinstruments probes --provider tcp
 ```
 
 ### Custom profiles
 
-Drop a `.d` file into `~/.dtlm/profiles/` and dtlm picks it up automatically:
+Drop a `.d` file into `~/.bsdinstruments/profiles/` and bsdinstruments picks it up automatically:
 
 ```sh
-mkdir -p ~/.dtlm/profiles
+mkdir -p ~/.bsdinstruments/profiles
 
-cat > ~/.dtlm/profiles/my-trace.d << 'EOF'
+cat > ~/.bsdinstruments/profiles/my-trace.d << 'EOF'
 /*
  * Count syscalls by name for a specific process
  */
 syscall:::entry
-/* @dtlm-predicate */
+/* @bsdinstruments-predicate */
 {
     @[probefunc] = count();
 }
@@ -145,21 +145,21 @@ dtrace:::END
 EOF
 
 # It shows up in the catalog
-dtlm list | grep my-trace
+bsdinstruments list | grep my-trace
 
 # Run it with filters
-sudo dtlm watch my-trace --execname nginx --duration 30 --format otel
+sudo bsdinstruments watch my-trace --execname nginx --duration 30 --format otel
 ```
 
 **Profile markers:**
-- `/* @dtlm-predicate */` — replaced with `--pid`/`--execname`/`--where` filters
-- `/* @dtlm-predicate-and */` — appended to an existing predicate
-- `/* @dtlm-stack */` / `/* @dtlm-ustack */` — replaced with `stack()`/`ustack()` when `--with-stack`/`--with-ustack` is set
+- `/* @bsdinstruments-predicate */` — replaced with `--pid`/`--execname`/`--where` filters
+- `/* @bsdinstruments-predicate-and */` — appended to an existing predicate
+- `/* @bsdinstruments-stack */` / `/* @bsdinstruments-ustack */` — replaced with `stack()`/`ustack()` when `--with-stack`/`--with-ustack` is set
 - `${name}` — substituted from `--param name=value`
 
 **Profile sources** (higher priority shadows lower):
-1. `~/.dtlm/profiles/` (user)
-2. `/usr/local/share/dtlm/profiles/` (system)
+1. `~/.bsdinstruments/profiles/` (user)
+2. `/usr/local/share/bsdinstruments/profiles/` (system)
 3. Bundled in the binary
 
 ### DTrace buffer tuning
@@ -171,7 +171,7 @@ sudo dtlm watch my-trace --execname nginx --duration 30 --format otel
 
 For extreme probe rates (`sched-on-cpu` on many CPUs), increase buffers:
 ```sh
-sudo dtlm watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms
+sudo bsdinstruments watch sched-on-cpu --format otel --bufsize 64m --switchrate 10ms
 ```
 
 ---
@@ -339,7 +339,7 @@ Each trace produces two files:
   (timeline view with threads, calls, durations).
 - **OTLP spans** — export function calls as OpenTelemetry spans to
   Jaeger, Grafana Tempo, or any OTel backend.  Bridges bsdtrace
-  into the same observability stack as dtlm and hwtlm.
+  into the same observability stack as bsdinstruments and hwtlm.
 
 ### Kernel setup
 
@@ -386,7 +386,7 @@ Example with Grafana Cloud:
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-east-0.grafana.net/otlp
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n '<instance>:<token>' | base64)"
-sudo dtlm watch syscall-counts --format otel --duration 60
+sudo bsdinstruments watch syscall-counts --format otel --duration 60
 ```
 
 ---
@@ -396,7 +396,7 @@ sudo dtlm watch syscall-counts --format otel --duration 60
 - FreeBSD 15.0 or later
 - Swift 6.3 or later
 - DTrace enabled in the running kernel (default on `GENERIC`)
-- Root for dtlm probes and hwtlm RAPL/cpuctl access
+- Root for bsdinstruments probes and hwtlm RAPL/cpuctl access
 - For OTLP output: an OpenTelemetry collector (e.g. `otelcol-contrib`)
 
 ## Building
@@ -405,7 +405,7 @@ sudo dtlm watch syscall-counts --format otel --duration 60
 swift build
 ```
 
-Builds `dtlm`, `hwtlm`, and `bsdtrace` into `.build/debug/`.
+Builds `bsdinstruments`, `hwtlm`, and `bsdtrace` into `.build/debug/`.
 
 ## Testing
 

@@ -114,7 +114,7 @@ cmd_exec(int argc, char **argv)
 	size_t bufsize;
 	pid_t child;
 	char pt_path[64];
-	char meta_path[80];
+	char meta_path[MAXPATHLEN];
 	const char *pt_output;
 	struct ip_filter filter;
 	int hooks;
@@ -313,9 +313,22 @@ cmd_exec(int argc, char **argv)
 		return (1);
 	}
 
-	/* Open metadata sidecar and init trace state. */
-	snprintf(meta_path, sizeof(meta_path),
-	    "bsdtrace-%d.meta", (int)child);
+	/* Resolve PT output path now so the .meta sidecar is co-located. */
+	if (pt_output == NULL) {
+		snprintf(pt_path, sizeof(pt_path),
+		    "bsdtrace-%d.pt", (int)child);
+		pt_output = pt_path;
+	}
+	{
+		size_t plen = strlen(pt_output);
+		if (plen > 3 &&
+		    strcmp(pt_output + plen - 3, ".pt") == 0)
+			snprintf(meta_path, sizeof(meta_path),
+			    "%.*s.meta", (int)(plen - 3), pt_output);
+		else
+			snprintf(meta_path, sizeof(meta_path),
+			    "%s.meta", pt_output);
+	}
 	meta = meta_writer_open(meta_path);
 	trace_state_init(&ts, meta);
 
@@ -393,14 +406,14 @@ cmd_exec(int argc, char **argv)
 		if (child_done) {
 			if (nrecs == 0) {
 				empty_drains++;
-				if (empty_drains >= 3)
+				if (empty_drains >= 5)
 					break;
 			} else {
 				empty_drains = 0;
 			}
 		}
 
-		usleep(nrecs > 0 ? 100 : 1000);
+		usleep(nrecs > 0 ? 100 : 5000);
 	}
 
 	/* Reap child if we killed it above (timeout/maxrecords). */
@@ -430,12 +443,15 @@ cmd_exec(int argc, char **argv)
 	}
 
 	/* Snapshot PT buffer and decode before stop closes the fd. */
-	if (pt_output == NULL) {
-		snprintf(pt_path, sizeof(pt_path),
-		    "bsdtrace-%d.pt", (int)child);
-		pt_output = pt_path;
-	}
 	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
+
+	/*
+	 * Brief pause to let any pending PT buffer-overflow software
+	 * interrupts retire before we tear down the context.  Without
+	 * this, the swi handler can race with context teardown and
+	 * dereference a NULL ctx pointer (kernel bug in pt.ko).
+	 */
+	usleep(100000);
 
 	/* Stop tracing (closes ctx_fd; no drain possible after this). */
 	hwt_ctx_stop(&ctx);

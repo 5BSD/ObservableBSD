@@ -32,7 +32,8 @@
 /* ------------------------------------------------------------------ */
 
 static void
-info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
+info_elf(const char *path, uint64_t record_addr, bool has_load_addr,
+    int load_type)
 {
 	Elf *elf;
 	Elf_Scn *scn;
@@ -41,6 +42,8 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 	GElf_Shdr shdr;
 	Elf_Data *data;
 	GElf_Sym sym;
+	GElf_Word symtab_type;
+	uint64_t load_addr;
 	size_t phdrnum, nsyms;
 	uint64_t base_vaddr;
 	int64_t slide;
@@ -75,7 +78,11 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 
 	/* Find base vaddr for slide computation. */
 	slide = 0;
-	if (elf_base_vaddr(elf, &base_vaddr) == 0 && has_load_addr)
+	load_addr = record_addr;
+	if (has_load_addr &&
+	    elf_effective_load_addr(elf, load_type, record_addr,
+	    &load_addr) == 0 &&
+	    elf_base_vaddr(elf, &base_vaddr) == 0)
 		slide = (int64_t)load_addr - (int64_t)base_vaddr;
 
 	printf("%s", path);
@@ -104,40 +111,36 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 
 	/* Count function symbols and note which table they came from. */
 	func_count = 0;
-	bool has_symtab = false;
+	symtab_type = elf_preferred_symtab_type(elf);
 	scn = NULL;
 	while ((scn = elf_nextscn(elf, scn)) != NULL) {
 		if (gelf_getshdr(scn, &shdr) == NULL)
 			continue;
-		if (shdr.sh_type != SHT_SYMTAB &&
-		    shdr.sh_type != SHT_DYNSYM)
+		if (shdr.sh_type != symtab_type)
 			continue;
 		if (shdr.sh_entsize == 0)
 			continue;
 
-		if (shdr.sh_type == SHT_SYMTAB)
-			has_symtab = true;
-
-		data = elf_getdata(scn, NULL);
-		if (data == NULL)
-			continue;
-
-		nsyms = shdr.sh_size / shdr.sh_entsize;
-		for (i = 0; i < nsyms; i++) {
-			if (gelf_getsym(data, (int)i, &sym) == NULL)
-				continue;
-			if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
-				continue;
-			if (sym.st_value == 0)
-				continue;
-			func_count++;
+		data = NULL;
+		while ((data = elf_getdata(scn, data)) != NULL) {
+			nsyms = data->d_size / shdr.sh_entsize;
+			for (i = 0; i < nsyms; i++) {
+				if (gelf_getsym(data, (int)i, &sym) ==
+				    NULL)
+					continue;
+				if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
+					continue;
+				if (sym.st_value == 0)
+					continue;
+				func_count++;
+			}
 		}
 	}
 
 	printf("  Functions: %d", func_count);
 	if (func_count > 0)
 		printf(" (from %s)\n",
-		    has_symtab ? ".symtab" : ".dynsym");
+		    symtab_type == SHT_SYMTAB ? ".symtab" : ".dynsym");
 	else
 		printf("\n");
 
@@ -152,30 +155,30 @@ info_elf(const char *path, uint64_t load_addr, bool has_load_addr)
 		while ((scn = elf_nextscn(elf, scn)) != NULL) {
 			if (gelf_getshdr(scn, &shdr) == NULL)
 				continue;
-			if (shdr.sh_type != SHT_SYMTAB &&
-			    shdr.sh_type != SHT_DYNSYM)
+			if (shdr.sh_type != symtab_type)
 				continue;
 			if (shdr.sh_entsize == 0)
 				continue;
 
-			data = elf_getdata(scn, NULL);
-			if (data == NULL)
-				continue;
+			data = NULL;
+			while ((data = elf_getdata(scn, data)) != NULL) {
+				nsyms = data->d_size / shdr.sh_entsize;
+				for (i = 0; i < nsyms; i++) {
+					if (gelf_getsym(data, (int)i,
+					    &sym) == NULL)
+						continue;
+					if (GELF_ST_TYPE(sym.st_info) !=
+					    STT_FUNC)
+						continue;
+					if (sym.st_value == 0)
+						continue;
 
-			nsyms = shdr.sh_size / shdr.sh_entsize;
-			for (i = 0; i < nsyms; i++) {
-				if (gelf_getsym(data, (int)i, &sym) == NULL)
-					continue;
-				if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
-					continue;
-				if (sym.st_value == 0)
-					continue;
-
-				name = elf_strptr(elf, shdr.sh_link,
-				    sym.st_name);
-				sym_table_add(&st,
-				    sym.st_value + slide,
-				    sym.st_size, name, "");
+					name = elf_strptr(elf,
+					    shdr.sh_link, sym.st_name);
+					sym_table_add(&st,
+					    sym.st_value + slide,
+					    sym.st_size, name, "");
+				}
 			}
 		}
 
@@ -216,8 +219,10 @@ info_pid(pid_t pid)
 	FILE *fp;
 	char path[MAXPATHLEN];
 	uint64_t start, end;
-	int prot;
 	int count;
+	int i;
+	char **shown;
+	int nshown, shown_cap;
 
 	snprintf(mappath, sizeof(mappath), "/proc/%d/map", (int)pid);
 	fp = fopen(mappath, "r");
@@ -227,6 +232,9 @@ info_pid(pid_t pid)
 	}
 
 	printf("PID %d\n\n", (int)pid);
+	shown = NULL;
+	nshown = 0;
+	shown_cap = 0;
 
 	/*
 	 * FreeBSD /proc/<pid>/map format:
@@ -250,13 +258,36 @@ info_pid(pid_t pid)
 			continue;
 
 		/* Skip duplicates — same path already shown. */
+		for (i = 0; i < nshown; i++) {
+			if (strcmp(shown[i], path) == 0)
+				break;
+		}
+		if (i != nshown)
+			continue;
+		if (nshown >= shown_cap) {
+			int newcap = shown_cap == 0 ? 16 : shown_cap * 2;
+			char **newshown = realloc(shown,
+			    (size_t)newcap * sizeof(*shown));
+			if (newshown == NULL)
+				break;
+			shown = newshown;
+			shown_cap = newcap;
+		}
+		shown[nshown] = strdup(path);
+		if (shown[nshown] == NULL)
+			break;
+		nshown++;
+
 		printf("──────────────────────────────────────────\n");
-		info_elf(path, start, true);
+		info_elf(path, start, true, HWT_RECORD_MMAP);
 		printf("\n");
 		count++;
 	}
 
 	fclose(fp);
+	for (i = 0; i < nshown; i++)
+		free(shown[i]);
+	free(shown);
 
 	if (count == 0)
 		fprintf(stderr,
@@ -314,7 +345,7 @@ cmd_info(int argc, char **argv)
 	for (int i = 0; i < argc; i++) {
 		if (i > 0)
 			printf("\n");
-		info_elf(argv[i], 0, false);
+		info_elf(argv[i], 0, false, 0);
 	}
 
 	return (0);

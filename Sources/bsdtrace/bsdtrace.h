@@ -254,6 +254,12 @@ typedef struct _Elf Elf;
 
 bool	 is_user_addr(uint64_t addr);
 int	 elf_base_vaddr(Elf *elf, uint64_t *base_out);
+int	 elf_exec_map_vaddr(Elf *elf, uint64_t *exec_out);
+int	 elf_preferred_symtab_type(Elf *elf);
+int	 elf_effective_load_addr(Elf *elf, int type, uint64_t record_addr,
+	    uint64_t *load_out);
+bool	 section_should_use(const struct pt_image_info *sections, int nsections,
+	    int idx);
 int	 add_elf_to_image(struct pt_image *image, const char *path,
 	    uint64_t load_addr);
 int	 elf_get_interp(const char *path, char *interp, size_t interpsz);

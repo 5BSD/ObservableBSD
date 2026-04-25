@@ -33,6 +33,7 @@ sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
     const char *name, const char *binary)
 {
 	struct sym_entry *e;
+	struct sym_entry *newentries;
 
 	if (name == NULL || name[0] == '\0')
 		return;
@@ -40,13 +41,11 @@ sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
 	if (st->count >= st->capacity) {
 		int newcap = st->capacity == 0 ? SYM_INIT_CAP :
 		    st->capacity * 2;
-		st->entries = reallocf(st->entries,
-		    newcap * sizeof(*st->entries));
-		if (st->entries == NULL) {
-			st->count = 0;
-			st->capacity = 0;
+		newentries = realloc(st->entries,
+		    (size_t)newcap * sizeof(*st->entries));
+		if (newentries == NULL)
 			return;
-		}
+		st->entries = newentries;
 		st->capacity = newcap;
 	}
 
@@ -70,6 +69,7 @@ sym_table_add_elf(struct sym_table *st, const char *path, int64_t slide)
 	GElf_Shdr shdr;
 	Elf_Data *data;
 	GElf_Sym sym;
+	GElf_Word symtab_type;
 	const char *name, *bn;
 	char *pathcopy;
 	size_t nsyms;
@@ -96,33 +96,34 @@ sym_table_add_elf(struct sym_table *st, const char *path, int64_t slide)
 		return;
 	}
 	bn = basename(pathcopy);
+	symtab_type = elf_preferred_symtab_type(elf);
 
 	scn = NULL;
 	while ((scn = elf_nextscn(elf, scn)) != NULL) {
 		if (gelf_getshdr(scn, &shdr) == NULL)
 			continue;
-		if (shdr.sh_type != SHT_SYMTAB &&
-		    shdr.sh_type != SHT_DYNSYM)
+		if (shdr.sh_type != symtab_type)
 			continue;
 		if (shdr.sh_entsize == 0)
 			continue;
 
-		data = elf_getdata(scn, NULL);
-		if (data == NULL)
-			continue;
+		data = NULL;
+		while ((data = elf_getdata(scn, data)) != NULL) {
+			nsyms = data->d_size / shdr.sh_entsize;
+			for (i = 0; i < nsyms; i++) {
+				if (gelf_getsym(data, (int)i, &sym) ==
+				    NULL)
+					continue;
+				if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
+					continue;
+				if (sym.st_value == 0)
+					continue;
 
-		nsyms = shdr.sh_size / shdr.sh_entsize;
-		for (i = 0; i < nsyms; i++) {
-			if (gelf_getsym(data, (int)i, &sym) == NULL)
-				continue;
-			if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
-				continue;
-			if (sym.st_value == 0)
-				continue;
-
-			name = elf_strptr(elf, shdr.sh_link, sym.st_name);
-			sym_table_add(st, sym.st_value + slide,
-			    sym.st_size, name, bn);
+				name = elf_strptr(elf, shdr.sh_link,
+				    sym.st_name);
+				sym_table_add(st, sym.st_value + slide,
+				    sym.st_size, name, bn);
+			}
 		}
 	}
 

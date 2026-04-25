@@ -65,6 +65,146 @@ elf_base_vaddr(Elf *elf, uint64_t *base_out)
 	return (-1);
 }
 
+/*
+ * Find the page-aligned virtual address of the lowest executable PT_LOAD
+ * segment in an open ELF.  MMAP records report the mapped address of an
+ * executable segment, not the ELF image base, so this is the segment basis
+ * we need to recover the runtime slide.
+ */
+int
+elf_exec_map_vaddr(Elf *elf, uint64_t *exec_out)
+{
+	GElf_Phdr phdr;
+	size_t phdrnum;
+	uint64_t best;
+	bool found;
+	size_t i;
+
+	if (elf_getphdrnum(elf, &phdrnum) != 0)
+		return (-1);
+
+	best = 0;
+	found = false;
+	for (i = 0; i < phdrnum; i++) {
+		if (gelf_getphdr(elf, (int)i, &phdr) == NULL)
+			continue;
+		if (phdr.p_type != PT_LOAD)
+			continue;
+		if ((phdr.p_flags & PF_X) == 0)
+			continue;
+		if (phdr.p_filesz == 0)
+			continue;
+
+		if (!found || trunc_page(phdr.p_vaddr) < best) {
+			best = trunc_page(phdr.p_vaddr);
+			found = true;
+		}
+	}
+
+	if (!found)
+		return (-1);
+
+	*exec_out = best;
+	return (0);
+}
+
+int
+elf_preferred_symtab_type(Elf *elf)
+{
+	Elf_Scn *scn;
+	GElf_Shdr shdr;
+	GElf_Word have_dynsym;
+
+	scn = NULL;
+	have_dynsym = SHT_NULL;
+	while ((scn = elf_nextscn(elf, scn)) != NULL) {
+		if (gelf_getshdr(scn, &shdr) == NULL)
+			continue;
+		if (shdr.sh_type == SHT_SYMTAB)
+			return (SHT_SYMTAB);
+		if (shdr.sh_type == SHT_DYNSYM)
+			have_dynsym = SHT_DYNSYM;
+	}
+
+	return ((int)have_dynsym);
+}
+
+int
+elf_effective_load_addr(Elf *elf, int type, uint64_t record_addr,
+    uint64_t *load_out)
+{
+	uint64_t base_vaddr, exec_map_vaddr;
+
+	if (elf_base_vaddr(elf, &base_vaddr) != 0)
+		return (-1);
+
+	switch (type) {
+	case HWT_RECORD_EXECUTABLE:
+		if (record_addr == 0)
+			*load_out = base_vaddr;
+		else
+			*load_out = base_vaddr + record_addr;
+		return (0);
+	case HWT_RECORD_MMAP:
+		if (elf_exec_map_vaddr(elf, &exec_map_vaddr) != 0)
+			return (-1);
+		if (record_addr < exec_map_vaddr)
+			return (-1);
+		*load_out = base_vaddr + (record_addr - exec_map_vaddr);
+		return (0);
+	default:
+		*load_out = record_addr;
+		return (0);
+	}
+}
+
+bool
+section_should_use(const struct pt_image_info *sections, int nsections, int idx)
+{
+	const struct pt_image_info *sec;
+	int i;
+
+	sec = &sections[idx];
+	if (sec->path[0] == '\0')
+		return (false);
+
+	switch (sec->type) {
+	case HWT_RECORD_EXECUTABLE:
+		for (i = 0; i < idx; i++) {
+			if (sections[i].type != HWT_RECORD_EXECUTABLE)
+				continue;
+			if (strcmp(sections[i].path, sec->path) == 0)
+				return (false);
+		}
+		return (true);
+	case HWT_RECORD_MMAP:
+		/*
+		 * EXEC records carry authoritative load information for the
+		 * main image.  Otherwise keep only the lowest executable MMAP
+		 * per path, which corresponds to the lowest executable PT_LOAD.
+		 */
+		for (i = 0; i < nsections; i++) {
+			if (sections[i].type != HWT_RECORD_EXECUTABLE)
+				continue;
+			if (strcmp(sections[i].path, sec->path) == 0)
+				return (false);
+		}
+		for (i = 0; i < nsections; i++) {
+			if (i == idx || sections[i].type != HWT_RECORD_MMAP)
+				continue;
+			if (strcmp(sections[i].path, sec->path) != 0)
+				continue;
+			if (sections[i].load_addr < sec->load_addr)
+				return (false);
+			if (sections[i].load_addr == sec->load_addr && i < idx)
+				return (false);
+		}
+		return (true);
+	default:
+		return (true);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Add ELF executable segments to pt_image                             */
 /* ------------------------------------------------------------------ */
@@ -213,6 +353,11 @@ build_bin_ranges(const struct pt_image_info *sections, int nsections,
 	nranges = 0;
 
 	for (i = 0; i < nsections && nranges < maxranges; i++) {
+		uint64_t load_addr;
+
+		if (!section_should_use(sections, nsections, i))
+			continue;
+
 		fd = open(sections[i].path, O_RDONLY);
 		if (fd < 0)
 			continue;
@@ -228,8 +373,15 @@ build_bin_ranges(const struct pt_image_info *sections, int nsections,
 			continue;
 		}
 
-		slide = (int64_t)sections[i].load_addr -
-		    (int64_t)base_vaddr;
+		load_addr = sections[i].load_addr;
+		if (elf_effective_load_addr(elf, sections[i].type,
+		    sections[i].load_addr, &load_addr) != 0) {
+			elf_end(elf);
+			close(fd);
+			continue;
+		}
+
+		slide = (int64_t)load_addr - (int64_t)base_vaddr;
 
 		if (elf_getphdrnum(elf, &phdrnum) == 0) {
 			for (j = 0; j < phdrnum && nranges < maxranges;
@@ -251,61 +403,86 @@ build_bin_ranges(const struct pt_image_info *sections, int nsections,
 				ranges[nranges].lo = phdr.p_vaddr + slide;
 				ranges[nranges].hi = phdr.p_vaddr + slide +
 				    phdr.p_filesz;
-				ranges[nranges].base =
-				    sections[i].load_addr;
+				ranges[nranges].base = load_addr;
 				nranges++;
 			}
 		}
 
-		/* Handle interpreter for EXEC records. */
+		/*
+		 * Handle interpreter for EXEC records.
+		 * Skip if the interpreter has its own MMAP section.
+		 */
 		if (sections[i].type == HWT_RECORD_EXECUTABLE &&
 		    is_user_addr(sections[i].base_addr) &&
-		    sections[i].base_addr != sections[i].load_addr) {
+		    sections[i].base_addr != load_addr) {
 			if (elf_get_interp(sections[i].path,
 			    interp, sizeof(interp)) == 0) {
-				Elf *elf2;
-				uint64_t interp_base;
-				int fd2 = open(interp, O_RDONLY);
-				if (fd2 >= 0) {
-					elf2 = elf_begin(fd2, ELF_C_READ,
-					    NULL);
-					if (elf2 != NULL &&
-					    elf_base_vaddr(elf2,
-					    &interp_base) == 0) {
-						int64_t islide =
-						    (int64_t)sections[i].base_addr -
-						    (int64_t)interp_base;
-						size_t iphdrnum;
-						if (elf_getphdrnum(elf2,
-						    &iphdrnum) == 0) {
-							for (j = 0;
-							    j < iphdrnum &&
-							    nranges < maxranges;
-							    j++) {
-								if (gelf_getphdr(elf2,
-								    (int)j, &phdr) == NULL)
-									continue;
-								if (phdr.p_type != PT_LOAD ||
-								    !(phdr.p_flags & PF_X) ||
-								    phdr.p_filesz == 0)
-									continue;
-								strlcpy(ranges[nranges].name,
-								    "ld-elf.so.1",
-								    sizeof(ranges[nranges].name));
-								ranges[nranges].lo =
-								    phdr.p_vaddr + islide;
-								ranges[nranges].hi =
-								    phdr.p_vaddr + islide +
-								    phdr.p_filesz;
-								ranges[nranges].base =
-								    sections[i].base_addr;
-								nranges++;
+				int k;
+				bool have_mmap = false;
+
+				for (k = 0; k < nsections; k++) {
+					if (sections[k].type ==
+					    HWT_RECORD_MMAP &&
+					    strcmp(sections[k].path,
+					    interp) == 0) {
+						have_mmap = true;
+						break;
+					}
+				}
+
+				if (!have_mmap) {
+					Elf *elf2;
+					uint64_t interp_base;
+					int fd2 = open(interp, O_RDONLY);
+					if (fd2 >= 0) {
+						elf2 = elf_begin(fd2,
+						    ELF_C_READ, NULL);
+						if (elf2 != NULL &&
+						    elf_base_vaddr(elf2,
+						    &interp_base) == 0) {
+							int64_t islide =
+							    (int64_t)sections[i].base_addr -
+							    (int64_t)interp_base;
+							size_t iphdrnum;
+							if (elf_getphdrnum(
+							    elf2,
+							    &iphdrnum) == 0) {
+								for (j = 0;
+								    j < iphdrnum &&
+								    nranges <
+								    maxranges;
+								    j++) {
+									if (gelf_getphdr(
+									    elf2,
+									    (int)j,
+									    &phdr)
+									    == NULL)
+										continue;
+									if (phdr.p_type != PT_LOAD ||
+									    !(phdr.p_flags & PF_X) ||
+									    phdr.p_filesz == 0)
+										continue;
+									strlcpy(
+									    ranges[nranges].name,
+									    "ld-elf.so.1",
+									    sizeof(ranges[nranges].name));
+									ranges[nranges].lo =
+									    phdr.p_vaddr +
+									    islide;
+									ranges[nranges].hi =
+									    phdr.p_vaddr +
+									    islide +
+									    phdr.p_filesz;
+									ranges[nranges].base =
+									    sections[i].base_addr;
+									nranges++;
+								}
 							}
 						}
+						if (elf2 != NULL)
+							elf_end(elf2);
+						close(fd2);
 					}
-					if (elf2 != NULL)
-						elf_end(elf2);
-					close(fd2);
 				}
 			}
 		}

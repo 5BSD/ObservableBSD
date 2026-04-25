@@ -355,8 +355,40 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 
 	total = 0;
 	for (i = 0; i < nsections; i++) {
-		total += add_elf_to_image(image, sections[i].path,
-		    sections[i].load_addr);
+		uint64_t load_addr;
+		bool have_load_addr;
+
+		if (!section_should_use(sections, nsections, i))
+			continue;
+
+		load_addr = sections[i].load_addr;
+		have_load_addr = false;
+		fd = open(sections[i].path, O_RDONLY);
+		if (fd >= 0) {
+			elf = elf_begin(fd, ELF_C_READ, NULL);
+			if (elf != NULL) {
+				if (elf_effective_load_addr(elf,
+				    sections[i].type,
+				    sections[i].load_addr, &load_addr) == 0)
+					have_load_addr = true;
+				elf_end(elf);
+			}
+			close(fd);
+		}
+		if (!have_load_addr)
+			continue;
+
+		{
+			int segs = add_elf_to_image(image,
+			    sections[i].path, load_addr);
+			total += segs;
+			fprintf(stderr,
+			    "  [%d] %s type=%d rec_addr=0x%lx "
+			    "load_addr=0x%lx segs=%d\n",
+			    i, sections[i].path, sections[i].type,
+			    (unsigned long)sections[i].load_addr,
+			    (unsigned long)load_addr, segs);
+		}
 
 		/* Load symbols with the same slide. */
 		fd = open(sections[i].path, O_RDONLY);
@@ -364,9 +396,13 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 			elf = elf_begin(fd, ELF_C_READ, NULL);
 			if (elf != NULL) {
 				if (elf_base_vaddr(elf, &base_vaddr) == 0) {
-					slide = (int64_t)
-					    sections[i].load_addr -
+					slide = (int64_t)load_addr -
 					    (int64_t)base_vaddr;
+					fprintf(stderr,
+					    "    base_vaddr=0x%lx "
+					    "slide=0x%lx\n",
+					    (unsigned long)base_vaddr,
+					    (unsigned long)slide);
 					sym_table_add_elf(st,
 					    sections[i].path, slide);
 				}
@@ -375,37 +411,65 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 			close(fd);
 		}
 
-		/* Handle interpreter for EXEC records. */
+		/*
+		 * Handle interpreter for EXEC records.
+		 *
+		 * Skip if the interpreter already has its own MMAP
+		 * section — that section will be processed on its
+		 * own iteration and we'd just duplicate the work.
+		 */
 		if (sections[i].type == HWT_RECORD_EXECUTABLE &&
 		    is_user_addr(sections[i].base_addr) &&
-		    sections[i].base_addr != sections[i].load_addr) {
+		    sections[i].base_addr != load_addr) {
 			if (elf_get_interp(sections[i].path,
 			    interp, sizeof(interp)) == 0) {
-				total += add_elf_to_image(image,
-				    interp, sections[i].base_addr);
+				int k;
+				bool have_mmap = false;
 
-				fd = open(interp, O_RDONLY);
-				if (fd >= 0) {
-					elf = elf_begin(fd, ELF_C_READ,
-					    NULL);
-					if (elf != NULL) {
-						if (elf_base_vaddr(elf,
-						    &base_vaddr) == 0) {
-							slide = (int64_t)
-							    sections[i].base_addr -
-							    (int64_t)base_vaddr;
-							sym_table_add_elf(st,
-							    interp, slide);
-						}
-						elf_end(elf);
+				for (k = 0; k < nsections; k++) {
+					if (sections[k].type ==
+					    HWT_RECORD_MMAP &&
+					    strcmp(sections[k].path,
+					    interp) == 0) {
+						have_mmap = true;
+						break;
 					}
-					close(fd);
+				}
+
+				if (!have_mmap) {
+					total += add_elf_to_image(image,
+					    interp,
+					    sections[i].base_addr);
+
+					fd = open(interp, O_RDONLY);
+					if (fd >= 0) {
+						elf = elf_begin(fd,
+						    ELF_C_READ, NULL);
+						if (elf != NULL) {
+							if (elf_base_vaddr(
+							    elf,
+							    &base_vaddr)
+							    == 0) {
+								slide =
+								    (int64_t)sections[i].base_addr -
+								    (int64_t)base_vaddr;
+								sym_table_add_elf(
+								    st, interp,
+								    slide);
+							}
+							elf_end(elf);
+						}
+						close(fd);
+					}
 				}
 			}
 		}
 	}
 
 	sym_table_sort(st);
+
+	fprintf(stderr, "image: %d sections, %d segments, %d symbols\n",
+	    nsections, total, st->count);
 
 	if (total == 0) {
 		warnx("no executable segments found in %d binaries",
@@ -457,7 +521,7 @@ decode_pt_insn(const void *buf, size_t len,
 	const struct sym_entry *sym;
 	const char *label;
 	int status;
-	int total, calls, returns, syscalls, nomaps, errors;
+	int total, branches, returns, syscalls, nomaps, errors;
 
 	if (buf == NULL || len == 0) {
 		warnx("no PT data to decode");
@@ -492,10 +556,19 @@ decode_pt_insn(const void *buf, size_t len,
 	if (decoder == NULL) {
 		warnx("pt_insn_alloc_decoder failed");
 		pt_image_free(image);
+		sym_table_free(&st);
 		return (-1);
 	}
 
-	pt_insn_set_image(decoder, image);
+	status = pt_insn_set_image(decoder, image);
+	if (status < 0) {
+		warnx("pt_insn_set_image failed: %s",
+		    pt_errstr(pt_errcode(status)));
+		pt_insn_free_decoder(decoder);
+		pt_image_free(image);
+		sym_table_free(&st);
+		return (-1);
+	}
 
 	if (fmt == FMT_TEXT) {
 		fprintf(stderr,
@@ -504,7 +577,7 @@ decode_pt_insn(const void *buf, size_t len,
 	}
 
 	total = 0;
-	calls = 0;
+	branches = 0;
 	returns = 0;
 	syscalls = 0;
 	nomaps = 0;
@@ -541,7 +614,8 @@ decode_pt_insn(const void *buf, size_t len,
 		switch (insn.iclass) {
 		case ptic_call:
 		case ptic_jump:
-			calls++;
+		case ptic_cond_jump:
+			branches++;
 			break;
 		case ptic_return:
 			returns++;
@@ -610,9 +684,9 @@ decode_pt_insn(const void *buf, size_t len,
 	if (fmt == FMT_TEXT) {
 		fflush(stdout);
 		fprintf(stderr,
-		    "%d instructions, %d calls, %d returns, "
+		    "%d instructions, %d branches, %d returns, "
 		    "%d syscalls, %d nomap, %d errors, %d symbols\n",
-		    total, calls, returns, syscalls, nomaps, errors,
+		    total, branches, returns, syscalls, nomaps, errors,
 		    st.count);
 	}
 

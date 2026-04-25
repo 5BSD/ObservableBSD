@@ -104,6 +104,7 @@ meta_read_sections(const char *path,
 {
 	FILE *fp;
 	struct pt_image_info *sections;
+	struct pt_image_info *newsections;
 	int nsections, capacity;
 	char line[4096];
 	char type[32], fpath[MAXPATHLEN];
@@ -138,15 +139,23 @@ meta_read_sections(const char *path,
 			    strcmp(type, "mmap") != 0)
 				continue;
 
+			/*
+			 * Keep all records — section_should_use() handles
+			 * deduplication at decode time, picking the lowest-
+			 * address MMAP per path rather than first-wins.
+			 */
 			if (nsections >= capacity) {
 				capacity = capacity == 0 ? 16 :
 				    capacity * 2;
-				sections = reallocf(sections,
-				    capacity * sizeof(*sections));
-				if (sections == NULL) {
-					nsections = 0;
-					break;
+				newsections = realloc(sections,
+				    (size_t)capacity *
+				    sizeof(*sections));
+				if (newsections == NULL) {
+					fclose(fp);
+					free(sections);
+					return (-1);
 				}
+				sections = newsections;
 			}
 
 			strlcpy(sections[nsections].path, fpath,

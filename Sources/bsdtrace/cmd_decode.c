@@ -36,6 +36,7 @@ cmd_decode(int argc, char **argv)
 	const char *pt_path;
 	char meta_path[MAXPATHLEN] = "";
 	void *buf;
+	int rc;
 	int nsections;
 	int fd;
 	int ch;
@@ -141,9 +142,10 @@ cmd_decode(int argc, char **argv)
 		    pt_path, (long long)sb.st_size, nsections,
 		    meta_path);
 
-	decode_pt_insn(buf, (size_t)sb.st_size, sections, nsections, fmt);
+	rc = decode_pt_insn(buf, (size_t)sb.st_size, sections, nsections,
+	    fmt);
 
 	munmap(buf, sb.st_size);
 	free(sections);
-	return (0);
+	return (rc == 0 ? 0 : 1);
 }

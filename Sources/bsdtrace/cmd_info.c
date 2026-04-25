@@ -240,7 +240,7 @@ info_pid(pid_t pid)
 		path[0] = '\0';
 		if (sscanf(line, "0x%lx 0x%lx %*d %*d %*x %15s %*d %*d "
 		    "%*x %*s %*s %1023[^\n]",
-		    &start, &end, protstr, path) < 3)
+		    &start, &end, protstr, path) < 4)
 			continue;
 
 		/* Only show executable mappings with a file path. */

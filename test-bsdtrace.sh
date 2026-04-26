@@ -991,6 +991,25 @@ PY
 
     settle_hwt
 
+    # Data completeness: trace the same deterministic program twice and
+    # verify the instruction counts match.  If the tracing pipeline loses
+    # data non-deterministically, the counts will diverge.
+    PT_DET1="$TMPDIR/determinism-1.pt"
+    PT_DET2="$TMPDIR/determinism-2.pt"
+    run_bsdtrace exec -t 5 -o "$PT_DET1" -- "$TESTPROG"
+    DET1_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+    settle_hwt
+    run_bsdtrace exec -t 5 -o "$PT_DET2" -- "$TESTPROG"
+    DET2_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+    if [ -n "$DET1_INSN" ] && [ -n "$DET2_INSN" ] &&
+        [ "$DET1_INSN" -gt 0 ] && [ "$DET1_INSN" -eq "$DET2_INSN" ]; then
+        pass "exec: deterministic instruction count ($DET1_INSN)"
+    else
+        fail "exec: deterministic instruction count (run1=$DET1_INSN run2=$DET2_INSN)"
+    fi
+
+    settle_hwt
+
 
 
     # ── symbolication edge cases ────────────────────────────

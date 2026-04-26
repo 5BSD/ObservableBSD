@@ -174,6 +174,7 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 	use_scan = stop_len == 0 ||
 	    (record_len > 0 && stop_len < record_len);
 	known_end = use_scan ? record_len : stop_len;
+
 	if (known_end == 0) {
 		warnx("PT buffer is empty");
 		return (0);
@@ -184,45 +185,31 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 		return (-1);
 
 	actual_len = known_end;
-	if (use_scan) {
-		scan_limit = known_end + 16 * PAGE_SIZE;
-		if (scan_limit > ctx->bufsize)
-			scan_limit = ctx->bufsize;
 
-		scan_end = scan_limit;
-		while (scan_end > known_end && buf[scan_end - 1] == 0)
+	/*
+	 * When BUFPTR_GET loses the ToPA page index (returns only the
+	 * within-page offset) and no BUFFER records arrived, the
+	 * known_end is far too small.  Scan backward from the end of
+	 * the entire buffer to find the last non-zero byte — the
+	 * buffer is zeroed at allocation, so non-zero means PT data.
+	 */
+	if (record_len == 0 && stop_len > 0 && stop_len < PAGE_SIZE) {
+		scan_end = ctx->bufsize;
+		while (scan_end > 0 && buf[scan_end - 1] == 0)
 			scan_end--;
-		if (scan_end < known_end)
-			scan_end = known_end;
-		actual_len = scan_end;
-	} else if (record_len == 0 && stop_len > 0 && stop_len < PAGE_SIZE) {
+
+		if (scan_end > known_end)
+			actual_len = scan_end;
+	} else if (use_scan) {
 		/*
-		 * A tiny stop pointer with no BUFFER records often means the
-		 * kernel lost the ToPA page index and reported only the
-		 * within-page offset.  Probe a bounded look-ahead window, but
-		 * only trust it if it decodes to more instructions and maps
-		 * back to the current run's executable images.
+		 * BUFFER records gave us a lower bound but stop pointer
+		 * is missing or behind.  Scan ahead from the last BUFFER
+		 * record position.
 		 */
-		scan_limit = known_end + 16 * PAGE_SIZE;
-		if (scan_limit > ctx->bufsize)
-			scan_limit = ctx->bufsize;
-
-		scan_end = scan_limit;
+		scan_end = ctx->bufsize;
 		while (scan_end > known_end && buf[scan_end - 1] == 0)
 			scan_end--;
-		if (scan_end < known_end)
-			scan_end = known_end;
-
-		memset(&base_probe, 0, sizeof(base_probe));
-		memset(&scan_probe, 0, sizeof(scan_probe));
-		(void)decode_pt_probe(buf, known_end,
-		    ts->sections, ts->nsections, &base_probe);
-		(void)decode_pt_probe(buf, scan_end,
-		    ts->sections, ts->nsections, &scan_probe);
-
-		if (scan_end > known_end &&
-		    scan_probe.total > base_probe.total &&
-		    scan_probe.exec_hits > base_probe.exec_hits)
+		if (scan_end > known_end)
 			actual_len = scan_end;
 	}
 

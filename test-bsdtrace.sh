@@ -1009,6 +1009,112 @@ RPROG
 
     settle_hwt
 
+    # Two-range IP filter test.  Compile a program with two distinct
+    # function groups (group_a_* and group_b_*), extract each group's
+    # address range from objdump, and trace with -r <rangeA> -r <rangeB>.
+    # Verify both groups appear in the decoded output.
+    DUALPROG="$TMPDIR/dualprog"
+    cat > "$TMPDIR/dualprog.c" <<'DPROG'
+#include <unistd.h>
+#define NOINLINE __attribute__((noinline))
+static volatile int sink;
+
+/*
+ * Two function groups separated by a large padding function so
+ * their address ranges don't overlap.  The hardware supports two
+ * independent IP filter ranges (ADDR0, ADDR1).
+ */
+
+/* --- Group A --- */
+NOINLINE int group_a_leaf(int x) { return x + 1; }
+NOINLINE int group_a_loop(int n) {
+    int i, s = 0;
+    for (i = 0; i < n; i++) s = group_a_leaf(s);
+    return s;
+}
+
+/* Padding to push group B to a different address range. */
+NOINLINE int padding_func(int x) {
+    volatile int v = x;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    v += 1; v += 2; v += 3; v += 4; v += 5;
+    return v;
+}
+
+/* --- Group B --- */
+NOINLINE int group_b_leaf(int x) { return x * 2; }
+NOINLINE int group_b_loop(int n) {
+    int i, s = 1;
+    for (i = 0; i < n; i++) s = group_b_leaf(s);
+    return s;
+}
+
+int main(void) {
+    int i;
+    for (i = 0; i < 5000; i++) {
+        sink = group_a_loop(100);
+        sink = group_b_loop(100);
+    }
+    usleep(10000);
+    return 0;
+}
+DPROG
+    if cc -O0 -o "$DUALPROG" "$TMPDIR/dualprog.c" 2>/dev/null && [ -n "$OBJDUMP" ]; then
+        DUAL_DISAS="$TMPDIR/dualprog.dis"
+        "$OBJDUMP" -d "$DUALPROG" > "$DUAL_DISAS" 2>/dev/null
+
+        # Extract function addresses for each group.
+        GA_LEAF_START=$(objdump_func_addr "$DUAL_DISAS" group_a_leaf)
+        GB_LEAF_START=$(objdump_func_addr "$DUAL_DISAS" group_b_leaf)
+        PAD_START=$(objdump_func_addr "$DUAL_DISAS" padding_func)
+
+        # Range A: from group_a_leaf up to (but not including) padding_func.
+        # Range B: from group_b_leaf to group_b_loop + generous end.
+        if [ -n "$GA_LEAF_START" ] && [ -n "$PAD_START" ] &&
+            [ -n "$GB_LEAF_START" ]; then
+            GB_END=$(printf '0x%x' "$(( $GB_LEAF_START + 0x200 ))")
+            RANGE_A="${GA_LEAF_START}:${PAD_START}"
+            RANGE_B="${GB_LEAF_START}:${GB_END}"
+
+            PT_DUAL="$TMPDIR/dualprog-dual.pt"
+            run_bsdtrace exec -r "$RANGE_A" -r "$RANGE_B" -t 10 -o "$PT_DUAL" -- "$DUALPROG"
+            if [ "$RRC" -eq 0 ]; then
+                DUAL_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+                DUAL_HAS_A=$(echo "$ROUT" | grep -c 'group_a')
+                DUAL_HAS_B=$(echo "$ROUT" | grep -c 'group_b')
+                if [ "${DUAL_INSN:-0}" -gt 0 ] &&
+                    [ "$DUAL_HAS_A" -gt 0 ] && [ "$DUAL_HAS_B" -gt 0 ]; then
+                    # Verify no library leakage
+                    if echo "$ROUT" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                        fail "exec: dual -r range filter (library symbols leaked)"
+                    else
+                        pass "exec: dual -r range filter ($DUAL_INSN insn, A=$DUAL_HAS_A B=$DUAL_HAS_B)"
+                    fi
+                else
+                    fail "exec: dual -r range filter (insn=$DUAL_INSN A=$DUAL_HAS_A B=$DUAL_HAS_B)"
+                    echo "    rangeA=$RANGE_A rangeB=$RANGE_B"
+                    echo "    $(echo "$RERR" | tail -3)"
+                fi
+            else
+                skip "exec: dual -r range filter (exit $RRC)"
+            fi
+        else
+            skip "exec: dual -r range filter (objdump extraction failed)"
+        fi
+    else
+        skip "exec: dual -r range filter (compile or objdump failed)"
+    fi
+
+    settle_hwt
+
 
 
     # Child exit status should propagate through bsdtrace exec.

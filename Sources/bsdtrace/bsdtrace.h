@@ -328,6 +328,18 @@ void	 trace_state_free(struct trace_state *ts);
 ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 	    const char *pt_output, enum bsdtrace_fmt fmt);
 
+void	 emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
+	    enum bsdtrace_fmt fmt, bool pause_on_mmap, struct hwt_ctx *ctx,
+	    struct trace_state *ts);
+const char *resolve_backend(const char *explicit_name, char **detected_out,
+	    bool dryrun);
+int	 check_hwt_hooks(bool dryrun);
+void	 derive_meta_path(const char *pt_output, char *meta_path,
+	    size_t meta_pathsz);
+int	 trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
+	    struct meta_writer *meta, const char *pt_output, pid_t pid,
+	    enum bsdtrace_fmt fmt, int totalrecords);
+
 /* ------------------------------------------------------------------ */
 /* Commands                                                            */
 /* ------------------------------------------------------------------ */

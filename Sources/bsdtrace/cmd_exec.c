@@ -15,7 +15,6 @@
 #include <sys/wait.h>
 
 #include <err.h>
-#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +31,7 @@
 /* ------------------------------------------------------------------ */
 /* Fork helper                                                         */
 /* ------------------------------------------------------------------ */
+
 
 /*
  * Fork the child, have it raise(SIGSTOP) before exec.
@@ -75,26 +75,6 @@ fork_stopped(char **args, bool no_aslr)
 }
 
 /* ------------------------------------------------------------------ */
-/* Record polling loop                                                 */
-/* ------------------------------------------------------------------ */
-
-static void
-emit_record(const struct bsdtrace_record *rec, pid_t pid,
-    enum bsdtrace_fmt fmt, bool pause_on_mmap, struct hwt_ctx *ctx)
-{
-
-	if (fmt == FMT_JSON)
-		fmt_record_json(rec, pid);
-	else
-		fmt_record_text(rec, pid);
-
-	if (pause_on_mmap &&
-	    (rec->type == HWT_RECORD_MMAP ||
-	     rec->type == HWT_RECORD_EXECUTABLE))
-		hwt_ctx_wakeup(ctx);
-}
-
-/* ------------------------------------------------------------------ */
 /* Entry point                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -117,7 +97,6 @@ cmd_exec(int argc, char **argv)
 	char meta_path[MAXPATHLEN];
 	const char *pt_output;
 	struct ip_filter filter;
-	int hooks;
 	int tid;
 	int maxrecords;
 	bool no_aslr;
@@ -225,39 +204,16 @@ cmd_exec(int argc, char **argv)
 	}
 	cmd_argv = argv;
 
-	if (!hwt_available()) {
-		fprintf(stderr,
-		    "bsdtrace: /dev/hwt not found — run: sudo kldload hwt\n");
-		return (1);
-	}
-
 	bufsize = parse_size(bufsize_str);
 
-	/* Resolve backend. */
-	if (backend_name == NULL) {
-		detected_backend = hwt_detect_backend();
-		backend_name = detected_backend;
-	}
-	if (backend_name == NULL) {
-		fprintf(stderr,
-		    "bsdtrace: no HWT backend loaded — "
-		    "run: sudo kldload pt\n");
+	/* Resolve backend and check kernel support. */
+	backend_name = resolve_backend(backend_name, &detected_backend,
+	    dryrun);
+	if (backend_name == NULL)
 		return (1);
-	}
-
-	hooks = hwt_hooks_enabled();
-	if (hooks == 0) {
-		fprintf(stderr,
-		    "bsdtrace: running kernel lacks HWT_HOOKS; "
-		    "only alloc-time THREAD_CREATE records are available. "
-		    "Boot a kernel built with 'options HWT_HOOKS'.\n");
+	if (check_hwt_hooks(dryrun) != 0) {
 		free(detected_backend);
 		return (dryrun ? 0 : 1);
-	}
-	if (hooks < 0) {
-		fprintf(stderr,
-		    "bsdtrace: warning: unable to verify HWT_HOOKS in "
-		    "the running kernel; continuing\n");
 	}
 
 	/* Fork child stopped. */
@@ -313,23 +269,17 @@ cmd_exec(int argc, char **argv)
 		return (1);
 	}
 
-	/* Resolve PT output path now so the .meta sidecar is co-located. */
+	/* Resolve PT output path and open .meta sidecar. */
 	if (pt_output == NULL) {
 		snprintf(pt_path, sizeof(pt_path),
 		    "bsdtrace-%d.pt", (int)child);
 		pt_output = pt_path;
 	}
-	{
-		size_t plen = strlen(pt_output);
-		if (plen > 3 &&
-		    strcmp(pt_output + plen - 3, ".pt") == 0)
-			snprintf(meta_path, sizeof(meta_path),
-			    "%.*s.meta", (int)(plen - 3), pt_output);
-		else
-			snprintf(meta_path, sizeof(meta_path),
-			    "%s.meta", pt_output);
-	}
+	derive_meta_path(pt_output, meta_path, sizeof(meta_path));
 	meta = meta_writer_open(meta_path);
+	if (meta == NULL)
+		warnx("could not create %s — continuing without metadata",
+		    meta_path);
 	trace_state_init(&ts, meta);
 
 	/* Line-buffer stdout — see cmd_trace.c comment. */
@@ -396,9 +346,8 @@ cmd_exec(int argc, char **argv)
 
 		for (i = 0; i < nrecs; i++) {
 			totalrecords++;
-			emit_record(&records[i], child, fmt,
-			    pause_on_mmap, &ctx);
-			trace_state_process(&ts, &records[i]);
+			emit_and_process(&records[i], child, fmt,
+			    pause_on_mmap, &ctx, &ts);
 		}
 
 		/*
@@ -429,41 +378,13 @@ cmd_exec(int argc, char **argv)
 			exitcode = 128 + WTERMSIG(status);
 	}
 
-	/*
-	 * Final drain while the context fd is still open.
-	 * The loop above handles most draining, but one more pass
-	 * catches any records that arrived after the last poll.
-	 */
-	nrecs = 0;
-	if (hwt_ctx_poll_records(&ctx, records, MAX_POLL_RECORDS,
-	    false, &nrecs) == 0) {
-		for (i = 0; i < nrecs; i++) {
-			totalrecords++;
-			emit_record(&records[i], child, fmt,
-			    pause_on_mmap, &ctx);
-			trace_state_process(&ts, &records[i]);
-		}
-	}
-
-	/* Stop tracing — clears TraceEn, captures exact buffer position. */
-	hwt_ctx_stop(&ctx);
-	totalrecords += trace_state_drain_post_stop(&ctx, &ts);
-
-	/* Snapshot PT buffer and decode. */
-	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
-
-	if (ts.buf_wrapped)
-		fprintf(stderr,
-		    "warning: PT buffer wrapped (data lost) — "
-		    "increase with -s\n");
+	totalrecords = trace_finalize(&ctx, &ts, meta, pt_output,
+	    child, fmt, totalrecords);
 
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "\n%d records collected, exit code %d\n",
 		    totalrecords, exitcode);
 
-	hwt_ctx_close(&ctx);
-	meta_writer_close(meta);
-	trace_state_free(&ts);
 	free(detected_backend);
 	return (exitcode);
 }

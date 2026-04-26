@@ -21,6 +21,7 @@
 #define	POST_STOP_MAX_RECORDS	256
 #define	POST_STOP_EMPTY_POLLS	40
 #define	POST_STOP_SLEEP_US	5000
+#define	POLL_RECORDS		256
 
 /* ------------------------------------------------------------------ */
 /* Trace state accumulator                                             */
@@ -236,4 +237,140 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 		    ts->sections, ts->nsections, fmt);
 	}
 	return (saved);
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared helpers for cmd_exec / cmd_trace                             */
+/* ------------------------------------------------------------------ */
+
+void
+emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
+    enum bsdtrace_fmt fmt, bool pause_on_mmap, struct hwt_ctx *ctx,
+    struct trace_state *ts)
+{
+
+	if (fmt == FMT_JSON)
+		fmt_record_json(rec, pid);
+	else
+		fmt_record_text(rec, pid);
+
+	if (pause_on_mmap &&
+	    (rec->type == HWT_RECORD_MMAP ||
+	     rec->type == HWT_RECORD_EXECUTABLE))
+		hwt_ctx_wakeup(ctx);
+
+	trace_state_process(ts, rec);
+}
+
+/*
+ * Resolve the HWT backend.  Returns the backend name (caller must
+ * free *detected_out if non-NULL) or NULL on failure.  Prints
+ * diagnostics to stderr.
+ */
+const char *
+resolve_backend(const char *explicit_name, char **detected_out,
+    bool dryrun)
+{
+
+	*detected_out = NULL;
+
+	if (!hwt_available()) {
+		fprintf(stderr,
+		    "bsdtrace: /dev/hwt not found — run: sudo kldload hwt\n");
+		return (NULL);
+	}
+
+	if (explicit_name != NULL)
+		return (explicit_name);
+
+	*detected_out = hwt_detect_backend();
+	if (*detected_out == NULL) {
+		fprintf(stderr,
+		    "bsdtrace: no HWT backend loaded — "
+		    "run: sudo kldload pt\n");
+		return (NULL);
+	}
+	return (*detected_out);
+}
+
+/*
+ * Check that the running kernel has HWT_HOOKS.  Returns 0 on success,
+ * -1 on fatal failure.
+ */
+int
+check_hwt_hooks(bool dryrun)
+{
+	int hooks;
+
+	hooks = hwt_hooks_enabled();
+	if (hooks == 0) {
+		fprintf(stderr,
+		    "bsdtrace: running kernel lacks HWT_HOOKS; "
+		    "only alloc-time THREAD_CREATE records are available. "
+		    "Boot a kernel built with 'options HWT_HOOKS'.\n");
+		return (dryrun ? 0 : -1);
+	}
+	if (hooks < 0) {
+		fprintf(stderr,
+		    "bsdtrace: warning: unable to verify HWT_HOOKS in "
+		    "the running kernel; continuing\n");
+	}
+	return (0);
+}
+
+/*
+ * Derive the .meta sidecar path from the PT output path.
+ */
+void
+derive_meta_path(const char *pt_output, char *meta_path, size_t meta_pathsz)
+{
+	size_t plen;
+
+	plen = strlen(pt_output);
+	if (plen > 3 && strcmp(pt_output + plen - 3, ".pt") == 0)
+		snprintf(meta_path, meta_pathsz,
+		    "%.*s.meta", (int)(plen - 3), pt_output);
+	else
+		snprintf(meta_path, meta_pathsz,
+		    "%s.meta", pt_output);
+}
+
+/*
+ * Final drain, stop, snapshot, wrap warning, and cleanup.
+ * Called at the end of both cmd_exec and cmd_trace.
+ */
+int
+trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
+    struct meta_writer *meta, const char *pt_output, pid_t pid,
+    enum bsdtrace_fmt fmt, int totalrecords)
+{
+	struct bsdtrace_record records[POLL_RECORDS];
+	int nrecs, i;
+
+	/* One final drain before stopping. */
+	nrecs = 0;
+	if (hwt_ctx_poll_records(ctx, records, POLL_RECORDS,
+	    false, &nrecs) == 0) {
+		for (i = 0; i < nrecs; i++) {
+			totalrecords++;
+			emit_and_process(&records[i], pid, fmt,
+			    false, ctx, ts);
+		}
+	}
+
+	hwt_ctx_stop(ctx);
+	totalrecords += trace_state_drain_post_stop(ctx, ts);
+
+	snapshot_and_decode(ctx, ts, pt_output, fmt);
+
+	if (ts->buf_wrapped)
+		fprintf(stderr,
+		    "warning: PT buffer wrapped (data lost) — "
+		    "increase with -s\n");
+
+	hwt_ctx_close(ctx);
+	meta_writer_close(meta);
+	trace_state_free(ts);
+
+	return (totalrecords);
 }

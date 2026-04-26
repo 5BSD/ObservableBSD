@@ -972,6 +972,25 @@ PY
 
     settle_hwt
 
+    # .meta must survive early termination (SIGPIPE, fast child exit).
+    # Trace a program that exits immediately and verify the .meta has
+    # at least an exec record — catches unbuffered/lost metadata.
+    PT_FAST="$TMPDIR/fast-exit.pt"
+    FAST_META="$TMPDIR/fast-exit.meta"
+    run_bsdtrace exec -t 5 -o "$PT_FAST" -- /bin/true
+    if [ -f "$FAST_META" ] && [ -s "$FAST_META" ]; then
+        if grep -q '"type":"exec"' "$FAST_META"; then
+            pass "exec: .meta survives fast exit"
+        else
+            fail "exec: .meta survives fast exit (no exec record)"
+            head -3 "$FAST_META"
+        fi
+    else
+        fail "exec: .meta survives fast exit (empty or missing)"
+    fi
+
+    settle_hwt
+
 
 
     # ── symbolication edge cases ────────────────────────────

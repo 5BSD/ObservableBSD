@@ -41,6 +41,9 @@ meta_writer_open(const char *path)
 		free(mw);
 		return (NULL);
 	}
+	/* Line-buffer so each JSONL record is flushed immediately.
+	 * Without this, SIGPIPE or Ctrl-C loses all buffered metadata. */
+	setvbuf(mw->fp, NULL, _IOLBF, 0);
 	return (mw);
 }
 

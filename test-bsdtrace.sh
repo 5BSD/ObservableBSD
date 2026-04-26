@@ -980,14 +980,17 @@ RPROG
             if [ "$RRC" -eq 0 ]; then
                 RLOOP_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
                 if [ "${RLOOP_INSN:-0}" -gt 0 ]; then
-                    # Verify no library symbols leaked through
-                    if echo "$ROUT" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                    # Check only decoded instruction lines (CALL/RETURN/etc),
+                    # not MMAP/EXEC record lines which naturally contain library paths.
+                    RLOOP_DECODED=$(echo "$ROUT" |
+                        grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
+                    if echo "$RLOOP_DECODED" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
                         fail "exec: -r range decode (library symbols leaked)"
                     else
                         pass "exec: -r range decode ($RLOOP_INSN instructions)"
                     fi
                     # Verify rangeprog functions appear
-                    if echo "$ROUT" | grep -q 'range_add'; then
+                    if echo "$RLOOP_DECODED" | grep -q 'range_add'; then
                         pass "exec: -r range has expected symbols"
                     else
                         fail "exec: -r range has expected symbols"
@@ -1088,12 +1091,14 @@ DPROG
             run_bsdtrace exec -r "$RANGE_A" -r "$RANGE_B" -t 10 -o "$PT_DUAL" -- "$DUALPROG"
             if [ "$RRC" -eq 0 ]; then
                 DUAL_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
-                DUAL_HAS_A=$(echo "$ROUT" | grep -c 'group_a')
-                DUAL_HAS_B=$(echo "$ROUT" | grep -c 'group_b')
+                DUAL_DECODED=$(echo "$ROUT" |
+                    grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
+                DUAL_HAS_A=$(echo "$DUAL_DECODED" | grep -c 'group_a')
+                DUAL_HAS_B=$(echo "$DUAL_DECODED" | grep -c 'group_b')
                 if [ "${DUAL_INSN:-0}" -gt 0 ] &&
                     [ "$DUAL_HAS_A" -gt 0 ] && [ "$DUAL_HAS_B" -gt 0 ]; then
-                    # Verify no library leakage
-                    if echo "$ROUT" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                    # Verify no library leakage in decoded instructions
+                    if echo "$DUAL_DECODED" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
                         fail "exec: dual -r range filter (library symbols leaked)"
                     else
                         pass "exec: dual -r range filter ($DUAL_INSN insn, A=$DUAL_HAS_A B=$DUAL_HAS_B)"

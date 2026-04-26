@@ -298,27 +298,6 @@ stop_trace_target() {
     fi
 }
 
-warmup_hwt_exec() {
-    WARMUP_PT="$TMPDIR/warmup.pt"
-    attempt=1
-
-    echo "  Note: warmup exec clears stale PT/HWT state before tests"
-    while [ "$attempt" -le 3 ]; do
-        run_bsdtrace exec -t 5 -o "$WARMUP_PT" -- "$TESTPROG"
-        if [ "$RRC" -eq 0 ] &&
-            echo "$ROUT" | grep -Eq 'leaf_add|branch_test|loop_test|do_write'; then
-            echo "  Warmup exec... ok (attempt $attempt)"
-            settle_hwt
-            return 0
-        fi
-        echo "  Warmup exec... retrying (attempt $attempt)"
-        settle_hwt
-        attempt=$((attempt + 1))
-    done
-
-    echo "  Warmup exec... continuing despite incomplete decode"
-    return 1
-}
 
 
 cleanup() {
@@ -612,11 +591,6 @@ else
         skip "decode: all (no HWT_HOOKS)"
         skip "trace: all (no HWT_HOOKS)"
     else
-
-    # The PT/HWT backend can retain stale state after failed or truncated
-    # runs.  A single successful exec trace usually reestablishes stable
-    # BUFFER delivery and symbolication for the rest of the suite.
-    warmup_hwt_exec
 
     # ── exec ─────────────────────────────────────────────
     echo "--- exec ---"

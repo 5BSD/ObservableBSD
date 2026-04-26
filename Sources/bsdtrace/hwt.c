@@ -558,6 +558,19 @@ void
 hwt_ctx_close(struct hwt_ctx *ctx)
 {
 
+	/*
+	 * Ensure tracing is stopped before closing fds.  If the caller
+	 * already called hwt_ctx_stop() the ioctl fails harmlessly.
+	 * Without this, early-exit error paths and signal-killed
+	 * processes leave stale PT state in the kernel, causing the
+	 * next trace session to get garbage buffer data.
+	 */
+	if (ctx->ctx_fd >= 0) {
+		struct hwt_stop hs;
+		memset(&hs, 0, sizeof(hs));
+		(void)ioctl(ctx->ctx_fd, HWT_IOC_STOP, &hs);
+	}
+
 	if (ctx->trace_buf != NULL) {
 		munmap(ctx->trace_buf, ctx->bufsize);
 		ctx->trace_buf = NULL;

@@ -952,6 +952,63 @@ PY
         skip "exec: -r range filter"
     fi
 
+    # Range filter with a looping program — generates enough PT data
+    # within the range for the decoder to sync and produce instructions.
+    RANGEPROG="$TMPDIR/rangeprog"
+    cat > "$TMPDIR/rangeprog.c" <<'RPROG'
+#include <unistd.h>
+#define NOINLINE __attribute__((noinline))
+static volatile int sink;
+NOINLINE int range_add(int a, int b) { return (a + b); }
+NOINLINE int range_loop(int n) {
+    int i, sum = 0;
+    for (i = 0; i < n; i++) sum = range_add(sum, i);
+    return sum;
+}
+int main(void) {
+    int i;
+    for (i = 0; i < 5000; i++) sink = range_loop(100);
+    usleep(10000);
+    return 0;
+}
+RPROG
+    if cc -O0 -o "$RANGEPROG" "$TMPDIR/rangeprog.c" 2>/dev/null; then
+        RANGEPROG_RANGE=$(text_range_arg "$RANGEPROG")
+        if [ -n "$RANGEPROG_RANGE" ]; then
+            PT_RLOOP="$TMPDIR/rangeprog.pt"
+            run_bsdtrace exec -r "$RANGEPROG_RANGE" -t 10 -o "$PT_RLOOP" -- "$RANGEPROG"
+            if [ "$RRC" -eq 0 ]; then
+                RLOOP_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+                if [ "${RLOOP_INSN:-0}" -gt 0 ]; then
+                    # Verify no library symbols leaked through
+                    if echo "$ROUT" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                        fail "exec: -r range decode (library symbols leaked)"
+                    else
+                        pass "exec: -r range decode ($RLOOP_INSN instructions)"
+                    fi
+                    # Verify rangeprog functions appear
+                    if echo "$ROUT" | grep -q 'range_add'; then
+                        pass "exec: -r range has expected symbols"
+                    else
+                        fail "exec: -r range has expected symbols"
+                    fi
+                else
+                    fail "exec: -r range decode (0 instructions)"
+                    echo "    range=$RANGEPROG_RANGE"
+                    echo "    $(echo "$RERR" | tail -3)"
+                fi
+            else
+                skip "exec: -r range decode (exit $RRC)"
+            fi
+        else
+            skip "exec: -r range decode (no text range)"
+        fi
+    else
+        skip "exec: -r range decode (compile failed)"
+    fi
+
+    settle_hwt
+
 
 
     # Child exit status should propagate through bsdtrace exec.

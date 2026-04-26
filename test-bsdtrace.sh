@@ -49,15 +49,22 @@ AP_ATTACH_LOOP_JUMP=""
 pass() { PASS=$((PASS + 1)); printf "  \033[32mPASS\033[0m  %s\n" "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf "  \033[31mFAIL\033[0m  %s\n" "$1"; }
 
-# Run a bsdtrace command with a timeout.  Returns the output in $ROUT
-# and the exit code in $RRC.  Prevents a crash/hang from killing the
-# test suite.
+# Run a bsdtrace command with a timeout.  Returns stdout in $ROUT,
+# stderr in $RERR, and the exit code in $RRC.  Prevents a crash/hang
+# from killing the test suite.
 run_bsdtrace() {
-    ROUT=$(timeout "$TIMEOUT" $BIN "$@" 2>&1)
+    RERR_FILE="$TMPDIR/.stderr.$$"
+    ROUT=$(timeout "$TIMEOUT" $BIN "$@" 2>"$RERR_FILE")
     RRC=$?
+    RERR=$(cat "$RERR_FILE" 2>/dev/null)
+    rm -f "$RERR_FILE"
     if [ "$RRC" -eq 124 ]; then
         ROUT="TIMEOUT after ${TIMEOUT}s"
+        RERR="TIMEOUT after ${TIMEOUT}s"
     fi
+    # Combined output for backward-compat with tests that grep both streams.
+    RBOTH="$ROUT
+$RERR"
 }
 skip() { SKIP=$((SKIP + 1)); printf "  \033[33mSKIP\033[0m  %s\n" "$1"; }
 
@@ -378,18 +385,18 @@ if [ -n "$OBJDUMP" ]; then
         TP_BRANCH_START=$(objdump_func_addr "$TESTPROG_DISAS" branch_test)
         TP_LOOP_START=$(objdump_func_addr "$TESTPROG_DISAS" loop_test)
         TP_LEAF_ADD_START=$(objdump_func_addr "$TESTPROG_DISAS" leaf_add)
-        TP_MAIN_CALL_LEAF_ADD=$(objdump_insn_addr "$TESTPROG_DISAS" main 'callq.*<leaf_add>')
-        TP_BRANCH_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jle[[:space:]]')
-        TP_BRANCH_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jmp[[:space:]]')
-        TP_LOOP_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jge[[:space:]]')
-        TP_LOOP_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jmp[[:space:]]')
-        TP_LEAF_ADD_RET=$(objdump_insn_addr "$TESTPROG_DISAS" leaf_add '[[:space:]]retq')
+        TP_MAIN_CALL_LEAF_ADD=$(objdump_insn_addr "$TESTPROG_DISAS" main 'call[q]*.*<leaf_add>')
+        TP_BRANCH_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jle\|jbe\|jng[[:space:]]')
+        TP_BRANCH_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jmp[q]*[[:space:]]')
+        TP_LOOP_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jge\|jae\|jnl[[:space:]]')
+        TP_LOOP_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jmp[q]*[[:space:]]')
+        TP_LEAF_ADD_RET=$(objdump_insn_addr "$TESTPROG_DISAS" leaf_add '[[:space:]]ret[q]*')
 
         AP_ATTACH_BRANCH_START=$(objdump_func_addr "$ATTACHPROG_DISAS" attach_branch)
         AP_ATTACH_LOOP_START=$(objdump_func_addr "$ATTACHPROG_DISAS" attach_loop)
-        AP_ATTACH_BRANCH_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_branch '[[:space:]]jne[[:space:]]')
-        AP_ATTACH_LOOP_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jge[[:space:]]')
-        AP_ATTACH_LOOP_JUMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jmp[[:space:]]')
+        AP_ATTACH_BRANCH_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_branch '[[:space:]]jne\|jnz[[:space:]]')
+        AP_ATTACH_LOOP_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jge\|jae\|jnl[[:space:]]')
+        AP_ATTACH_LOOP_JUMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jmp[q]*[[:space:]]')
     fi
 fi
 
@@ -600,7 +607,8 @@ else
     # Basic exec with testprog
     run_bsdtrace exec -t 5 -o "$PT_FILE" -- "$TESTPROG"
     EOUT="$ROUT"
-    if echo "$EOUT" | grep -q 'instructions'; then
+    EERR="$RERR"
+    if echo "$EERR" | grep -q 'instructions'; then
         pass "exec: basic trace with decode"
     else
         fail "exec: basic trace with decode"
@@ -700,7 +708,7 @@ PY
         echo "    ---"
     fi
 
-    NOMAP_COUNT=$(echo "$EOUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+    NOMAP_COUNT=$(echo "$EERR" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
     NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
     ERR_N=$(echo "$NOMAP_COUNT" | awk '{print $2}')
     if [ "${NOMAP_N:-999}" -eq 0 ] && [ "${ERR_N:-999}" -le 2 ]; then
@@ -708,7 +716,7 @@ PY
     else
         fail "exec: no nomap or decode errors"
         echo "    nomap=$NOMAP_N errors=$ERR_N"
-        echo "$EOUT" | grep -E 'nomap|error:|sync failed' | head -5
+        echo "$EERR" | grep -E 'nomap|error:|sync failed' | head -5
     fi
 
 
@@ -819,10 +827,10 @@ PY
 
 
 
-    # Thread selection
+    # Thread selection — verify function names appear (not just "ran OK")
     PT_TID="$TMPDIR/testprog-tid.pt"
     run_bsdtrace exec -T 0 -t 5 -o "$PT_TID" -- "$TESTPROG"
-    if echo "$ROUT" | grep -q 'instructions'; then
+    if echo "$ROUT" | grep -Eq 'leaf_add|branch_test|loop_test'; then
         pass "exec: thread selection -T 0"
     else
         fail "exec: thread selection -T 0"
@@ -833,7 +841,7 @@ PY
     # Disable ASLR — verify the EXEC record address matches static link address
     PT_ASLR="$TMPDIR/testprog-aslr.pt"
     run_bsdtrace exec -A -t 5 -o "$PT_ASLR" -- "$TESTPROG"
-    if echo "$ROUT" | grep -q 'instructions'; then
+    if echo "$RERR" | grep -q 'instructions'; then
         pass "exec: disable ASLR -A"
     else
         fail "exec: disable ASLR -A"
@@ -857,7 +865,7 @@ PY
 
     # Dry run
     run_bsdtrace exec -n -t 5 -- "$TESTPROG"
-    if [ "$RRC" -eq 0 ] && echo "$ROUT" | grep -qi 'dry-run'; then
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -qi 'dry-run'; then
         pass "exec: dry run -n"
     else
         fail "exec: dry run -n"
@@ -865,13 +873,13 @@ PY
 
 
 
-    # Custom buffer size
-    PT_BUF="$TMPDIR/testprog-buf.pt"
-    run_bsdtrace exec -s 8m -t 5 -o "$PT_BUF" -- "$TESTPROG"
-    if echo "$ROUT" | grep -q 'instructions'; then
+    # Custom buffer size — verify with dry-run that 8m is accepted
+    run_bsdtrace exec -n -s 8m -t 5 -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'bufsize=8388608'; then
         pass "exec: custom buffer size -s 8m"
     else
         fail "exec: custom buffer size -s 8m"
+        echo "    stderr: $(echo "$RERR" | head -3)"
     fi
 
 
@@ -891,12 +899,13 @@ PY
     if [ -n "$BACKEND" ]; then
         PT_BACKEND="$TMPDIR/testprog-backend.pt"
         run_bsdtrace exec -b "$BACKEND" -p -t 5 -o "$PT_BACKEND" -- "$TESTPROG"
-        if [ "$RRC" -eq 0 ] && echo "$ROUT" | grep -q 'instructions'; then
+        if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
             pass "exec: -b backend"
         else
             fail "exec: -b backend"
         fi
 
+        # pause-on-mmap: verify MMAP/EXEC records appear in decoded stdout
         if echo "$ROUT" | grep -Eq 'MMAP|EXEC'; then
             pass "exec: -p pause on mmap"
         else
@@ -912,7 +921,7 @@ PY
     # Max-records
     PT_LIMIT="$TMPDIR/testprog-max.pt"
     run_bsdtrace exec -m 5 -t 5 -o "$PT_LIMIT" -- "$TESTPROG"
-    if echo "$ROUT" | grep -q 'max-records:'; then
+    if echo "$RERR" | grep -q 'max-records:'; then
         pass "exec: -m max-records"
     else
         fail "exec: -m max-records"
@@ -927,7 +936,7 @@ PY
         if [ "$RRC" -ne 0 ]; then
             skip "exec: -r range filter (bsdtrace exited $RRC — IP filter may not be supported)"
             echo "    rc=$RRC range=$TESTPROG_RANGE"
-            echo "    Output: $(echo "$ROUT" | tail -3)"
+            echo "    Output: $(echo "$RBOTH" | tail -3)"
         else
             RANGE_LINES=$(echo "$ROUT" |
                 grep -E '^[[:space:]]+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
@@ -944,7 +953,7 @@ PY
             else
                 fail "exec: -r range filter (no testprog symbols in output)"
                 echo "    rc=$RRC range=$TESTPROG_RANGE"
-                echo "    Output: $(echo "$ROUT" | tail -5)"
+                echo "    Output: $(echo "$RBOTH" | tail -5)"
             fi
         fi
     else
@@ -976,14 +985,16 @@ PY
         PT_STRIP="$TMPDIR/testprog-stripped.pt"
         run_bsdtrace exec -t 5 -o "$PT_STRIP" -- "$STRIPPED"
         SOUT="$ROUT"
+        SERR="$RERR"
         STRIPPED_BN=$(basename "$STRIPPED")
-        if echo "$SOUT" | grep -q 'instructions'; then
+        if echo "$SERR" | grep -q 'instructions'; then
             pass "sym: stripped binary traces"
         else
             fail "sym: stripped binary traces"
         fi
 
-        # No function names from testprog should appear (they were stripped)
+        # No function names from testprog should appear (they were stripped).
+        # Check stdout only — stderr may contain path strings.
         if echo "$SOUT" | grep -Eq 'leaf_add|branch_test|loop_test|do_write'; then
             fail "sym: stripped binary has no testprog function names"
             echo "    (function names should not appear in stripped binary output)"
@@ -992,7 +1003,7 @@ PY
         fi
 
         # Should still have zero nomap errors (ELF segments loaded correctly)
-        NOMAP_COUNT=$(echo "$SOUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_COUNT=$(echo "$SERR" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
         NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
         if [ "${NOMAP_N:-999}" -eq 0 ]; then
             pass "sym: stripped binary zero nomap"
@@ -1073,8 +1084,9 @@ PY
         PT_PIE="$TMPDIR/testprog-pie.pt"
         run_bsdtrace exec -t 5 -o "$PT_PIE" -- "$PIE_PROG"
         PIE_OUT="$ROUT"
+        PIE_ERR="$RERR"
 
-        if echo "$PIE_OUT" | grep -q 'instructions'; then
+        if echo "$PIE_ERR" | grep -q 'instructions'; then
             pass "sym: PIE binary traces"
         else
             fail "sym: PIE binary traces"
@@ -1097,7 +1109,7 @@ PY
         fi
 
         # Zero nomap
-        NOMAP_COUNT=$(echo "$PIE_OUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_COUNT=$(echo "$PIE_ERR" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
         NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
         if [ "${NOMAP_N:-999}" -eq 0 ]; then
             pass "sym: PIE binary zero nomap"
@@ -1162,14 +1174,15 @@ PY
         if [ -f "$STRIP_META" ]; then
             run_bsdtrace decode -m "$STRIP_META" "$PT_STRIP"
             DSTRIP="$ROUT"
-            if echo "$DSTRIP" | grep -q 'instructions'; then
+            DSTRIP_ERR="$RERR"
+            if echo "$DSTRIP_ERR" | grep -q 'instructions'; then
                 pass "sym: offline decode of stripped trace"
             else
                 fail "sym: offline decode of stripped trace"
             fi
 
             # Should not crash or produce nomap for segments that were loaded
-            NOMAP_COUNT=$(echo "$DSTRIP" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+            NOMAP_COUNT=$(echo "$DSTRIP_ERR" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
             NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
             if [ "${NOMAP_N:-999}" -eq 0 ]; then
                 pass "sym: offline stripped zero nomap"
@@ -1195,7 +1208,8 @@ PY
         # Full decode with .meta
         run_bsdtrace decode -m "$META_FILE" "$PT_FILE"
         DOUT="$ROUT"
-        if echo "$DOUT" | grep -q 'instructions'; then
+        DERR="$RERR"
+        if echo "$DERR" | grep -q 'instructions'; then
             pass "decode: offline re-decode"
         else
             fail "decode: offline re-decode"
@@ -1250,15 +1264,16 @@ PY
             fail "decode: exact symbolification main call"
         fi
 
-        # Explicit -m meta path
+        # Explicit -m meta path — check both stderr summary and stdout decode
         run_bsdtrace decode -m "$META_FILE" "$PT_FILE"
-        if echo "$ROUT" | grep -q 'instructions\|CALL'; then
+        if echo "$RERR" | grep -q 'instructions' &&
+            echo "$ROUT" | grep -Eq 'CALL|RETURN'; then
             pass "decode: explicit -m meta path"
         else
             fail "decode: explicit -m meta path"
         fi
 
-        NOMAP_COUNT=$(echo "$ROUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_COUNT=$(echo "$RERR" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
         NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
         ERR_N=$(echo "$NOMAP_COUNT" | awk '{print $2}')
         if [ "${NOMAP_N:-999}" -eq 0 ] && [ "${ERR_N:-999}" -le 2 ]; then
@@ -1266,12 +1281,13 @@ PY
         else
             fail "decode: no nomap or decode errors"
             echo "    nomap=$NOMAP_N errors=$ERR_N"
-            echo "$ROUT" | grep -E 'nomap|error:|sync failed' | head -5
+            echo "$RERR" | grep -E 'nomap|error:|sync failed' | head -5
         fi
 
-        # Implicit sidecar discovery
+        # Implicit sidecar discovery — check both stderr and stdout
         run_bsdtrace decode "$PT_FILE"
-        if echo "$ROUT" | grep -q 'instructions\|CALL'; then
+        if echo "$RERR" | grep -q 'instructions' &&
+            echo "$ROUT" | grep -Eq 'CALL|RETURN'; then
             pass "decode: implicit .meta discovery"
         else
             fail "decode: implicit .meta discovery"
@@ -1279,8 +1295,8 @@ PY
 
         # Consistency: offline decode should produce same instruction count
         # as the live exec trace (both use the same .pt + .meta data).
-        LIVE_INSN=$(echo "$EOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
-        OFFLINE_INSN=$(echo "$DOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        LIVE_INSN=$(echo "$EERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        OFFLINE_INSN=$(echo "$DERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
         if [ -n "$LIVE_INSN" ] && [ -n "$OFFLINE_INSN" ] &&
             [ "$LIVE_INSN" -eq "$OFFLINE_INSN" ]; then
             pass "decode: instruction count matches live trace ($LIVE_INSN)"
@@ -1296,6 +1312,27 @@ PY
         skip "decode: implicit .meta discovery"
     fi
 
+    # Negative test: random data should produce zero valid instructions
+    GARBAGE_PT="$TMPDIR/garbage.pt"
+    dd if=/dev/urandom of="$GARBAGE_PT" bs=4096 count=1 2>/dev/null
+    run_bsdtrace decode "$GARBAGE_PT"
+    GARBAGE_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+    if [ "${GARBAGE_INSN:-0}" -eq 0 ]; then
+        pass "decode: random data yields zero instructions"
+    else
+        fail "decode: random data yields zero instructions (got $GARBAGE_INSN)"
+    fi
+
+    # Negative test: truncated PT file (1 byte) should not crash
+    TRUNC_PT="$TMPDIR/trunc.pt"
+    printf '\x55' > "$TRUNC_PT"
+    run_bsdtrace decode "$TRUNC_PT"
+    if [ "$RRC" -le 1 ]; then
+        pass "decode: truncated file does not crash"
+    else
+        fail "decode: truncated file does not crash (exit=$RRC)"
+    fi
+
     settle_hwt
 
 
@@ -1308,6 +1345,7 @@ PY
         TRACE_META="$TMPDIR/trace-attach.meta"
         run_bsdtrace trace -d 3 -o "$PT_TRACE" "$STARTED_PID"
         TOUT="$ROUT"
+        TERR="$RERR"
         stop_trace_target
 
         if [ "$RRC" -eq 0 ]; then
@@ -1336,7 +1374,7 @@ PY
 
         # Trace should have substantial instruction count (attachprog runs
         # continuously — 3 seconds of tracing should yield >10K instructions)
-        TRACE_INSN=$(echo "$TOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        TRACE_INSN=$(echo "$TERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
         if [ -n "$TRACE_INSN" ] && [ "$TRACE_INSN" -gt 10000 ]; then
             pass "trace: instruction count ($TRACE_INSN > 10K)"
         else
@@ -1355,13 +1393,13 @@ PY
         # Offline re-decode of trace should work
         if [ -f "$PT_TRACE" ] && [ -f "$TRACE_META" ]; then
             run_bsdtrace decode -m "$TRACE_META" "$PT_TRACE"
-            if echo "$ROUT" | grep -q 'instructions'; then
+            if echo "$RERR" | grep -q 'instructions'; then
                 pass "trace: offline re-decode"
             else
                 fail "trace: offline re-decode"
             fi
 
-            # Offline decode should find the same functions
+            # Offline decode should find the same functions (stdout)
             if echo "$ROUT" | grep -Eq 'attach_loop|attach_branch'; then
                 pass "trace: offline has known functions"
             else
@@ -1388,11 +1426,17 @@ PY
             run_bsdtrace trace -n -s 8m -T 0 "$STARTED_PID"
         fi
         TOUT="$ROUT"
+        TERR="$RERR"
         stop_trace_target
 
-        if [ "$RRC" -eq 0 ] && echo "$TOUT" | grep -qi 'dry-run'; then
+        if [ "$RRC" -eq 0 ] && echo "$TERR" | grep -qi 'dry-run'; then
             pass "trace: dry run"
-            pass "trace: -s 8m"
+            # Verify bufsize in dry-run output
+            if echo "$TERR" | grep -q 'bufsize=8388608'; then
+                pass "trace: -s 8m"
+            else
+                fail "trace: -s 8m"
+            fi
             pass "trace: -T 0"
             if [ -n "$BACKEND" ]; then
                 pass "trace: -b backend"
@@ -1480,9 +1524,10 @@ PY
         PT_TRACE_MAX="$TMPDIR/trace-max.pt"
         run_bsdtrace trace -m 10 -o "$PT_TRACE_MAX" "$STARTED_PID"
         TOUT="$ROUT"
+        TERR="$RERR"
         stop_trace_target
 
-        if [ "$RRC" -eq 0 ] && echo "$TOUT" | grep -q 'max-records:'; then
+        if [ "$RRC" -eq 0 ] && echo "$TERR" | grep -q 'max-records:'; then
             pass "trace: -m max-records"
         else
             fail "trace: -m max-records"
@@ -1500,6 +1545,7 @@ PY
             PT_TRACE_RANGE="$TMPDIR/trace-range.pt"
             run_bsdtrace trace -p -r "$ATTACHPROG_RANGE" -d 3 -o "$PT_TRACE_RANGE" "$STARTED_PID"
             TOUT="$ROUT"
+            TERR="$RERR"
             stop_trace_target
 
             TRACE_LINES=$(echo "$TOUT" |

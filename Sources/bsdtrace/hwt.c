@@ -321,26 +321,15 @@ hwt_ctx_start(struct hwt_ctx *ctx)
 int
 hwt_ctx_stop(struct hwt_ctx *ctx)
 {
+	struct hwt_stop hs;
 
-	/*
-	 * Do NOT issue HWT_IOC_STOP.
-	 *
-	 * The PT backend in the kernel does not implement the
-	 * hwt_backend_stop() op — the function pointer is NULL.
-	 * Calling HWT_IOC_STOP triggers hwt_backend_stop() which
-	 * dereferences the NULL pointer and panics the kernel.
-	 *
-	 * Workaround: close the context fd instead.  The kernel's
-	 * context teardown path calls hwt_backend_deinit(), which
-	 * the PT backend *does* implement (pt_backend_deinit stops
-	 * tracing on all active CPUs and frees ToPA metadata).
-	 *
-	 * Closing ctx_fd here also prevents the subsequent
-	 * hwt_ctx_close() from double-closing the fd.
-	 */
-	if (ctx->ctx_fd >= 0) {
-		close(ctx->ctx_fd);
-		ctx->ctx_fd = -1;
+	if (ctx->ctx_fd < 0)
+		return (0);
+
+	memset(&hs, 0, sizeof(hs));
+	if (ioctl(ctx->ctx_fd, HWT_IOC_STOP, &hs) != 0) {
+		warn("HWT_IOC_STOP");
+		return (-1);
 	}
 	return (0);
 }
@@ -358,17 +347,6 @@ hwt_ctx_poll_records(struct hwt_ctx *ctx,
 	struct hwt_record_get rg;
 	int nentries;
 	int i;
-
-	/*
-	 * hwt_ctx_stop() closes ctx_fd to avoid the PT backend's
-	 * broken HWT_IOC_STOP path. Treat post-stop polling as an
-	 * empty drain rather than surfacing EBADF to the caller.
-	 */
-	if (ctx->ctx_fd < 0) {
-		if (nout != NULL)
-			*nout = 0;
-		return (0);
-	}
 
 	/*
 	 * The kernel limits nentries to 1024 (hwt_record.c:258).
@@ -489,6 +467,35 @@ hwt_ctx_map_buffer(struct hwt_ctx *ctx)
 	}
 	ctx->trace_buf = ptr;
 	return (ptr);
+}
+
+/*
+ * Query the kernel for the authoritative buffer write position.
+ * This reads the value that pt_cpu_stop() saved from the hardware
+ * MSR after tracing stopped — it's exact, unlike BUFFER records
+ * which are delivered asynchronously and may not arrive at all.
+ */
+int
+hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
+    vm_offset_t *offset_out)
+{
+	struct hwt_bufptr_get bg;
+	int ident;
+	vm_offset_t offset;
+
+	memset(&bg, 0, sizeof(bg));
+	bg.ident = &ident;
+	bg.offset = &offset;
+	bg.data = NULL;
+
+	if (ioctl(ctx->ctx_fd, HWT_IOC_BUFPTR_GET, &bg) != 0) {
+		warn("HWT_IOC_BUFPTR_GET");
+		return (-1);
+	}
+
+	*page_out = ident;
+	*offset_out = offset;
+	return (0);
 }
 
 /* ------------------------------------------------------------------ */

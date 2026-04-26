@@ -1,0 +1,91 @@
+Fix pt_update_buffer to read XSAVE area, and harden PMI handler.
+
+Three issues fixed:
+
+1. pt_update_buffer reads MSR after XSAVES has modified it.
+   After XSAVES, the hardware sets OUTPUT_MASK_PTRS.MaskOrTableOffset
+   to 0x7f, destroying the ToPA page index.  rdmsr then returns a
+   value where the page is always 0, limiting captured data to at
+   most one page (~4KB).  Fix: read rtit_output_mask_ptrs from the
+   XSAVE save area where the correct pre-modification value lives.
+   Affects both pt_cpu_stop and the PMI handler.
+
+2. PMI handler KASSERTs on cpu->ctx being non-NULL (line 822-825).
+   Same teardown race as pt_cpu_start and pt_send_buffer_record:
+   if context teardown sets cpu->ctx = NULL while a PMI is queued,
+   this panics in debug kernels and dereferences NULL in release.
+   Fix: runtime NULL check with early return, clearing
+   in_pcint_handler before returning.
+
+3. PMI handler KASSERTs on buf->topa_hw being non-NULL (line 827-829).
+   If pt_deinit_ctx frees topa_hw and zeroes the struct while a PMI
+   is in flight, this accesses freed memory.  Fix: runtime NULL check.
+
+Apply from /usr/src (on top of existing patches):
+  patch -p1 < /path/to/pt-update-buffer-fix.patch
+
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -186,16 +186,20 @@
+ /*
+  * Updates current trace buffer offset from the
+- * ToPA MSRs. Records if the trace buffer wrapped.
++ * XSAVE area after XSAVES has stopped tracing.
++ * Must be called AFTER pt_cpu_toggle_local(false).
++ *
++ * Reading the MSR directly is incorrect because XSAVES modifies
++ * OUTPUT_MASK_PTRS (sets MaskOrTableOffset to max), destroying
++ * the page index.  The save area has the correct value.
+  */
+ static __inline void
+-pt_update_buffer(struct pt_buffer *buf)
++pt_update_buffer(struct pt_ctx *ctx)
+ {
+-	uint64_t reg;
++	struct pt_ext_area *pt_ext;
+ 	uint64_t offset;
+
+-	/* Update buffer offset. */
+-	reg = rdmsr(MSR_IA32_RTIT_OUTPUT_MASK_PTRS);
+-	offset = ((reg & PT_TOPA_PAGE_MASK) >> PT_TOPA_PAGE_SHIFT) * PAGE_SIZE;
+-	offset += (reg >> 32);
++	pt_ext = pt_ctx_get_ext_area(ctx);
++	offset = ((pt_ext->rtit_output_mask_ptrs & PT_TOPA_PAGE_MASK) >> PT_TOPA_PAGE_SHIFT) * PAGE_SIZE;
++	offset += (pt_ext->rtit_output_mask_ptrs >> 32);
+
+-	atomic_store_rel_64(&buf->offset, offset);
++	atomic_store_rel_64(&ctx->buf.offset, offset);
+ }
+
+@@ -290,7 +294,7 @@
+ 	}
+ 	pt_cpu_toggle_local(cpu->ctx->save_area, false);
+-	pt_update_buffer(&ctx->buf);
++	pt_update_buffer(ctx);
+ }
+
+@@ -820,14 +824,20 @@
+ 	atomic_set_int(&cpu->in_pcint_handler, 1);
+
+ 	ctx = cpu->ctx;
+-	KASSERT(ctx != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt without an active context",
+-		__func__, curcpu));
++	if (ctx == NULL) {
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	buf = &ctx->buf;
+-	KASSERT(buf->topa_hw != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt with invalid buffer", __func__,
+-		curcpu));
++	if (buf->topa_hw == NULL) {
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	pt_cpu_toggle_local(ctx->save_area, false);
+-	pt_update_buffer(buf);
++	pt_update_buffer(ctx);
+ 	pt_topa_status_clear();
+
+ 	if (pt_cpu_get_state(curcpu) == PT_ACTIVE) {

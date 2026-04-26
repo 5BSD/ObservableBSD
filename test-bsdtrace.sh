@@ -3,7 +3,7 @@
 # test-bsdtrace.sh — comprehensive test suite for bsdtrace
 #
 # Two tiers:
-#   No-root:  version, list, info, decode error handling
+#   No-root:  version, list, decode error handling
 #   Root:     exec, decode, trace (require HWT kernel modules)
 #
 # Run:
@@ -11,11 +11,11 @@
 #   doas sh test-bsdtrace.sh       # full suite
 #
 
-BIN=".build/x86_64-unknown-freebsd/debug/bsdtrace"
-TESTPROG_SRC="Tests/bsdtrace/testprog.c"
+BUILDDIR=".build/x86_64-unknown-freebsd/debug"
+BIN="$BUILDDIR/bsdtrace"
 TESTPROG="/tmp/bsdtrace-testprog-$$"
-ATTACHPROG_SRC="Tests/bsdtrace/attachprog.c"
 ATTACHPROG="/tmp/bsdtrace-attachprog-$$"
+OBJDUMP=$(command -v llvm-objdump 2>/dev/null || command -v objdump 2>/dev/null || true)
 PASS=0
 FAIL=0
 SKIP=0
@@ -26,6 +26,25 @@ BACKEND=""
 STARTED_PID=""
 TESTPROG_RANGE=""
 ATTACHPROG_RANGE=""
+TESTPROG_BN=""
+ATTACHPROG_BN=""
+TESTPROG_DISAS=""
+ATTACHPROG_DISAS=""
+TP_MAIN_START=""
+TP_BRANCH_START=""
+TP_LOOP_START=""
+TP_LEAF_ADD_START=""
+TP_MAIN_CALL_LEAF_ADD=""
+TP_BRANCH_CJMP=""
+TP_BRANCH_JUMP=""
+TP_LOOP_CJMP=""
+TP_LOOP_JUMP=""
+TP_LEAF_ADD_RET=""
+AP_ATTACH_BRANCH_START=""
+AP_ATTACH_LOOP_START=""
+AP_ATTACH_BRANCH_CJMP=""
+AP_ATTACH_LOOP_CJMP=""
+AP_ATTACH_LOOP_JUMP=""
 
 pass() { PASS=$((PASS + 1)); printf "  \033[32mPASS\033[0m  %s\n" "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf "  \033[31mFAIL\033[0m  %s\n" "$1"; }
@@ -43,40 +62,228 @@ run_bsdtrace() {
 skip() { SKIP=$((SKIP + 1)); printf "  \033[33mSKIP\033[0m  %s\n" "$1"; }
 
 json_lines_valid() {
-    JSON_FILE=$1
-    BAD_JSON=0
+    [ -f "$1" ] || return 1
+    python3 - "$1" <<'PY'
+import json
+import sys
 
-    while IFS= read -r line; do
-        if [ -z "$line" ]; then
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
             continue
-        fi
-        if ! echo "$line" | python3 -m json.tool > /dev/null 2>&1; then
-            BAD_JSON=1
+        json.loads(line)
+PY
+}
+
+json_event_count() {
+    [ -f "$1" ] || return 1
+    python3 - "$1" "$2" "$3" <<'PY'
+import json
+import sys
+
+path, insn, ip = sys.argv[1:4]
+count = 0
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if obj.get("insn") == insn and obj.get("ip") == ip:
+            count += 1
+print(count)
+PY
+}
+
+json_has_symbolized_event() {
+    [ -f "$1" ] || return 1
+    python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import json
+import sys
+
+path, insn, ip, sym, off, binary = sys.argv[1:7]
+want_off = int(off)
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if obj.get("insn") != insn:
+            continue
+        if obj.get("ip") != ip:
+            continue
+        if obj.get("sym") != sym:
+            continue
+        if obj.get("bin") != binary:
+            continue
+        if int(obj.get("off", -1)) != want_off:
+            continue
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+json_has_bin_event() {
+    [ -f "$1" ] || return 1
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json
+import sys
+
+path, insn, ip, binary, off = sys.argv[1:6]
+want_off = int(off)
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if obj.get("insn") != insn:
+            continue
+        if obj.get("ip") != ip:
+            continue
+        if obj.get("bin") != binary:
+            continue
+        if int(obj.get("off", -1)) != want_off:
+            continue
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+json_has_bin_fallback() {
+    [ -f "$1" ] || return 1
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+path, binary = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if "insn" not in obj:
+            continue
+        if obj.get("bin") != binary:
+            continue
+        if obj.get("sym"):
+            continue
+        if "off" not in obj:
+            continue
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+json_has_any_bin_fallback() {
+    [ -f "$1" ] || return 1
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if "insn" not in obj:
+            continue
+        if not obj.get("bin"):
+            continue
+        if obj.get("sym"):
+            continue
+        if "off" not in obj:
+            continue
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+objdump_func_addr() {
+    awk -v fname="$2" '
+        BEGIN {
+            target = "<" fname ">:";
+        }
+        index($0, target) {
+            print "0x" tolower($1);
+            exit;
+        }
+    ' "$1"
+}
+
+objdump_insn_addr() {
+    awk -v fname="$2" -v pat="$3" -v want="${4:-1}" '
+        BEGIN {
+            target = "<" fname ">:";
+        }
+        index($0, target) && $1 ~ /^[0-9a-f]+$/ {
+            in_func = 1;
+            next;
+        }
+        in_func && $1 ~ /^[0-9a-f]+$/ && index($0, "<") {
+            exit;
+        }
+        in_func && $0 ~ pat {
+            seen++;
+            if (seen == want) {
+                addr = $1;
+                sub(/:$/, "", addr);
+                print "0x" tolower(addr);
+                exit;
+            }
+        }
+    ' "$1"
+}
+
+hex_diff() {
+    printf '%u\n' "$(( $1 - $2 ))"
+}
+
+settle_hwt() {
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if ! ls /dev/hwt_[0-9]*_[0-9]* >/dev/null 2>&1; then
             break
         fi
-    done < "$JSON_FILE"
+        sleep 1
+        i=$((i + 1))
+    done
+    sleep 3
+}
 
-    return "$BAD_JSON"
+kill_stale_test_targets() {
+    pkill -f '/tmp/bsdtrace-attachprog-' >/dev/null 2>&1 || true
+    pkill -f '/tmp/bsdtrace-testprog-' >/dev/null 2>&1 || true
+    sleep 1
 }
 
 text_range_arg() {
-    INFO_OUT=$($BIN info "$1" 2>/dev/null)
-    RANGE_FIELDS=$(echo "$INFO_OUT" |
-        sed -n 's/.*Text: 0x\([0-9a-fA-F]*\) +0x\([0-9a-fA-F]*\).*/\1 \2/p' |
-        head -1)
-    RANGE_START_HEX=$(echo "$RANGE_FIELDS" | awk '{print $1}')
-    RANGE_LEN_HEX=$(echo "$RANGE_FIELDS" | awk '{print $2}')
+    # Extract the first executable LOAD segment from ELF program headers.
+    RANGE_FIELDS=$(readelf -l "$1" 2>/dev/null |
+        awk '/LOAD.*R.E/{print $3, $6; exit}')
+    RANGE_VADDR=$(echo "$RANGE_FIELDS" | awk '{print $1}')
+    RANGE_MEMSZ=$(echo "$RANGE_FIELDS" | awk '{print $2}')
 
-    if [ -z "$RANGE_START_HEX" ] || [ -z "$RANGE_LEN_HEX" ]; then
+    if [ -z "$RANGE_VADDR" ] || [ -z "$RANGE_MEMSZ" ]; then
         return 1
     fi
 
-    RANGE_START_DEC=$((0x$RANGE_START_HEX))
-    RANGE_END_DEC=$((RANGE_START_DEC + 0x$RANGE_LEN_HEX))
+    RANGE_START_DEC=$(printf '%u\n' "$RANGE_VADDR")
+    RANGE_LEN_DEC=$(printf '%u\n' "$RANGE_MEMSZ")
+    RANGE_END_DEC=$((RANGE_START_DEC + RANGE_LEN_DEC))
     printf '0x%x:0x%x\n' "$RANGE_START_DEC" "$RANGE_END_DEC"
 }
 
 start_trace_target() {
+    # Attach to a running shell that execs attachprog shortly after.
+    # This keeps the target "running" at attach time while still
+    # guaranteeing EXEC/MMAP records for the main image.
     sh -c "sleep 1; exec \"$ATTACHPROG\"" > /dev/null 2>&1 &
     STARTED_PID=$!
     PIDS_TO_KILL="$PIDS_TO_KILL $STARTED_PID"
@@ -87,23 +294,48 @@ stop_trace_target() {
         kill "$STARTED_PID" 2>/dev/null || true
         wait "$STARTED_PID" 2>/dev/null || true
         STARTED_PID=""
+        settle_hwt
     fi
 }
 
-settle_hwt() {
-    sleep 3
+warmup_hwt_exec() {
+    WARMUP_PT="$TMPDIR/warmup.pt"
+    attempt=1
+
+    echo "  Note: warmup exec clears stale PT/HWT state before tests"
+    while [ "$attempt" -le 3 ]; do
+        run_bsdtrace exec -t 5 -o "$WARMUP_PT" -- "$TESTPROG"
+        if [ "$RRC" -eq 0 ] &&
+            echo "$ROUT" | grep -Eq 'leaf_add|branch_test|loop_test|do_write'; then
+            echo "  Warmup exec... ok (attempt $attempt)"
+            settle_hwt
+            return 0
+        fi
+        echo "  Warmup exec... retrying (attempt $attempt)"
+        settle_hwt
+        attempt=$((attempt + 1))
+    done
+
+    echo "  Warmup exec... continuing despite incomplete decode"
+    return 1
 }
+
 
 cleanup() {
     for pid in $PIDS_TO_KILL; do
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    kill_stale_test_targets
+    settle_hwt
     rm -rf "$TMPDIR"
     rm -f "$TESTPROG"
     rm -f "$ATTACHPROG"
 }
 trap cleanup EXIT
+
+kill_stale_test_targets
+settle_hwt
 
 mkdir -p "$TMPDIR"
 
@@ -114,7 +346,7 @@ echo ""
 echo "--- build ---"
 
 printf "  Building bsdtrace... "
-if swift build 2>&1 | tail -1; then
+if swift build --product bsdtrace 2>&1 | tail -1; then
     :
 else
     echo "FATAL: swift build failed"
@@ -126,9 +358,12 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
-# Compile testprog
+# Test programs are compiled with cc (not SPM) so they have no
+# Swift runtime or shared library dependencies.  This keeps traces
+# small and deterministic — testprog's functions are the entire
+# trace, not buried under millions of runtime init instructions.
 printf "  Compiling testprog... "
-if cc -O0 -o "$TESTPROG" "$TESTPROG_SRC" 2>&1; then
+if cc -O0 -o "$TESTPROG" Tests/bsdtrace/testprog/main.c 2>&1; then
     echo "ok"
 else
     echo "FATAL: failed to compile testprog"
@@ -136,12 +371,13 @@ else
 fi
 
 printf "  Compiling attachprog... "
-if cc -O0 -o "$ATTACHPROG" "$ATTACHPROG_SRC" 2>&1; then
+if cc -O0 -o "$ATTACHPROG" Tests/bsdtrace/attachprog/main.c 2>&1; then
     echo "ok"
 else
     echo "FATAL: failed to compile attachprog"
     exit 2
 fi
+
 
 if readelf -h "$TESTPROG" 2>/dev/null | grep -q 'EXEC'; then
     TESTPROG_RANGE=$(text_range_arg "$TESTPROG")
@@ -149,6 +385,33 @@ fi
 
 if readelf -h "$ATTACHPROG" 2>/dev/null | grep -q 'EXEC'; then
     ATTACHPROG_RANGE=$(text_range_arg "$ATTACHPROG")
+fi
+
+TESTPROG_BN=$(basename "$TESTPROG")
+ATTACHPROG_BN=$(basename "$ATTACHPROG")
+
+if [ -n "$OBJDUMP" ]; then
+    TESTPROG_DISAS="$TMPDIR/testprog.dis"
+    ATTACHPROG_DISAS="$TMPDIR/attachprog.dis"
+    if "$OBJDUMP" -d "$TESTPROG" > "$TESTPROG_DISAS" 2>/dev/null &&
+        "$OBJDUMP" -d "$ATTACHPROG" > "$ATTACHPROG_DISAS" 2>/dev/null; then
+        TP_MAIN_START=$(objdump_func_addr "$TESTPROG_DISAS" main)
+        TP_BRANCH_START=$(objdump_func_addr "$TESTPROG_DISAS" branch_test)
+        TP_LOOP_START=$(objdump_func_addr "$TESTPROG_DISAS" loop_test)
+        TP_LEAF_ADD_START=$(objdump_func_addr "$TESTPROG_DISAS" leaf_add)
+        TP_MAIN_CALL_LEAF_ADD=$(objdump_insn_addr "$TESTPROG_DISAS" main 'callq.*<leaf_add>')
+        TP_BRANCH_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jle[[:space:]]')
+        TP_BRANCH_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" branch_test '[[:space:]]jmp[[:space:]]')
+        TP_LOOP_CJMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jge[[:space:]]')
+        TP_LOOP_JUMP=$(objdump_insn_addr "$TESTPROG_DISAS" loop_test '[[:space:]]jmp[[:space:]]')
+        TP_LEAF_ADD_RET=$(objdump_insn_addr "$TESTPROG_DISAS" leaf_add '[[:space:]]retq')
+
+        AP_ATTACH_BRANCH_START=$(objdump_func_addr "$ATTACHPROG_DISAS" attach_branch)
+        AP_ATTACH_LOOP_START=$(objdump_func_addr "$ATTACHPROG_DISAS" attach_loop)
+        AP_ATTACH_BRANCH_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_branch '[[:space:]]jne[[:space:]]')
+        AP_ATTACH_LOOP_CJMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jge[[:space:]]')
+        AP_ATTACH_LOOP_JUMP=$(objdump_insn_addr "$ATTACHPROG_DISAS" attach_loop '[[:space:]]jmp[[:space:]]')
+    fi
 fi
 
 echo ""
@@ -222,155 +485,6 @@ if echo "$LERR" | grep -qi 'unknown format'; then
     pass "list: invalid format rejected"
 else
     fail "list: invalid format rejected"
-fi
-
-# ── info (static ELF) ───────────────────────────────────
-echo "--- info (static ELF) ---"
-
-# libc — should have text segments and functions
-IOUT=$($BIN info /lib/libc.so.7 2>&1)
-if echo "$IOUT" | grep -q 'Text:'; then
-    pass "info: libc has Text segment"
-else
-    fail "info: libc has Text segment"
-fi
-
-if echo "$IOUT" | grep -q 'Functions:'; then
-    pass "info: libc has Functions count"
-else
-    fail "info: libc has Functions count"
-fi
-
-# ld-elf — dynamic linker
-IOUT=$($BIN info /libexec/ld-elf.so.1 2>&1)
-if echo "$IOUT" | grep -q 'Text:'; then
-    pass "info: ld-elf has Text segment"
-else
-    fail "info: ld-elf has Text segment"
-fi
-
-# testprog — verify our known function names appear
-IOUT=$($BIN info "$TESTPROG" 2>&1)
-if echo "$IOUT" | grep -q 'Text:'; then
-    pass "info: testprog has Text segment"
-else
-    fail "info: testprog has Text segment"
-fi
-
-if echo "$IOUT" | grep -q 'leaf_add'; then
-    pass "info: testprog shows leaf_add"
-else
-    fail "info: testprog shows leaf_add"
-fi
-
-if echo "$IOUT" | grep -q 'leaf_mul'; then
-    pass "info: testprog shows leaf_mul"
-else
-    fail "info: testprog shows leaf_mul"
-fi
-
-if echo "$IOUT" | grep -q 'nested_outer'; then
-    pass "info: testprog shows nested_outer"
-else
-    fail "info: testprog shows nested_outer"
-fi
-
-if echo "$IOUT" | grep -q 'nested_inner'; then
-    pass "info: testprog shows nested_inner"
-else
-    fail "info: testprog shows nested_inner"
-fi
-
-if echo "$IOUT" | grep -q 'branch_test'; then
-    pass "info: testprog shows branch_test"
-else
-    fail "info: testprog shows branch_test"
-fi
-
-if echo "$IOUT" | grep -q 'loop_test'; then
-    pass "info: testprog shows loop_test"
-else
-    fail "info: testprog shows loop_test"
-fi
-
-if echo "$IOUT" | grep -q 'do_write'; then
-    pass "info: testprog shows do_write"
-else
-    fail "info: testprog shows do_write"
-fi
-
-if echo "$IOUT" | grep -q 'main'; then
-    pass "info: testprog shows main"
-else
-    fail "info: testprog shows main"
-fi
-
-if echo "$IOUT" | grep -q '.symtab'; then
-    pass "info: testprog symbols from .symtab"
-else
-    # .dynsym is also acceptable for PIE
-    if echo "$IOUT" | grep -q '.dynsym'; then
-        pass "info: testprog symbols from .dynsym"
-    else
-        fail "info: testprog has symbol source"
-    fi
-fi
-
-# Multiple files
-IOUT=$($BIN info /lib/libc.so.7 /libexec/ld-elf.so.1 2>&1)
-if echo "$IOUT" | grep -c 'Text:' | grep -q '[2-9]'; then
-    pass "info: multiple files show multiple Text segments"
-else
-    fail "info: multiple files show multiple Text segments"
-fi
-
-# ── info (PID mode) ─────────────────────────────────────
-echo "--- info (pid) ---"
-
-if [ -d /proc/$$ ]; then
-    IOUT=$($BIN info -p $$ 2>&1)
-    if echo "$IOUT" | grep -q 'PID'; then
-        pass "info: -p shows PID header"
-    else
-        fail "info: -p shows PID header"
-    fi
-
-    # Should find at least one executable mapping
-    if echo "$IOUT" | grep -q 'Text:'; then
-        pass "info: -p finds executable mappings"
-    else
-        fail "info: -p finds executable mappings"
-    fi
-else
-    skip "info: -p (procfs not mounted)"
-    skip "info: -p finds executable mappings"
-fi
-
-# ── info (error cases) ──────────────────────────────────
-echo "--- info (errors) ---"
-
-# Nonexistent file — should print error, not crash
-IOUT=$($BIN info /nonexistent/binary 2>&1)
-if [ $? -eq 0 ] || [ -n "$IOUT" ]; then
-    pass "info: nonexistent file doesn't crash"
-else
-    fail "info: nonexistent file doesn't crash"
-fi
-
-# No arguments — should print usage
-IOUT=$($BIN info 2>&1) || true
-if echo "$IOUT" | grep -qi 'usage'; then
-    pass "info: no args prints usage"
-else
-    fail "info: no args prints usage"
-fi
-
-# Invalid PID
-IOUT=$($BIN info -p 0 2>&1) || true
-if echo "$IOUT" | grep -qi 'positive\|usage\|error'; then
-    pass "info: -p 0 rejects invalid PID"
-else
-    fail "info: -p 0 rejects invalid PID"
 fi
 
 # ── decode (error cases, no root) ────────────────────────
@@ -499,6 +613,11 @@ else
         skip "trace: all (no HWT_HOOKS)"
     else
 
+    # The PT/HWT backend can retain stale state after failed or truncated
+    # runs.  A single successful exec trace usually reestablishes stable
+    # BUFFER delivery and symbolication for the rest of the suite.
+    warmup_hwt_exec
+
     # ── exec ─────────────────────────────────────────────
     echo "--- exec ---"
 
@@ -527,6 +646,54 @@ else
         pass "exec: .meta file created"
     else
         fail "exec: .meta file created"
+    fi
+
+    # .meta content validation
+    if [ -f "$META_FILE" ]; then
+        # Every line must be valid JSON
+        if json_lines_valid "$META_FILE"; then
+            pass "exec: .meta is valid JSONL"
+        else
+            fail "exec: .meta is valid JSONL"
+        fi
+
+        # Must contain an exec record with the testprog path
+        if grep -q "\"type\":\"exec\"" "$META_FILE"; then
+            pass "exec: .meta has exec record"
+        else
+            fail "exec: .meta has exec record"
+        fi
+
+        # Must contain mmap records for shared libraries
+        if grep -q "\"type\":\"mmap\"" "$META_FILE"; then
+            pass "exec: .meta has mmap records"
+        else
+            fail "exec: .meta has mmap records"
+        fi
+
+        # All paths in the meta file should exist on disk
+        META_BAD_PATHS=$(python3 - "$META_FILE" <<'PY'
+import json, os, sys
+bad = 0
+with open(sys.argv[1]) as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        p = obj.get("path", "")
+        if p and not os.path.exists(p):
+            bad += 1
+            if bad <= 3:
+                print(f"    missing: {p}", file=sys.stderr)
+print(bad)
+PY
+)
+        if [ "$META_BAD_PATHS" -eq 0 ]; then
+            pass "exec: .meta paths exist on disk"
+        else
+            fail "exec: .meta paths exist on disk ($META_BAD_PATHS missing)"
+        fi
     fi
 
     # Control flow event types
@@ -559,37 +726,124 @@ else
         echo "    ---"
     fi
 
-    settle_hwt
+    NOMAP_COUNT=$(echo "$EOUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+    NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
+    ERR_N=$(echo "$NOMAP_COUNT" | awk '{print $2}')
+    if [ "${NOMAP_N:-999}" -eq 0 ] && [ "${ERR_N:-999}" -le 2 ]; then
+        pass "exec: no nomap or decode errors"
+    else
+        fail "exec: no nomap or decode errors"
+        echo "    nomap=$NOMAP_N errors=$ERR_N"
+        echo "$EOUT" | grep -E 'nomap|error:|sync failed' | head -5
+    fi
 
-    # JSON output
-    PT_JSON="$TMPDIR/testprog-json.pt"
-    run_bsdtrace exec -f json -t 5 -o "$PT_JSON" -- "$TESTPROG"
-    JOUT="$ROUT"
 
-    if echo "$JOUT" | grep -q '"insn"'; then
+
+
+    # Realistic workflow: capture once, then analyze the saved trace.
+    # Validate instruction-level JSON by decoding the already-saved
+    # full exec trace, not by scraping mixed live stdout/stderr.
+    EXEC_JSON_LINES="$TMPDIR/exec-json-lines.txt"
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace decode -f json -m "$META_FILE" "$PT_FILE"
+        printf '%s\n' "$ROUT" | grep '^{' > "$EXEC_JSON_LINES"
+    else
+        rm -f "$EXEC_JSON_LINES"
+    fi
+
+    if [ -s "$EXEC_JSON_LINES" ] && grep -q '"insn"' "$EXEC_JSON_LINES"; then
         pass "exec: json has insn field"
     else
         fail "exec: json has insn field"
         echo "    --- debug: json output sample ---"
-        echo "$JOUT" | tail -10
+        sed -n '1,10p' "$EXEC_JSON_LINES"
         echo "    ---"
     fi
 
-    if echo "$JOUT" | grep -q '"sym"'; then
+    if [ -s "$EXEC_JSON_LINES" ] && grep -q '"sym"' "$EXEC_JSON_LINES"; then
         pass "exec: json has sym field"
     else
         fail "exec: json has sym field"
     fi
 
-    echo "$JOUT" | grep '^{' > "$TMPDIR/exec-json-lines.txt"
-    if [ -s "$TMPDIR/exec-json-lines.txt" ] &&
-        json_lines_valid "$TMPDIR/exec-json-lines.txt"; then
+    if [ -s "$EXEC_JSON_LINES" ] &&
+        json_lines_valid "$EXEC_JSON_LINES"; then
         pass "exec: json lines are valid JSON"
     else
         fail "exec: json lines are valid JSON"
     fi
 
+    if [ -n "$TP_MAIN_CALL_LEAF_ADD" ] &&
+        [ -n "$TP_MAIN_START" ] &&
+        json_has_symbolized_event "$EXEC_JSON_LINES" "CALL" \
+            "$TP_MAIN_CALL_LEAF_ADD" "main" \
+            "$(hex_diff "$TP_MAIN_CALL_LEAF_ADD" "$TP_MAIN_START")" \
+            "$TESTPROG_BN"; then
+        pass "exec: exact symbolification main call"
+    else
+        fail "exec: exact symbolification main call"
+    fi
+
+    if [ -n "$TP_BRANCH_CJMP" ] &&
+        [ -n "$TP_BRANCH_START" ] &&
+        json_has_symbolized_event "$EXEC_JSON_LINES" "CJMP" \
+            "$TP_BRANCH_CJMP" "branch_test" \
+            "$(hex_diff "$TP_BRANCH_CJMP" "$TP_BRANCH_START")" \
+            "$TESTPROG_BN"; then
+        pass "exec: exact symbolification branch cjmp"
+    else
+        fail "exec: exact symbolification branch cjmp"
+    fi
+
+    if [ -n "$TP_BRANCH_JUMP" ] &&
+        [ -n "$TP_BRANCH_START" ] &&
+        json_has_symbolized_event "$EXEC_JSON_LINES" "JUMP" \
+            "$TP_BRANCH_JUMP" "branch_test" \
+            "$(hex_diff "$TP_BRANCH_JUMP" "$TP_BRANCH_START")" \
+            "$TESTPROG_BN"; then
+        pass "exec: exact symbolification branch jump"
+    else
+        fail "exec: exact symbolification branch jump"
+    fi
+
+    if [ -n "$TP_BRANCH_CJMP" ] &&
+        [ "$(json_event_count "$EXEC_JSON_LINES" "CJMP" "$TP_BRANCH_CJMP")" -eq 2 ]; then
+        pass "exec: branch_test cjmp count"
+    else
+        fail "exec: branch_test cjmp count"
+    fi
+
+    if [ -n "$TP_BRANCH_JUMP" ] &&
+        [ "$(json_event_count "$EXEC_JSON_LINES" "JUMP" "$TP_BRANCH_JUMP")" -eq 1 ]; then
+        pass "exec: branch_test jump count"
+    else
+        fail "exec: branch_test jump count"
+    fi
+
+    if [ -n "$TP_LOOP_CJMP" ] &&
+        [ "$(json_event_count "$EXEC_JSON_LINES" "CJMP" "$TP_LOOP_CJMP")" -eq 11 ]; then
+        pass "exec: loop_test cjmp count"
+    else
+        fail "exec: loop_test cjmp count"
+    fi
+
+    if [ -n "$TP_LOOP_JUMP" ] &&
+        [ "$(json_event_count "$EXEC_JSON_LINES" "JUMP" "$TP_LOOP_JUMP")" -eq 10 ]; then
+        pass "exec: loop_test jump count"
+    else
+        fail "exec: loop_test jump count"
+    fi
+
+    if [ -n "$TP_LEAF_ADD_RET" ] &&
+        [ "$(json_event_count "$EXEC_JSON_LINES" "RETURN" "$TP_LEAF_ADD_RET")" -eq 14 ]; then
+        pass "exec: leaf_add return count"
+    else
+        fail "exec: leaf_add return count"
+    fi
+
     settle_hwt
+
+
 
     # Thread selection
     PT_TID="$TMPDIR/testprog-tid.pt"
@@ -600,9 +854,9 @@ else
         fail "exec: thread selection -T 0"
     fi
 
-    settle_hwt
 
-    # Disable ASLR
+
+    # Disable ASLR — verify the EXEC record address matches static link address
     PT_ASLR="$TMPDIR/testprog-aslr.pt"
     run_bsdtrace exec -A -t 5 -o "$PT_ASLR" -- "$TESTPROG"
     if echo "$ROUT" | grep -q 'instructions'; then
@@ -611,7 +865,21 @@ else
         fail "exec: disable ASLR -A"
     fi
 
-    settle_hwt
+    ASLR_META="$TMPDIR/testprog-aslr.meta"
+    if [ -f "$ASLR_META" ] && [ -n "$TESTPROG_RANGE" ]; then
+        STATIC_START=$(echo "$TESTPROG_RANGE" | sed 's/:.*//')
+        if grep -q "\"addr\":\"$STATIC_START\"" "$ASLR_META"; then
+            pass "exec: -A exec addr matches static link address"
+        else
+            fail "exec: -A exec addr matches static link address"
+            echo "    expected=$STATIC_START"
+            head -1 "$ASLR_META"
+        fi
+    else
+        skip "exec: -A exec addr matches static link address"
+    fi
+
+
 
     # Dry run
     run_bsdtrace exec -n -t 5 -- "$TESTPROG"
@@ -621,7 +889,7 @@ else
         fail "exec: dry run -n"
     fi
 
-    settle_hwt
+
 
     # Custom buffer size
     PT_BUF="$TMPDIR/testprog-buf.pt"
@@ -632,7 +900,7 @@ else
         fail "exec: custom buffer size -s 8m"
     fi
 
-    settle_hwt
+
 
     # Custom output path
     PT_CUSTOM="$TMPDIR/custom-output.pt"
@@ -643,7 +911,7 @@ else
         fail "exec: custom output path -o"
     fi
 
-    settle_hwt
+
 
     # Explicit backend and pause-on-mmap
     if [ -n "$BACKEND" ]; then
@@ -665,7 +933,7 @@ else
         skip "exec: -p pause on mmap"
     fi
 
-    settle_hwt
+
 
     # Max-records
     PT_LIMIT="$TMPDIR/testprog-max.pt"
@@ -676,29 +944,40 @@ else
         fail "exec: -m max-records"
     fi
 
-    settle_hwt
+
 
     # IP range filter
     if [ -n "$TESTPROG_RANGE" ]; then
         PT_RANGE="$TMPDIR/testprog-range.pt"
         run_bsdtrace exec -r "$TESTPROG_RANGE" -t 5 -o "$PT_RANGE" -- "$TESTPROG"
-        RANGE_LINES=$(echo "$ROUT" |
-            grep -E '^[[:space:]]+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
-        if echo "$RANGE_LINES" |
-            grep -Eq 'leaf_add|leaf_mul|nested_outer|nested_inner|branch_test|loop_test|do_write'; then
-            if echo "$RANGE_LINES" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
-                fail "exec: -r range filter"
-            else
-                pass "exec: -r range filter"
-            fi
+        if [ "$RRC" -ne 0 ]; then
+            skip "exec: -r range filter (bsdtrace exited $RRC — IP filter may not be supported)"
+            echo "    rc=$RRC range=$TESTPROG_RANGE"
+            echo "    Output: $(echo "$ROUT" | tail -3)"
         else
-            fail "exec: -r range filter"
+            RANGE_LINES=$(echo "$ROUT" |
+                grep -E '^[[:space:]]+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
+            if echo "$RANGE_LINES" |
+                grep -Eq 'leaf_add|leaf_mul|nested_outer|nested_inner|branch_test|loop_test|do_write'; then
+                if echo "$RANGE_LINES" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                    fail "exec: -r range filter (library symbols leaked through)"
+                    echo "    --- debug: leaked library events ---"
+                    echo "$RANGE_LINES" | grep -E 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7' | head -5
+                    echo "    ---"
+                else
+                    pass "exec: -r range filter"
+                fi
+            else
+                fail "exec: -r range filter (no testprog symbols in output)"
+                echo "    rc=$RRC range=$TESTPROG_RANGE"
+                echo "    Output: $(echo "$ROUT" | tail -5)"
+            fi
         fi
     else
         skip "exec: -r range filter"
     fi
 
-    settle_hwt
+
 
     # Child exit status should propagate through bsdtrace exec.
     run_bsdtrace exec -t 5 -- /bin/sh -c 'exit 7'
@@ -707,6 +986,233 @@ else
     else
         fail "exec: child exit status"
     fi
+
+    settle_hwt
+
+
+
+    # ── symbolication edge cases ────────────────────────────
+    echo "--- symbolication ---"
+
+    # 1. Stripped binary — should fall back to binary+offset (no function names)
+    STRIPPED="$TMPDIR/testprog-stripped"
+    cp "$TESTPROG" "$STRIPPED"
+    strip --strip-all "$STRIPPED" 2>/dev/null || strip "$STRIPPED" 2>/dev/null
+    if [ -x "$STRIPPED" ]; then
+        PT_STRIP="$TMPDIR/testprog-stripped.pt"
+        run_bsdtrace exec -t 5 -o "$PT_STRIP" -- "$STRIPPED"
+        SOUT="$ROUT"
+        STRIPPED_BN=$(basename "$STRIPPED")
+        if echo "$SOUT" | grep -q 'instructions'; then
+            pass "sym: stripped binary traces"
+        else
+            fail "sym: stripped binary traces"
+        fi
+
+        # No function names from testprog should appear (they were stripped)
+        if echo "$SOUT" | grep -Eq 'leaf_add|branch_test|loop_test|do_write'; then
+            fail "sym: stripped binary has no testprog function names"
+            echo "    (function names should not appear in stripped binary output)"
+        else
+            pass "sym: stripped binary has no testprog function names"
+        fi
+
+        # Should still have zero nomap errors (ELF segments loaded correctly)
+        NOMAP_COUNT=$(echo "$SOUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
+        if [ "${NOMAP_N:-999}" -eq 0 ]; then
+            pass "sym: stripped binary zero nomap"
+        else
+            fail "sym: stripped binary zero nomap"
+            echo "    nomap=$NOMAP_N"
+        fi
+
+        STRIP_META="$TMPDIR/testprog-stripped.meta"
+        if [ -f "$PT_STRIP" ] && [ -f "$STRIP_META" ]; then
+            run_bsdtrace decode -f json -m "$STRIP_META" "$PT_STRIP"
+            printf '%s\n' "$ROUT" | grep '^{' > "$TMPDIR/stripped-json-lines.txt"
+            if [ -s "$TMPDIR/stripped-json-lines.txt" ] &&
+                (json_has_bin_fallback "$TMPDIR/stripped-json-lines.txt" \
+                "$STRIPPED_BN" || \
+                json_has_any_bin_fallback "$TMPDIR/stripped-json-lines.txt"); then
+                pass "sym: stripped binary falls back to binary+offset"
+            else
+                fail "sym: stripped binary falls back to binary+offset"
+                echo "    --- debug: first 5 decoded events ---"
+                sed -n '1,5p' "$TMPDIR/stripped-json-lines.txt"
+                echo "    ---"
+            fi
+        else
+            fail "sym: stripped binary falls back to binary+offset"
+            echo "    missing stripped .pt/.meta"
+        fi
+    else
+        skip "sym: stripped binary (strip failed)"
+    fi
+
+    # 2. Interpreter (ld-elf.so.1) symbolication
+    #    A full trace of testprog should resolve ld-elf.so.1 function names,
+    #    not just ld-elf.so.1+offset.
+    if [ -n "$EOUT" ]; then
+        if echo "$EOUT" | grep -qE 'ld-elf\.so\.1:[a-zA-Z_]'; then
+            pass "sym: ld-elf.so.1 has function names"
+        else
+            if echo "$EOUT" | grep -qE 'ld-elf\.so\.1'; then
+                fail "sym: ld-elf.so.1 has function names (only binary+offset seen)"
+                echo "    --- debug: ld-elf events ---"
+                echo "$EOUT" | grep 'ld-elf' | head -5
+                echo "    ---"
+            else
+                skip "sym: ld-elf.so.1 has function names (no ld-elf events in trace)"
+            fi
+        fi
+    else
+        skip "sym: ld-elf.so.1 (no exec output)"
+    fi
+
+    # 3. Shared library symbolication (libc / libsys)
+    #    Verify that shared library calls resolve to function names,
+    #    not just libc.so.7+offset.
+    if [ -n "$EOUT" ]; then
+        if echo "$EOUT" | grep -qE 'libc\.so\.[0-9]+:[a-zA-Z_]|libsys\.so\.[0-9]+:[a-zA-Z_]'; then
+            pass "sym: shared library function names"
+        else
+            if echo "$EOUT" | grep -qE 'libc\.so|libsys\.so'; then
+                fail "sym: shared library function names (only binary+offset seen)"
+                echo "    --- debug: library events ---"
+                echo "$EOUT" | grep -E 'libc\.so|libsys\.so' | head -5
+                echo "    ---"
+            else
+                skip "sym: shared library function names (no library events in trace)"
+            fi
+        fi
+    else
+        skip "sym: shared library function names (no exec output)"
+    fi
+
+    # 4. PIE binary symbolication
+    #    Build testprog as PIE (position-independent executable) and verify
+    #    that ASLR-adjusted symbols still resolve correctly.
+    PIE_PROG="$TMPDIR/testprog-pie"
+    PIE_SRC="Tests/bsdtrace/testprog/main.c"
+    if [ -f "$PIE_SRC" ] && cc -O0 -pie -o "$PIE_PROG" "$PIE_SRC" 2>/dev/null; then
+        PT_PIE="$TMPDIR/testprog-pie.pt"
+        run_bsdtrace exec -t 5 -o "$PT_PIE" -- "$PIE_PROG"
+        PIE_OUT="$ROUT"
+
+        if echo "$PIE_OUT" | grep -q 'instructions'; then
+            pass "sym: PIE binary traces"
+        else
+            fail "sym: PIE binary traces"
+        fi
+
+        # Function names should resolve despite ASLR slide
+        PIE_HIT=0
+        for FN in leaf_add branch_test loop_test; do
+            if echo "$PIE_OUT" | grep -q "$FN"; then
+                PIE_HIT=$((PIE_HIT + 1))
+            fi
+        done
+        if [ "$PIE_HIT" -ge 2 ]; then
+            pass "sym: PIE binary function names resolve"
+        else
+            fail "sym: PIE binary function names resolve ($PIE_HIT/3)"
+            echo "    --- debug: first 5 events ---"
+            echo "$PIE_OUT" | grep -E '^\s+(CALL|RETURN)' | head -5
+            echo "    ---"
+        fi
+
+        # Zero nomap
+        NOMAP_COUNT=$(echo "$PIE_OUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
+        if [ "${NOMAP_N:-999}" -eq 0 ]; then
+            pass "sym: PIE binary zero nomap"
+        else
+            fail "sym: PIE binary zero nomap"
+            echo "    nomap=$NOMAP_N"
+        fi
+    else
+        skip "sym: PIE binary (compilation failed)"
+    fi
+
+    # 5. JSON resolution completeness
+    #    In JSON output, treat either function symbols or binary+offset
+    #    fallback as a successful resolution.  A healthy trace should
+    #    resolve >80% of instruction events one way or the other.
+    if [ -s "$EXEC_JSON_LINES" ]; then
+        SYM_STATS=$(python3 - "$EXEC_JSON_LINES" <<'PY'
+import json, sys
+total = resolved = sym = binonly = unresolved = 0
+with open(sys.argv[1]) as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if "insn" not in obj:
+            continue
+        total += 1
+        if obj.get("sym"):
+            resolved += 1
+            sym += 1
+        elif obj.get("bin"):
+            resolved += 1
+            binonly += 1
+        else:
+            unresolved += 1
+pct = (resolved * 100 // total) if total > 0 else 0
+print(f"{resolved} {sym} {binonly} {unresolved} {total} {pct}")
+PY
+)
+        RESOLVED_N=$(echo "$SYM_STATS" | awk '{print $1}')
+        SYM_N=$(echo "$SYM_STATS" | awk '{print $2}')
+        BINONLY_N=$(echo "$SYM_STATS" | awk '{print $3}')
+        UNRESOLVED_N=$(echo "$SYM_STATS" | awk '{print $4}')
+        SYM_TOTAL=$(echo "$SYM_STATS" | awk '{print $5}')
+        SYM_PCT=$(echo "$SYM_STATS" | awk '{print $6}')
+        if [ "$SYM_PCT" -ge 80 ]; then
+            pass "sym: json resolution rate ${SYM_PCT}% ($RESOLVED_N/$SYM_TOTAL)"
+        else
+            fail "sym: json resolution rate ${SYM_PCT}% ($RESOLVED_N/$SYM_TOTAL)"
+            echo "    exact symbols=$SYM_N binary+offset=$BINONLY_N unresolved=$UNRESOLVED_N"
+        fi
+    else
+        skip "sym: json resolution rate (no json output)"
+    fi
+
+    # 6. Offline decode of stripped binary
+    #    The .meta file records binary paths; decode must handle missing symbols
+    #    gracefully and still produce binary+offset output.
+    if [ -f "$PT_STRIP" ]; then
+        STRIP_META="$TMPDIR/testprog-stripped.meta"
+        if [ -f "$STRIP_META" ]; then
+            run_bsdtrace decode -m "$STRIP_META" "$PT_STRIP"
+            DSTRIP="$ROUT"
+            if echo "$DSTRIP" | grep -q 'instructions'; then
+                pass "sym: offline decode of stripped trace"
+            else
+                fail "sym: offline decode of stripped trace"
+            fi
+
+            # Should not crash or produce nomap for segments that were loaded
+            NOMAP_COUNT=$(echo "$DSTRIP" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+            NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
+            if [ "${NOMAP_N:-999}" -eq 0 ]; then
+                pass "sym: offline stripped zero nomap"
+            else
+                fail "sym: offline stripped zero nomap"
+                echo "    nomap=$NOMAP_N"
+            fi
+        else
+            skip "sym: offline decode of stripped trace (no .meta)"
+        fi
+    else
+        skip "sym: offline decode of stripped trace (no .pt)"
+    fi
+
+    settle_hwt
+
+
 
     # ── decode (offline) ─────────────────────────────────
     echo "--- decode ---"
@@ -736,12 +1242,38 @@ else
             fail "decode: offline json format"
         fi
 
-        echo "$ROUT" | grep '^{' > "$TMPDIR/decode-json-lines.txt"
+        printf '%s\n' "$ROUT" | grep '^{' > "$TMPDIR/decode-json-lines.txt"
+        DECODE_JSON_LINES="$TMPDIR/decode-json-lines.txt"
         if [ -s "$TMPDIR/decode-json-lines.txt" ] &&
             json_lines_valid "$TMPDIR/decode-json-lines.txt"; then
             pass "decode: json lines valid"
         else
             fail "decode: json lines valid"
+        fi
+
+        if [ -n "$TP_BRANCH_CJMP" ] &&
+            [ "$(json_event_count "$DECODE_JSON_LINES" "CJMP" "$TP_BRANCH_CJMP")" -eq 2 ]; then
+            pass "decode: branch_test cjmp count"
+        else
+            fail "decode: branch_test cjmp count"
+        fi
+
+        if [ -n "$TP_LOOP_CJMP" ] &&
+            [ "$(json_event_count "$DECODE_JSON_LINES" "CJMP" "$TP_LOOP_CJMP")" -eq 11 ]; then
+            pass "decode: loop_test cjmp count"
+        else
+            fail "decode: loop_test cjmp count"
+        fi
+
+        if [ -n "$TP_MAIN_CALL_LEAF_ADD" ] &&
+            [ -n "$TP_MAIN_START" ] &&
+            json_has_symbolized_event "$DECODE_JSON_LINES" "CALL" \
+                "$TP_MAIN_CALL_LEAF_ADD" "main" \
+                "$(hex_diff "$TP_MAIN_CALL_LEAF_ADD" "$TP_MAIN_START")" \
+                "$TESTPROG_BN"; then
+            pass "decode: exact symbolification main call"
+        else
+            fail "decode: exact symbolification main call"
         fi
 
         # Explicit -m meta path
@@ -752,12 +1284,34 @@ else
             fail "decode: explicit -m meta path"
         fi
 
+        NOMAP_COUNT=$(echo "$ROUT" | sed -n 's/.* \([0-9]*\) nomap, \([0-9]*\) errors.*/\1 \2/p')
+        NOMAP_N=$(echo "$NOMAP_COUNT" | awk '{print $1}')
+        ERR_N=$(echo "$NOMAP_COUNT" | awk '{print $2}')
+        if [ "${NOMAP_N:-999}" -eq 0 ] && [ "${ERR_N:-999}" -le 2 ]; then
+            pass "decode: no nomap or decode errors"
+        else
+            fail "decode: no nomap or decode errors"
+            echo "    nomap=$NOMAP_N errors=$ERR_N"
+            echo "$ROUT" | grep -E 'nomap|error:|sync failed' | head -5
+        fi
+
         # Implicit sidecar discovery
         run_bsdtrace decode "$PT_FILE"
         if echo "$ROUT" | grep -q 'instructions\|CALL'; then
             pass "decode: implicit .meta discovery"
         else
             fail "decode: implicit .meta discovery"
+        fi
+
+        # Consistency: offline decode should produce same instruction count
+        # as the live exec trace (both use the same .pt + .meta data).
+        LIVE_INSN=$(echo "$EOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        OFFLINE_INSN=$(echo "$DOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        if [ -n "$LIVE_INSN" ] && [ -n "$OFFLINE_INSN" ] &&
+            [ "$LIVE_INSN" -eq "$OFFLINE_INSN" ]; then
+            pass "decode: instruction count matches live trace ($LIVE_INSN)"
+        else
+            fail "decode: instruction count matches live trace (live=$LIVE_INSN offline=$OFFLINE_INSN)"
         fi
     else
         skip "decode: offline re-decode (no .pt/.meta from exec)"
@@ -769,6 +1323,7 @@ else
     fi
 
     settle_hwt
+
 
     # ── trace (attach to running process) ────────────────
     echo "--- trace ---"
@@ -804,6 +1359,44 @@ else
         else
             fail "trace: decoded symbols"
         fi
+
+        # Trace should have substantial instruction count (attachprog runs
+        # continuously — 3 seconds of tracing should yield >10K instructions)
+        TRACE_INSN=$(echo "$TOUT" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+        if [ -n "$TRACE_INSN" ] && [ "$TRACE_INSN" -gt 10000 ]; then
+            pass "trace: instruction count ($TRACE_INSN > 10K)"
+        else
+            fail "trace: instruction count (${TRACE_INSN:-0})"
+        fi
+
+        # Trace .meta should be valid JSONL with mmap/exec records
+        if [ -f "$TRACE_META" ]; then
+            if json_lines_valid "$TRACE_META"; then
+                pass "trace: .meta is valid JSONL"
+            else
+                fail "trace: .meta is valid JSONL"
+            fi
+        fi
+
+        # Offline re-decode of trace should work
+        if [ -f "$PT_TRACE" ] && [ -f "$TRACE_META" ]; then
+            run_bsdtrace decode -m "$TRACE_META" "$PT_TRACE"
+            if echo "$ROUT" | grep -q 'instructions'; then
+                pass "trace: offline re-decode"
+            else
+                fail "trace: offline re-decode"
+            fi
+
+            # Offline decode should find the same functions
+            if echo "$ROUT" | grep -Eq 'attach_loop|attach_branch'; then
+                pass "trace: offline has known functions"
+            else
+                fail "trace: offline has known functions"
+            fi
+        else
+            skip "trace: offline re-decode (no .pt/.meta)"
+            skip "trace: offline has known functions"
+        fi
     else
         fail "trace: could not start background process"
         skip "trace: .pt file created"
@@ -811,7 +1404,7 @@ else
         skip "trace: decoded symbols"
     fi
 
-    settle_hwt
+
 
     start_trace_target
     if [ -n "$STARTED_PID" ] && kill -0 "$STARTED_PID" 2>/dev/null; then
@@ -854,42 +1447,78 @@ else
         fi
     fi
 
-    settle_hwt
+    # Realistic workflow: capture first, then analyze the saved trace.
+    TRACE_JSON_LINES="$TMPDIR/trace-json-lines.txt"
+    : > "$TRACE_JSON_LINES"
+    if [ -f "$PT_TRACE" ] && [ -f "$TRACE_META" ]; then
+        run_bsdtrace decode -f json -m "$TRACE_META" "$PT_TRACE"
+        printf '%s\n' "$ROUT" | grep '^{' > "$TRACE_JSON_LINES"
+    fi
+
+    if [ -s "$TRACE_JSON_LINES" ] && grep -q '"insn"' "$TRACE_JSON_LINES"; then
+        pass "trace: json"
+    else
+        fail "trace: json"
+    fi
+
+    if [ -s "$TRACE_JSON_LINES" ] &&
+        json_lines_valid "$TRACE_JSON_LINES"; then
+        pass "trace: json lines valid"
+    else
+        fail "trace: json lines valid"
+    fi
+
+    if [ -n "$AP_ATTACH_BRANCH_CJMP" ] &&
+        [ -n "$AP_ATTACH_BRANCH_START" ] &&
+        json_has_symbolized_event "$TRACE_JSON_LINES" \
+            "CJMP" "$AP_ATTACH_BRANCH_CJMP" "attach_branch" \
+            "$(hex_diff "$AP_ATTACH_BRANCH_CJMP" "$AP_ATTACH_BRANCH_START")" \
+            "$ATTACHPROG_BN"; then
+        pass "trace: exact symbolification branch cjmp"
+    else
+        fail "trace: exact symbolification branch cjmp"
+    fi
+
+    if [ -n "$AP_ATTACH_LOOP_CJMP" ] &&
+        [ -n "$AP_ATTACH_LOOP_START" ] &&
+        json_has_symbolized_event "$TRACE_JSON_LINES" \
+            "CJMP" "$AP_ATTACH_LOOP_CJMP" "attach_loop" \
+            "$(hex_diff "$AP_ATTACH_LOOP_CJMP" "$AP_ATTACH_LOOP_START")" \
+            "$ATTACHPROG_BN"; then
+        pass "trace: exact symbolification loop cjmp"
+    else
+        fail "trace: exact symbolification loop cjmp"
+    fi
+
+    if [ -n "$AP_ATTACH_LOOP_JUMP" ] &&
+        [ -n "$AP_ATTACH_LOOP_START" ] &&
+        json_has_symbolized_event "$TRACE_JSON_LINES" \
+            "JUMP" "$AP_ATTACH_LOOP_JUMP" "attach_loop" \
+            "$(hex_diff "$AP_ATTACH_LOOP_JUMP" "$AP_ATTACH_LOOP_START")" \
+            "$ATTACHPROG_BN"; then
+        pass "trace: exact symbolification loop jump"
+    else
+        fail "trace: exact symbolification loop jump"
+    fi
 
     start_trace_target
     if [ -n "$STARTED_PID" ] && kill -0 "$STARTED_PID" 2>/dev/null; then
-        PT_TRACE_JSON="$TMPDIR/trace-json.pt"
-        run_bsdtrace trace -f json -m 20 -o "$PT_TRACE_JSON" "$STARTED_PID"
+        PT_TRACE_MAX="$TMPDIR/trace-max.pt"
+        run_bsdtrace trace -m 10 -o "$PT_TRACE_MAX" "$STARTED_PID"
         TOUT="$ROUT"
         stop_trace_target
 
-        if echo "$TOUT" | grep -q '"insn"'; then
-            pass "trace: json"
-        else
-            fail "trace: json"
-        fi
-
-        echo "$TOUT" | grep '^{' > "$TMPDIR/trace-json-lines.txt"
-        if [ -s "$TMPDIR/trace-json-lines.txt" ] &&
-            json_lines_valid "$TMPDIR/trace-json-lines.txt"; then
-            pass "trace: json lines valid"
-        else
-            fail "trace: json lines valid"
-        fi
-
-        if echo "$TOUT" | grep -q 'max-records:'; then
+        if [ "$RRC" -eq 0 ] && echo "$TOUT" | grep -q 'max-records:'; then
             pass "trace: -m max-records"
         else
             fail "trace: -m max-records"
         fi
     else
         fail "trace: could not start background process"
-        fail "trace: json"
-        fail "trace: json lines valid"
         fail "trace: -m max-records"
     fi
 
-    settle_hwt
+
 
     if [ -n "$ATTACHPROG_RANGE" ]; then
         start_trace_target

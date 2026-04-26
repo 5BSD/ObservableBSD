@@ -136,6 +136,9 @@ cmd_decode(int argc, char **argv)
 		return (1);
 	}
 
+	/* Line-buffer stdout — see cmd_trace.c comment. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	if (fmt == FMT_TEXT)
 		fprintf(stderr,
 		    "Decoding %s (%lld bytes, %d binaries from %s)\n",

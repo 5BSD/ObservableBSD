@@ -8,6 +8,11 @@
 //   - hwtlm   — Hardware telemetry (power, temperature, frequency)
 //   - bsdtrace — Process tracing via HWT (Intel PT / ARM CoreSight)
 //
+// Test helper executables (built by SPM, used by test-bsdtrace.sh):
+//   - bsdtrace-testprog  — deterministic trace target
+//   - bsdtrace-attachprog — long-running attach target
+//   - bsdtrace-floodprog  — PT buffer wrap stress target
+//
 // Shared library:
 //   - OTelExport — Exporter protocol, data types, and three
 //     exporter implementations (text, JSONL, OTLP/HTTP) shared
@@ -41,11 +46,6 @@ let package = Package(
         ),
         .systemLibrary(
             name: "CCpuctl",
-            pkgConfig: nil,
-            providers: []
-        ),
-        .systemLibrary(
-            name: "CHwt",
             pkgConfig: nil,
             providers: []
         ),
@@ -85,6 +85,30 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("ipt"),
                 .linkedLibrary("elf"),
+            ]
+        ),
+        .executableTarget(
+            name: "bsdtrace-testprog",
+            dependencies: [],
+            path: "Tests/bsdtrace/testprog",
+            cSettings: [
+                .unsafeFlags(["-O0"]),
+            ]
+        ),
+        .executableTarget(
+            name: "bsdtrace-attachprog",
+            dependencies: [],
+            path: "Tests/bsdtrace/attachprog",
+            cSettings: [
+                .unsafeFlags(["-O0"]),
+            ]
+        ),
+        .executableTarget(
+            name: "bsdtrace-floodprog",
+            dependencies: [],
+            path: "Tests/bsdtrace/floodprog",
+            cSettings: [
+                .unsafeFlags(["-O0"]),
             ]
         ),
         .testTarget(

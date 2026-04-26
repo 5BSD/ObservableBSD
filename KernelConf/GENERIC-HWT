@@ -1,0 +1,9 @@
+#
+# GENERIC-HWT -- GENERIC plus Hardware Trace Framework hooks.
+#
+
+include GENERIC
+
+ident	GENERIC-HWT
+
+options	HWT_HOOKS

@@ -332,6 +332,9 @@ cmd_exec(int argc, char **argv)
 	meta = meta_writer_open(meta_path);
 	trace_state_init(&ts, meta);
 
+	/* Line-buffer stdout — see cmd_trace.c comment. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	kill(child, SIGCONT);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -442,19 +445,12 @@ cmd_exec(int argc, char **argv)
 		}
 	}
 
-	/* Snapshot PT buffer and decode before stop closes the fd. */
-	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
-
-	/*
-	 * Brief pause to let any pending PT buffer-overflow software
-	 * interrupts retire before we tear down the context.  Without
-	 * this, the swi handler can race with context teardown and
-	 * dereference a NULL ctx pointer (kernel bug in pt.ko).
-	 */
-	usleep(100000);
-
-	/* Stop tracing (closes ctx_fd; no drain possible after this). */
+	/* Stop tracing — clears TraceEn, captures exact buffer position. */
 	hwt_ctx_stop(&ctx);
+	totalrecords += trace_state_drain_post_stop(&ctx, &ts);
+
+	/* Snapshot PT buffer and decode. */
+	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
 
 	if (ts.buf_wrapped)
 		fprintf(stderr,

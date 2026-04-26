@@ -1,0 +1,37 @@
+Fix pt_backend_enable to restore per-CPU context pointer on switch-in.
+
+pt_backend_disable clears cpu->ctx on every context switch-out, but
+pt_backend_enable never restored it.  After the first scheduler
+preemption, pt_cpu_start sees cpu->ctx == NULL and returns early,
+silently disabling PT for the rest of the traced program's execution.
+
+Apply from /usr/src (on top of existing hwt-race-fixes patches):
+  patch -p1 < /path/to/pt-enable-fix.patch
+
+---
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -514,10 +514,22 @@
+ static void
+ pt_backend_enable(struct hwt_context *ctx, int cpu_id)
+ {
++	struct hwt_thread *thr;
++
+ 	if (ctx->mode == HWT_MODE_CPU)
+ 		return;
+
+ 	KASSERT(curcpu == cpu_id,
+ 	    ("%s: attempting to start PT on another cpu", __func__));
++
++	/*
++	 * Restore the per-CPU context pointer.  pt_backend_disable clears
++	 * cpu->ctx on every switch-out; we must re-set it here so that
++	 * pt_cpu_start can find the tracing context on the new CPU.
++	 */
++	thr = TAILQ_FIRST(&ctx->threads);
++	if (thr != NULL && thr->private != NULL)
++		pt_pcpu[cpu_id].ctx = (struct pt_ctx *)thr->private;
++
+ 	pt_cpu_start(NULL);
+ 	CPU_SET(cpu_id, &ctx->cpu_map);
+ }

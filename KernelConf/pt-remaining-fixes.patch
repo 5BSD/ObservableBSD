@@ -1,0 +1,40 @@
+Fix pt_update_buffer callers and PMI handler NULL checks.
+
+Applies on top of the pt_update_buffer signature change (which
+changed it from taking pt_buffer* to pt_ctx*).
+
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -294,7 +294,7 @@
+ 	}
+ 	pt_cpu_toggle_local(cpu->ctx->save_area, false);
+-	pt_update_buffer(&ctx->buf);
++	pt_update_buffer(ctx);
+ }
+
+ /*
+@@ -824,14 +824,20 @@
+ 	atomic_set_int(&cpu->in_pcint_handler, 1);
+
+ 	ctx = cpu->ctx;
+-	KASSERT(ctx != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt without an active context",
+-		__func__, curcpu));
++	if (ctx == NULL) {
++		pt_topa_status_clear();
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	buf = &ctx->buf;
+-	KASSERT(buf->topa_hw != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt with invalid buffer", __func__,
+-		curcpu));
++	if (buf->topa_hw == NULL) {
++		pt_topa_status_clear();
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	pt_cpu_toggle_local(ctx->save_area, false);
+-	pt_update_buffer(buf);
++	pt_update_buffer(ctx);
+ 	pt_topa_status_clear();

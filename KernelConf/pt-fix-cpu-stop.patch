@@ -1,0 +1,8 @@
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -294,7 +294,7 @@
+ 	}
+ 	pt_cpu_toggle_local(cpu->ctx->save_area, false);
+-	pt_update_buffer(&ctx->buf);
++	pt_update_buffer(ctx);
+ }

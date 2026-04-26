@@ -176,6 +176,8 @@ int	 hwt_ctx_poll_records(struct hwt_ctx *ctx,
 	    bool wait, int *nout);
 int	 hwt_ctx_wakeup(struct hwt_ctx *ctx);
 void	*hwt_ctx_map_buffer(struct hwt_ctx *ctx);
+int	 hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
+	    vm_offset_t *offset_out);
 ssize_t	 hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
 	    int last_page, vm_offset_t last_offset);
 void	 hwt_ctx_close(struct hwt_ctx *ctx);
@@ -233,8 +235,13 @@ struct trace_state {
 	struct meta_writer	*meta;
 	int			last_buf_page;
 	int			max_buf_page;
-	bool			buf_wrapped;
 	vm_offset_t		last_buf_offset;
+	bool			buf_wrapped;
+};
+
+struct decode_probe_result {
+	int	total;
+	int	exec_hits;
 };
 
 /* ------------------------------------------------------------------ */
@@ -243,6 +250,7 @@ struct trace_state {
 
 void	 fmt_record_text(const struct bsdtrace_record *rec, pid_t pid);
 void	 fmt_record_json(const struct bsdtrace_record *rec, pid_t pid);
+int	 json_escape(char *dst, size_t dstlen, const char *src);
 
 /* ------------------------------------------------------------------ */
 /* elf.c — ELF parsing                                                 */
@@ -290,6 +298,9 @@ int	 decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
 	    enum bsdtrace_fmt fmt);
+int	 decode_pt_probe(const void *buf, size_t len,
+	    const struct pt_image_info *sections, int nsections,
+	    struct decode_probe_result *result);
 
 /* ------------------------------------------------------------------ */
 /* meta.c — .meta sidecar writer/reader                                */
@@ -311,6 +322,8 @@ int	 meta_read_sections(const char *path,
 void	 trace_state_init(struct trace_state *ts, struct meta_writer *meta);
 void	 trace_state_process(struct trace_state *ts,
 	    const struct bsdtrace_record *rec);
+int	 trace_state_drain_post_stop(struct hwt_ctx *ctx,
+	    struct trace_state *ts);
 void	 trace_state_free(struct trace_state *ts);
 ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 	    const char *pt_output, enum bsdtrace_fmt fmt);
@@ -322,7 +335,6 @@ ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 int	 cmd_list(int argc, char **argv);
 int	 cmd_exec(int argc, char **argv);
 int	 cmd_trace(int argc, char **argv);
-int	 cmd_info(int argc, char **argv);
 int	 cmd_decode(int argc, char **argv);
 
 /* ------------------------------------------------------------------ */

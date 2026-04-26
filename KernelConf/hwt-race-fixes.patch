@@ -1,0 +1,182 @@
+Fix race conditions, data loss, and crash bugs in hwt.ko and pt.ko.
+
+1. hwt_owner.c: Set ctx->state = 0 before hwt_contexthash_remove() to
+   close a TOCTOU window where hwt_switch_in sees a running context
+   that is being torn down (GPF in xrstors).
+
+2. pt.c pt_cpu_start: Replace MPASS(cpu->ctx != NULL) with a runtime
+   NULL check.  Belt-and-suspenders guard for the switch-in path.
+
+3. pt.c pt_send_buffer_record: Add NULL guard on cpu->ctx.  A queued
+   SWI from a PT buffer-overflow PMI can fire after teardown sets
+   cpu->ctx = NULL, causing a NULL deref panic.
+
+4. pt.c pt_backend_enable: Restore the per-CPU context pointer from
+   the thread's private data before calling pt_cpu_start.  The
+   switch-out hook (pt_backend_disable) clears cpu->ctx, but the
+   switch-in hook never restored it.  Without this fix, PT tracing
+   silently stops after the first context switch — the traced program
+   continues running untraced and BUFPTR_GET returns only the offset
+   captured during the first timeslice.
+
+5. pt.c pt_update_buffer: Read the buffer position from the XSAVE
+   save area instead of the MSR.  XSAVES stores the correct output
+   position in the save area then modifies the MSR — per Intel SDM
+   36.3.5.2, MaskOrTableOffset (bits 31:7) is set to its maximum
+   value after XSAVES.  The old code read the MSR after XSAVES, so
+   the ToPA table index was always 0 — only the within-page offset
+   (bits 63:32) survived.  Every trace captured at most one page of
+   PT data regardless of buffer size.
+
+6. pt.c pt_topa_intr: Replace KASSERT(ctx != NULL) with a runtime
+   NULL check.  A PMI can race with teardown; the KASSERT panics
+   in debug builds and blindly dereferences NULL in release builds.
+
+7. pt.c pt_topa_intr: Replace KASSERT(buf->topa_hw != NULL) with a
+   runtime NULL check.  Same teardown race — pt_deinit_ctx frees
+   topa_hw and zeroes the struct while a PMI is in flight.
+
+Apply from /usr/src:
+  patch -p1 < /path/to/hwt-race-fixes.patch
+
+---
+diff --git a/sys/amd64/pt/pt.c b/sys/amd64/pt/pt.c
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -184,16 +184,22 @@
+ /*
+- * Updates current trace buffer offset from the
+- * ToPA MSRs. Records if the trace buffer wrapped.
++ * Updates current trace buffer offset from the XSAVE save area.
++ *
++ * Must be called after pt_cpu_toggle_local(save_area, false) which
++ * executes XSAVES.  XSAVES stores the true output position in the
++ * save area, then sets IA32_RTIT_OUTPUT_MASK_PTRS bits 31:7
++ * (MaskOrTableOffset) to their maximum value (Intel SDM 36.3.5.2).
++ * Reading the MSR after XSAVES yields page=0 regardless of actual
++ * position.
+  */
+ static __inline void
+-pt_update_buffer(struct pt_buffer *buf)
++pt_update_buffer(struct pt_ctx *ctx)
+ {
++	struct pt_ext_area *pt_ext;
+ 	uint64_t reg;
+ 	uint64_t offset;
+
+-	/* Update buffer offset. */
+-	reg = rdmsr(MSR_IA32_RTIT_OUTPUT_MASK_PTRS);
++	pt_ext = pt_ctx_get_ext_area(ctx);
++	reg = pt_ext->rtit_output_mask_ptrs;
+ 	offset = ((reg & PT_TOPA_PAGE_MASK) >> PT_TOPA_PAGE_SHIFT) * PAGE_SIZE;
+ 	offset += (reg >> 32);
+
+-	atomic_store_rel_64(&buf->offset, offset);
++	atomic_store_rel_64(&ctx->buf.offset, offset);
+ }
+
+@@ -257,7 +263,8 @@
+ 	struct pt_cpu *cpu;
+
+ 	cpu = &pt_pcpu[curcpu];
+-	MPASS(cpu->ctx != NULL);
++	if (cpu->ctx == NULL)
++		return;
+
+ 	dprintf("%s: curcpu %d\n", __func__, curcpu);
+ 	pt_cpu_set_state(curcpu, PT_ACTIVE);
+@@ -291,7 +298,7 @@
+ 	}
+ 	pt_cpu_toggle_local(cpu->ctx->save_area, false);
+-	pt_update_buffer(&ctx->buf);
++	pt_update_buffer(ctx);
+ }
+
+@@ -513,10 +520,22 @@
+ static void
+ pt_backend_enable(struct hwt_context *ctx, int cpu_id)
+ {
++	struct hwt_thread *thr;
++
+ 	if (ctx->mode == HWT_MODE_CPU)
+ 		return;
+
+ 	KASSERT(curcpu == cpu_id,
+ 	    ("%s: attempting to start PT on another cpu", __func__));
++
++	/*
++	 * Restore the per-CPU context pointer.  pt_backend_disable clears
++	 * cpu->ctx on every switch-out; we must re-set it here so that
++	 * pt_cpu_start can find the tracing context on the new CPU.
++	 */
++	thr = TAILQ_FIRST(&ctx->threads);
++	if (thr != NULL && thr->private != NULL)
++		pt_pcpu[cpu_id].ctx = (struct pt_ctx *)thr->private;
++
+ 	pt_cpu_start(NULL);
+ 	CPU_SET(cpu_id, &ctx->cpu_map);
+ }
+@@ -763,7 +782,9 @@
+ 	struct hwt_record_entry record;
+
+ 	struct pt_ctx *ctx = cpu->ctx;
+-	pt_fill_buffer_record(ctx->id, &ctx->buf, &record);
++	if (ctx == NULL)
++		return;
++	pt_fill_buffer_record(ctx->id, &ctx->buf, &record);
+ 	hwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
+ }
+@@ -807,13 +828,19 @@
+ 	ctx = cpu->ctx;
+-	KASSERT(ctx != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt without an active context",
+-		__func__, curcpu));
++	if (ctx == NULL) {
++		pt_topa_status_clear();
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	buf = &ctx->buf;
+-	KASSERT(buf->topa_hw != NULL,
+-	    ("%s: cpu %d: ToPA PMI interrupt with invalid buffer", __func__,
+-		curcpu));
++	if (buf->topa_hw == NULL) {
++		pt_topa_status_clear();
++		atomic_set_int(&cpu->in_pcint_handler, 0);
++		return (1);
++	}
+ 	pt_cpu_toggle_local(ctx->save_area, false);
+-	pt_update_buffer(buf);
++	pt_update_buffer(ctx);
+ 	pt_topa_status_clear();
+
+diff --git a/sys/dev/hwt/hwt_owner.c b/sys/dev/hwt/hwt_owner.c
+--- a/sys/dev/hwt/hwt_owner.c
++++ b/sys/dev/hwt/hwt_owner.c
+@@ -128,17 +128,21 @@
+ 		if (ctx == NULL)
+ 			break;
+
+-		if (ctx->mode == HWT_MODE_THREAD)
+-			hwt_contexthash_remove(ctx);
+-
+ 		/*
+-		 * A hook could be still dealing with this ctx right here.
++		 * Mark the context stopped before removing from the hash.
++		 * Any hwt_switch_in that already holds a reference will
++		 * see state != CTX_STATE_RUNNING and bail out before
++		 * touching the backend.  This closes the TOCTOU window
++		 * where a hook could call pt_backend_configure on a
++		 * context whose save_area is about to be freed.
+ 		 */
+-
+ 		HWT_CTX_LOCK(ctx);
+ 		ctx->state = 0;
+ 		HWT_CTX_UNLOCK(ctx);
+
++		if (ctx->mode == HWT_MODE_THREAD)
++			hwt_contexthash_remove(ctx);
++
+ 		/* Ensure hooks invocation is now completed. */
+ 		while (refcount_load(&ctx->refcnt) > 0)
+ 			continue;

@@ -270,6 +270,14 @@ cmd_trace(int argc, char **argv)
 	empty_drains = 0;
 	target_gone = false;
 
+	/*
+	 * Line-buffer stdout so each JSON/text line is flushed as a
+	 * single write().  Without this, the default full buffering
+	 * (when piped) lets stderr writes interleave mid-line, producing
+	 * malformed JSON when captured via 2>&1.
+	 */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "Tracing PID %d (%s)...\n",
 		    (int)pid, execname);
@@ -356,19 +364,12 @@ cmd_trace(int argc, char **argv)
 		}
 	}
 
-	/* Snapshot PT buffer and decode before stop closes the fd. */
-	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
-
-	/*
-	 * Brief pause to let any pending PT buffer-overflow software
-	 * interrupts retire before we tear down the context.  Without
-	 * this, the swi handler can race with context teardown and
-	 * dereference a NULL ctx pointer (kernel bug in pt.ko).
-	 */
-	usleep(100000);
-
-	/* Stop tracing (closes ctx_fd; no drain possible after this). */
+	/* Stop tracing — clears TraceEn, captures exact buffer position. */
 	hwt_ctx_stop(&ctx);
+	totalrecords += trace_state_drain_post_stop(&ctx, &ts);
+
+	/* Snapshot PT buffer and decode. */
+	snapshot_and_decode(&ctx, &ts, pt_output, fmt);
 
 	if (ts.buf_wrapped)
 		fprintf(stderr,

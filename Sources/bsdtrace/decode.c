@@ -334,7 +334,7 @@ decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt)
 
 static struct pt_image *
 build_pt_image(const struct pt_image_info *sections, int nsections,
-    struct sym_table *st)
+    struct sym_table *st, bool verbose)
 {
 	struct pt_image *image;
 	char interp[MAXPATHLEN];
@@ -382,12 +382,14 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 			int segs = add_elf_to_image(image,
 			    sections[i].path, load_addr);
 			total += segs;
-			fprintf(stderr,
-			    "  [%d] %s type=%d rec_addr=0x%lx "
-			    "load_addr=0x%lx segs=%d\n",
-			    i, sections[i].path, sections[i].type,
-			    (unsigned long)sections[i].load_addr,
-			    (unsigned long)load_addr, segs);
+			if (verbose) {
+				fprintf(stderr,
+				    "  [%d] %s type=%d rec_addr=0x%lx "
+				    "load_addr=0x%lx segs=%d\n",
+				    i, sections[i].path, sections[i].type,
+				    (unsigned long)sections[i].load_addr,
+				    (unsigned long)load_addr, segs);
+			}
 		}
 
 		/* Load symbols with the same slide. */
@@ -398,11 +400,13 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 				if (elf_base_vaddr(elf, &base_vaddr) == 0) {
 					slide = (int64_t)load_addr -
 					    (int64_t)base_vaddr;
-					fprintf(stderr,
-					    "    base_vaddr=0x%lx "
-					    "slide=0x%lx\n",
-					    (unsigned long)base_vaddr,
-					    (unsigned long)slide);
+					if (verbose) {
+						fprintf(stderr,
+						    "    base_vaddr=0x%lx "
+						    "slide=0x%lx\n",
+						    (unsigned long)base_vaddr,
+						    (unsigned long)slide);
+					}
 					sym_table_add_elf(st,
 					    sections[i].path, slide);
 				}
@@ -468,8 +472,10 @@ build_pt_image(const struct pt_image_info *sections, int nsections,
 
 	sym_table_sort(st);
 
-	fprintf(stderr, "image: %d sections, %d segments, %d symbols\n",
-	    nsections, total, st->count);
+	if (verbose) {
+		fprintf(stderr, "image: %d sections, %d segments, %d symbols\n",
+		    nsections, total, st->count);
+	}
 
 	if (total == 0) {
 		warnx("no executable segments found in %d binaries",
@@ -502,6 +508,164 @@ insn_class_str(enum pt_insn_class iclass)
 	}
 }
 
+static const char *
+path_basename(const char *path)
+{
+	const char *slash;
+
+	slash = strrchr(path, '/');
+	if (slash != NULL && slash[1] != '\0')
+		return (slash + 1);
+	return (path);
+}
+
+static int
+collect_exec_binaries(const struct pt_image_info *sections, int nsections,
+    char exec_bins[][64], int maxbins)
+{
+	const char *bn;
+	int i, j, nbins;
+
+	nbins = 0;
+	for (i = 0; i < nsections && nbins < maxbins; i++) {
+		if (sections[i].type != HWT_RECORD_EXECUTABLE)
+			continue;
+		if (sections[i].path[0] == '\0')
+			continue;
+
+		bn = path_basename(sections[i].path);
+		for (j = 0; j < nbins; j++) {
+			if (strcmp(exec_bins[j], bn) == 0)
+				break;
+		}
+		if (j != nbins)
+			continue;
+
+		strlcpy(exec_bins[nbins], bn, sizeof(exec_bins[nbins]));
+		nbins++;
+	}
+
+	return (nbins);
+}
+
+static bool
+is_exec_binary(const char *binary, char exec_bins[][64], int nbins)
+{
+	int i;
+
+	if (binary == NULL || binary[0] == '\0')
+		return (false);
+
+	for (i = 0; i < nbins; i++) {
+		if (strcmp(exec_bins[i], binary) == 0)
+			return (true);
+	}
+
+	return (false);
+}
+
+int
+decode_pt_probe(const void *buf, size_t len,
+    const struct pt_image_info *sections, int nsections,
+    struct decode_probe_result *result)
+{
+	struct pt_config config;
+	struct pt_insn_decoder *decoder;
+	struct pt_image *image;
+	struct sym_table st;
+	struct bin_range ranges[MAX_BIN_RANGES];
+	struct pt_insn insn;
+	struct decode_probe_result probe;
+	char exec_bins[16][64];
+	const struct sym_entry *sym;
+	const char *bn;
+	uint64_t boff;
+	int nbins, nranges, status;
+
+	if (result == NULL)
+		return (-1);
+
+	memset(&probe, 0, sizeof(probe));
+	*result = probe;
+
+	if (buf == NULL || len == 0 || nsections <= 0)
+		return (-1);
+
+	sym_table_init(&st);
+
+	image = build_pt_image(sections, nsections, &st, false);
+	if (image == NULL) {
+		sym_table_free(&st);
+		return (-1);
+	}
+
+	nbins = collect_exec_binaries(sections, nsections, exec_bins,
+	    nitems(exec_bins));
+	nranges = build_bin_ranges(sections, nsections, ranges,
+	    MAX_BIN_RANGES);
+
+	pt_config_init(&config);
+	config.begin = __DECONST(uint8_t *, buf);
+	config.end = __DECONST(uint8_t *, buf) + len;
+
+	if (pt_cpu_read(&config.cpu) == 0)
+		pt_cpu_errata(&config.errata, &config.cpu);
+
+	decoder = pt_insn_alloc_decoder(&config);
+	if (decoder == NULL) {
+		pt_image_free(image);
+		sym_table_free(&st);
+		return (-1);
+	}
+
+	status = pt_insn_set_image(decoder, image);
+	if (status < 0) {
+		pt_insn_free_decoder(decoder);
+		pt_image_free(image);
+		sym_table_free(&st);
+		return (-1);
+	}
+
+	status = pt_insn_sync_forward(decoder);
+	while (status >= 0) {
+		while (status & pts_event_pending) {
+			struct pt_event ev;
+
+			status = pt_insn_event(decoder, &ev, sizeof(ev));
+			if (status < 0)
+				break;
+		}
+		if (status < 0)
+			break;
+
+		status = pt_insn_next(decoder, &insn, sizeof(insn));
+		if (status < 0) {
+			if (status == -pte_eos)
+				break;
+			status = pt_insn_sync_forward(decoder);
+			continue;
+		}
+
+		probe.total++;
+		sym = sym_table_lookup(&st, insn.ip);
+		bn = NULL;
+		boff = 0;
+		if (sym == NULL)
+			bn = find_binary_for_ip(ranges, nranges, insn.ip,
+			    &boff);
+
+		if ((sym != NULL && is_exec_binary(sym->binary, exec_bins, nbins)) ||
+		    (bn != NULL && is_exec_binary(bn, exec_bins, nbins)))
+			probe.exec_hits++;
+	}
+
+	pt_insn_free_decoder(decoder);
+	pt_image_free(image);
+	sym_table_free(&st);
+	*result = probe;
+	return (probe.total > 0 ? 0 : -1);
+}
+
 /* ------------------------------------------------------------------ */
 /* Instruction decoder                                                 */
 /* ------------------------------------------------------------------ */
@@ -519,7 +683,9 @@ decode_pt_insn(const void *buf, size_t len,
 	int nranges;
 	struct pt_insn insn;
 	const struct sym_entry *sym;
+	const char *bn;
 	const char *label;
+	uint64_t boff;
 	int status;
 	int total, branches, returns, syscalls, nomaps, errors;
 
@@ -535,7 +701,7 @@ decode_pt_insn(const void *buf, size_t len,
 
 	sym_table_init(&st);
 
-	image = build_pt_image(sections, nsections, &st);
+	image = build_pt_image(sections, nsections, &st, true);
 	if (image == NULL) {
 		sym_table_free(&st);
 		warnx("image build failed — falling back to packet decode");
@@ -633,18 +799,35 @@ decode_pt_insn(const void *buf, size_t len,
 			continue;
 
 		sym = sym_table_lookup(&st, insn.ip);
+		bn = NULL;
+		boff = 0;
+		if (sym == NULL)
+			bn = find_binary_for_ip(ranges, nranges, insn.ip,
+			    &boff);
 
 		if (fmt == FMT_JSON) {
-			if (sym != NULL)
+			if (sym != NULL) {
+				char esym[256], ebin[256];
+				json_escape(esym, sizeof(esym), sym->name);
+				json_escape(ebin, sizeof(ebin), sym->binary);
 				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\","
 				    "\"sym\":\"%s\",\"off\":%lu,"
 				    "\"bin\":\"%s\"}\n",
 				    label,
 				    (unsigned long)insn.ip,
-				    sym->name,
+				    esym,
 				    (unsigned long)(insn.ip - sym->addr),
-				    sym->binary);
-			else
+				    ebin);
+			} else if (bn != NULL) {
+				char ebin[256];
+				json_escape(ebin, sizeof(ebin), bn);
+				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\","
+				    "\"off\":%lu,\"bin\":\"%s\"}\n",
+				    label,
+				    (unsigned long)insn.ip,
+				    (unsigned long)boff,
+				    ebin);
+			} else
 				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\"}\n",
 				    label,
 				    (unsigned long)insn.ip);
@@ -661,11 +844,6 @@ decode_pt_insn(const void *buf, size_t len,
 					    sym->name,
 					    (unsigned long)off);
 			} else {
-				const char *bn;
-				uint64_t boff;
-
-				bn = find_binary_for_ip(ranges,
-				    nranges, insn.ip, &boff);
 				if (bn != NULL)
 					printf("  %-9s %s+0x%lx\n",
 					    label, bn,

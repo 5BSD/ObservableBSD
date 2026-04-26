@@ -1,4 +1,0 @@
-module CHwt [system] {
-    header "chwt.h"
-    export *
-}

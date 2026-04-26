@@ -215,7 +215,7 @@ struct sym_table {
 /*
  * Binary load range — for showing binary+offset when no symbol matches.
  */
-#define	MAX_BIN_RANGES	64
+#define	MAX_BIN_RANGES	256
 
 struct bin_range {
 	char		name[64];	/* basename of binary */

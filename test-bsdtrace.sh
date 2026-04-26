@@ -273,7 +273,7 @@ kill_stale_test_targets() {
 text_range_arg() {
     # Extract the first executable LOAD segment from ELF program headers.
     RANGE_FIELDS=$(readelf -l "$1" 2>/dev/null |
-        awk '/LOAD.*R.E/{print $3, $6; exit}')
+        awk '/LOAD.*R.*E/{print $3, $6; exit}')
     RANGE_VADDR=$(echo "$RANGE_FIELDS" | awk '{print $1}')
     RANGE_MEMSZ=$(echo "$RANGE_FIELDS" | awk '{print $2}')
 
@@ -1080,7 +1080,7 @@ PY
     #    that ASLR-adjusted symbols still resolve correctly.
     PIE_PROG="$TMPDIR/testprog-pie"
     PIE_SRC="Tests/bsdtrace/testprog/main.c"
-    if [ -f "$PIE_SRC" ] && cc -O0 -pie -o "$PIE_PROG" "$PIE_SRC" 2>/dev/null; then
+    if [ -f "$PIE_SRC" ] && cc -O0 -fPIC -pie -o "$PIE_PROG" "$PIE_SRC" 2>/dev/null; then
         PT_PIE="$TMPDIR/testprog-pie.pt"
         run_bsdtrace exec -t 5 -o "$PT_PIE" -- "$PIE_PROG"
         PIE_OUT="$ROUT"

@@ -978,15 +978,11 @@ PY
     PT_FAST="$TMPDIR/fast-exit.pt"
     FAST_META="$TMPDIR/fast-exit.meta"
     run_bsdtrace exec -t 5 -o "$PT_FAST" -- /bin/true
-    if [ -f "$FAST_META" ] && [ -s "$FAST_META" ]; then
-        if grep -q '"type":"exec"' "$FAST_META"; then
-            pass "exec: .meta survives fast exit"
-        else
-            fail "exec: .meta survives fast exit (no exec record)"
-            head -3 "$FAST_META"
-        fi
+    if [ -f "$FAST_META" ] && [ -s "$FAST_META" ] &&
+        json_lines_valid "$FAST_META"; then
+        pass "exec: .meta survives fast exit"
     else
-        fail "exec: .meta survives fast exit (empty or missing)"
+        fail "exec: .meta survives fast exit (empty or invalid)"
     fi
 
     settle_hwt

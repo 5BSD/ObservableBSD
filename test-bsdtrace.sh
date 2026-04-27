@@ -639,14 +639,15 @@ else
     PT_FILE="$TMPDIR/testprog.pt"
 
     # Basic exec with testprog
-    run_bsdtrace exec -t 5 -o "$PT_FILE" -- "$TESTPROG"
-    EOUT="$ROUT"
+    run_bsdtrace_file exec -t 5 -o "$PT_FILE" -- "$TESTPROG"
+    EOUT_FILE="$TMPDIR/exec-basic-out.txt"
+    mv "$ROUT_FILE" "$EOUT_FILE" 2>/dev/null || true
     EERR="$RERR"
     if echo "$EERR" | grep -q 'instructions'; then
         pass "exec: basic trace with decode"
     else
         fail "exec: basic trace with decode"
-        echo "    Output: $(echo "$EOUT" | tail -5)"
+        echo "    Output: $(tail -5 "$EOUT_FILE" 2>/dev/null)"
     fi
 
     # .pt file created and non-empty
@@ -714,7 +715,7 @@ PY
 
     # Control flow event types
     for EVT in CALL RETURN CJMP SYSCALL; do
-        if echo "$EOUT" | grep -q "$EVT"; then
+        if grep -q "$EVT" "$EOUT_FILE"; then
             pass "exec: $EVT events in output"
         else
             fail "exec: $EVT events in output"
@@ -725,7 +726,7 @@ PY
     FN_MISS=0
     for FN in leaf_add leaf_mul nested_outer nested_inner \
               branch_test loop_test do_write; do
-        if echo "$EOUT" | grep -q "$FN"; then
+        if grep -q "$FN" "$EOUT_FILE"; then
             pass "exec: $FN in decoded output"
         else
             fail "exec: $FN in decoded output"
@@ -734,9 +735,9 @@ PY
     done
     if [ "$FN_MISS" -gt 0 ]; then
         echo "    --- debug: image build info ---"
-        echo "$EOUT" | grep -E '^(image:|  \[)' | head -10
+        grep -E '^(image:|  \[)' "$EOUT_FILE" | head -10
         echo "    --- debug: first 5 decoded events ---"
-        echo "$EOUT" | grep -E '^\s+(CALL|RETURN|CJMP|SYSCALL)' | head -5
+        grep -E '^\s+(CALL|RETURN|CJMP|SYSCALL)' "$EOUT_FILE" | head -5
         echo "    --- debug: testprog ELF layout ---"
         readelf -l "$TESTPROG" 2>/dev/null | grep -A1 'LOAD' | head -6
         echo "    ---"
@@ -1012,14 +1013,12 @@ RPROG
                 if [ "${RLOOP_INSN:-0}" -gt 0 ]; then
                     # Check only decoded instruction lines (CALL/RETURN/etc),
                     # not MMAP/EXEC record lines which naturally contain library paths.
-                    RLOOP_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
-                    if echo "$RLOOP_DECODED" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                    if grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
                         fail "exec: -r range decode (library symbols leaked)"
                     else
                         pass "exec: -r range decode ($RLOOP_INSN instructions)"
                     fi
-                    # Verify rangeprog functions appear
-                    if echo "$RLOOP_DECODED" | grep -q 'range_add'; then
+                    if grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -q 'range_add'; then
                         pass "exec: -r range has expected symbols"
                     else
                         fail "exec: -r range has expected symbols"
@@ -1059,8 +1058,7 @@ RPROG
                 echo "    stderr: $(echo "$RERR" | head -5)"
             fi
             if [ "${RSYM_INSN:-0}" -gt 0 ]; then
-                RSYM_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
-                if echo "$RSYM_DECODED" | grep -q 'range_loop\|range_add'; then
+                if grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -q 'range_loop\|range_add'; then
                     pass "exec: -r symbol decode ($RSYM_INSN instructions)"
                 else
                     fail "exec: -r symbol decode (no expected symbols in output)"
@@ -1163,13 +1161,11 @@ DPROG
             run_bsdtrace_file exec -r "$RANGE_A" -r "$RANGE_B" -t 10 -o "$PT_DUAL" -- "$DUALPROG"
             if [ "$RRC" -eq 0 ] && [ -s "$ROUT_FILE" ]; then
                 DUAL_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
-                DUAL_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
-                DUAL_HAS_A=$(echo "$DUAL_DECODED" | grep -c 'group_a')
-                DUAL_HAS_B=$(echo "$DUAL_DECODED" | grep -c 'group_b')
+                DUAL_HAS_A=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -c 'group_a')
+                DUAL_HAS_B=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -c 'group_b')
                 if [ "${DUAL_INSN:-0}" -gt 0 ] &&
                     [ "$DUAL_HAS_A" -gt 0 ] && [ "$DUAL_HAS_B" -gt 0 ]; then
-                    # Verify no library leakage in decoded instructions
-                    if echo "$DUAL_DECODED" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
+                    if grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
                         fail "exec: dual -r range filter (library symbols leaked)"
                     else
                         pass "exec: dual -r range filter ($DUAL_INSN insn, A=$DUAL_HAS_A B=$DUAL_HAS_B)"
@@ -1198,9 +1194,12 @@ DPROG
     # ── multi-thread ────────────────────────────────────────
     echo "--- threads ---"
 
+    # Clean up earlier .pt files to avoid filling /tmp.
+    rm -f "$TMPDIR"/*.pt
+
     # Thread 0 (main): should see main_work/main_leaf, not worker_*
     PT_THR0="$TMPDIR/thread-0.pt"
-    run_bsdtrace_file exec -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
+    run_bsdtrace_file exec -s 4m -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
     THR0_ERR="$RERR"
     if echo "$THR0_ERR" | grep -q 'instructions'; then
         if grep -Eq 'main_work|main_leaf' "$ROUT_FILE"; then
@@ -1230,7 +1229,7 @@ DPROG
     PIDS_TO_KILL="$PIDS_TO_KILL $THR1_PID"
     sleep 1  # let worker thread start
     if kill -0 "$THR1_PID" 2>/dev/null; then
-        run_bsdtrace_file trace -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
+        run_bsdtrace_file trace -s 4m -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
         THR1_ERR="$RERR"
         kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
         if echo "$THR1_ERR" | grep -q 'instructions'; then
@@ -1282,91 +1281,6 @@ DPROG
         skip "thread: json output has tid field"
     fi
 
-
-    # ── profile format ──────────────────────────────────────
-    echo "--- profile ---"
-
-    # Profile the basic testprog trace
-    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
-        run_bsdtrace decode -f profile -m "$META_FILE" "$PT_FILE"
-        PROF_OUT="$ROUT"
-        PROF_ERR="$RERR"
-
-        if echo "$PROF_OUT" | grep -q 'CALLS'; then
-            pass "profile: header present"
-        else
-            fail "profile: header present"
-        fi
-
-        if echo "$PROF_OUT" | grep -q 'leaf_add'; then
-            pass "profile: leaf_add in output"
-        else
-            fail "profile: leaf_add in output"
-        fi
-
-        # leaf_add is called 14 times — verify the count
-        PROF_LEAF_CALLS=$(echo "$PROF_OUT" | awk '/leaf_add/{print $1}')
-        if [ "$PROF_LEAF_CALLS" = "14" ]; then
-            pass "profile: leaf_add call count = 14"
-        else
-            fail "profile: leaf_add call count (got $PROF_LEAF_CALLS)"
-        fi
-
-        # branch_test is called 2 times
-        PROF_BRANCH_CALLS=$(echo "$PROF_OUT" | awk '/branch_test/{print $1}')
-        if [ "$PROF_BRANCH_CALLS" = "2" ]; then
-            pass "profile: branch_test call count = 2"
-        else
-            fail "profile: branch_test call count (got $PROF_BRANCH_CALLS)"
-        fi
-
-        # Profile stderr should have instruction count
-        if echo "$PROF_ERR" | grep -q 'instructions'; then
-            pass "profile: summary on stderr"
-        else
-            fail "profile: summary on stderr"
-        fi
-    else
-        skip "profile: (no .pt/.meta from exec)"
-    fi
-
-    # Tree format
-    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
-        run_bsdtrace decode -f tree -m "$META_FILE" "$PT_FILE"
-        TREE_OUT="$ROUT"
-        TREE_ERR="$RERR"
-
-        if echo "$TREE_OUT" | grep -q 'leaf_add'; then
-            pass "tree: leaf_add in tree"
-        else
-            fail "tree: leaf_add in tree"
-        fi
-
-        if echo "$TREE_OUT" | grep -q 'nested_outer'; then
-            pass "tree: nested_outer in tree"
-        else
-            fail "tree: nested_outer in tree"
-        fi
-
-        # leaf_add is called from multiple parents.  Under loop_test
-        # it should be called 10 times (loop of 10 iterations).
-        if echo "$TREE_OUT" | grep -Eq 'leaf_add.*\(10\)'; then
-            pass "tree: leaf_add under loop_test count = 10"
-        else
-            fail "tree: leaf_add under loop_test count (expected 10)"
-            echo "    $(echo "$TREE_OUT" | grep 'leaf_add' | head -5)"
-        fi
-
-        if echo "$TREE_ERR" | grep -q 'call tree nodes'; then
-            pass "tree: summary on stderr"
-        else
-            fail "tree: summary on stderr"
-        fi
-    else
-        skip "tree: (no .pt/.meta from exec)"
-    fi
-
-    settle_hwt
 
 
 
@@ -1473,14 +1387,14 @@ DPROG
     # 2. Interpreter (ld-elf.so.1) symbolication
     #    A full trace of testprog should resolve ld-elf.so.1 function names,
     #    not just ld-elf.so.1+offset.
-    if [ -n "$EOUT" ]; then
-        if echo "$EOUT" | grep -qE 'ld-elf\.so\.1:[a-zA-Z_]'; then
+    if [ -s "$EOUT_FILE" ]; then
+        if grep -qE 'ld-elf\.so\.1:[a-zA-Z_]' "$EOUT_FILE"; then
             pass "sym: ld-elf.so.1 has function names"
         else
-            if echo "$EOUT" | grep -qE 'ld-elf\.so\.1'; then
+            if grep -qE 'ld-elf\.so\.1' "$EOUT_FILE"; then
                 fail "sym: ld-elf.so.1 has function names (only binary+offset seen)"
                 echo "    --- debug: ld-elf events ---"
-                echo "$EOUT" | grep 'ld-elf' | head -5
+                grep 'ld-elf' "$EOUT_FILE" | head -5
                 echo "    ---"
             else
                 skip "sym: ld-elf.so.1 has function names (no ld-elf events in trace)"
@@ -1493,14 +1407,14 @@ DPROG
     # 3. Shared library symbolication (libc / libsys)
     #    Verify that shared library calls resolve to function names,
     #    not just libc.so.7+offset.
-    if [ -n "$EOUT" ]; then
-        if echo "$EOUT" | grep -qE 'libc\.so\.[0-9]+:[a-zA-Z_]|libsys\.so\.[0-9]+:[a-zA-Z_]'; then
+    if [ -s "$EOUT_FILE" ]; then
+        if grep -qE 'libc\.so\.[0-9]+:[a-zA-Z_]|libsys\.so\.[0-9]+:[a-zA-Z_]' "$EOUT_FILE"; then
             pass "sym: shared library function names"
         else
-            if echo "$EOUT" | grep -qE 'libc\.so|libsys\.so'; then
+            if grep -qE 'libc\.so|libsys\.so' "$EOUT_FILE"; then
                 fail "sym: shared library function names (only binary+offset seen)"
                 echo "    --- debug: library events ---"
-                echo "$EOUT" | grep -E 'libc\.so|libsys\.so' | head -5
+                grep -E 'libc\.so|libsys\.so' "$EOUT_FILE" | head -5
                 echo "    ---"
             else
                 skip "sym: shared library function names (no library events in trace)"
@@ -1517,8 +1431,7 @@ DPROG
     PIE_SRC="Tests/bsdtrace/testprog/main.c"
     if [ -f "$PIE_SRC" ] && cc -O0 -fPIC -pie -o "$PIE_PROG" "$PIE_SRC" 2>/dev/null; then
         PT_PIE="$TMPDIR/testprog-pie.pt"
-        run_bsdtrace exec -t 5 -o "$PT_PIE" -- "$PIE_PROG"
-        PIE_OUT="$ROUT"
+        run_bsdtrace_file exec -t 5 -o "$PT_PIE" -- "$PIE_PROG"
         PIE_ERR="$RERR"
 
         if echo "$PIE_ERR" | grep -q 'instructions'; then
@@ -1530,7 +1443,7 @@ DPROG
         # Function names should resolve despite ASLR slide
         PIE_HIT=0
         for FN in leaf_add branch_test loop_test; do
-            if echo "$PIE_OUT" | grep -q "$FN"; then
+            if grep -q "$FN" "$ROUT_FILE"; then
                 PIE_HIT=$((PIE_HIT + 1))
             fi
         done
@@ -1539,7 +1452,7 @@ DPROG
         else
             fail "sym: PIE binary function names resolve ($PIE_HIT/3)"
             echo "    --- debug: first 5 events ---"
-            echo "$PIE_OUT" | grep -E '^\s+(CALL|RETURN)' | head -5
+            grep -E '^\s+(CALL|RETURN)' "$ROUT_FILE" | head -5
             echo "    ---"
         fi
 
@@ -1768,6 +1681,85 @@ PY
         fail "decode: truncated file does not crash (exit=$RRC)"
     fi
 
+    # ── profile format ──────────────────────────────────────
+    echo "--- profile ---"
+
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace decode -f profile -m "$META_FILE" "$PT_FILE"
+        PROF_OUT="$ROUT"
+        PROF_ERR="$RERR"
+
+        if echo "$PROF_OUT" | grep -q 'CALLS'; then
+            pass "profile: header present"
+        else
+            fail "profile: header present"
+        fi
+
+        if echo "$PROF_OUT" | grep -q 'leaf_add'; then
+            pass "profile: leaf_add in output"
+        else
+            fail "profile: leaf_add in output"
+        fi
+
+        PROF_LEAF_CALLS=$(echo "$PROF_OUT" | awk '/leaf_add/{print $1}')
+        if [ "$PROF_LEAF_CALLS" = "14" ]; then
+            pass "profile: leaf_add call count = 14"
+        else
+            fail "profile: leaf_add call count (got $PROF_LEAF_CALLS)"
+        fi
+
+        PROF_BRANCH_CALLS=$(echo "$PROF_OUT" | awk '/branch_test/{print $1}')
+        if [ "$PROF_BRANCH_CALLS" = "2" ]; then
+            pass "profile: branch_test call count = 2"
+        else
+            fail "profile: branch_test call count (got $PROF_BRANCH_CALLS)"
+        fi
+
+        if echo "$PROF_ERR" | grep -q 'instructions'; then
+            pass "profile: summary on stderr"
+        else
+            fail "profile: summary on stderr"
+        fi
+    else
+        skip "profile: (no .pt/.meta from exec)"
+    fi
+
+    # ── tree format ─────────────────────────────────────────
+    echo "--- tree ---"
+
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace decode -f tree -m "$META_FILE" "$PT_FILE"
+        TREE_OUT="$ROUT"
+        TREE_ERR="$RERR"
+
+        if echo "$TREE_OUT" | grep -q 'leaf_add'; then
+            pass "tree: leaf_add in tree"
+        else
+            fail "tree: leaf_add in tree"
+        fi
+
+        if echo "$TREE_OUT" | grep -q 'nested_outer'; then
+            pass "tree: nested_outer in tree"
+        else
+            fail "tree: nested_outer in tree"
+        fi
+
+        if echo "$TREE_OUT" | grep -Eq 'leaf_add.*\(10\)'; then
+            pass "tree: leaf_add under loop_test count = 10"
+        else
+            fail "tree: leaf_add under loop_test count (expected 10)"
+            echo "    $(echo "$TREE_OUT" | grep 'leaf_add' | head -5)"
+        fi
+
+        if echo "$TREE_ERR" | grep -q 'call tree nodes'; then
+            pass "tree: summary on stderr"
+        else
+            fail "tree: summary on stderr"
+        fi
+    else
+        skip "tree: (no .pt/.meta from exec)"
+    fi
+
     settle_hwt
 
 
@@ -1778,8 +1770,9 @@ PY
     if [ -n "$STARTED_PID" ] && kill -0 "$STARTED_PID" 2>/dev/null; then
         PT_TRACE="$TMPDIR/trace-attach.pt"
         TRACE_META="$TMPDIR/trace-attach.meta"
-        run_bsdtrace trace -d 3 -o "$PT_TRACE" "$STARTED_PID"
-        TOUT="$ROUT"
+        run_bsdtrace_file trace -d 3 -o "$PT_TRACE" "$STARTED_PID"
+        TOUT_FILE="$TMPDIR/trace-basic-out.txt"
+        mv "$ROUT_FILE" "$TOUT_FILE" 2>/dev/null || true
         TERR="$RERR"
         stop_trace_target
 
@@ -1801,7 +1794,7 @@ PY
             fail "trace: .meta file created"
         fi
 
-        if echo "$TOUT" | grep -Eq 'attach_loop|attach_branch|attach_leaf|attach_exec_mmap'; then
+        if grep -Eq 'attach_loop|attach_branch|attach_leaf|attach_exec_mmap' "$TOUT_FILE"; then
             pass "trace: decoded symbols"
         else
             fail "trace: decoded symbols"

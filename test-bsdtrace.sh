@@ -762,8 +762,9 @@ PY
     # full exec trace, not by scraping mixed live stdout/stderr.
     EXEC_JSON_LINES="$TMPDIR/exec-json-lines.txt"
     if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
-        run_bsdtrace decode -f json -m "$META_FILE" "$PT_FILE"
-        printf '%s\n' "$ROUT" | grep '^{' > "$EXEC_JSON_LINES"
+        run_bsdtrace_file decode -f json -m "$META_FILE" "$PT_FILE"
+        grep '^{' "$ROUT_FILE" > "$EXEC_JSON_LINES"
+        rm -f "$ROUT_FILE"
     else
         rm -f "$EXEC_JSON_LINES"
     fi
@@ -1554,8 +1555,7 @@ PY
 
     if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
         # Full decode with .meta
-        run_bsdtrace decode -m "$META_FILE" "$PT_FILE"
-        DOUT="$ROUT"
+        run_bsdtrace_file decode -m "$META_FILE" "$PT_FILE"
         DERR="$RERR"
         if echo "$DERR" | grep -q 'instructions'; then
             pass "decode: offline re-decode"
@@ -1564,21 +1564,21 @@ PY
         fi
 
         # Known functions should appear in offline decode too
-        if echo "$DOUT" | grep -q 'leaf_add'; then
+        if grep -q 'leaf_add' "$ROUT_FILE"; then
             pass "decode: offline has known functions"
         else
             fail "decode: offline has known functions"
         fi
 
         # JSON format offline
-        run_bsdtrace decode -f json -m "$META_FILE" "$PT_FILE"
-        if echo "$ROUT" | grep -q '"insn"'; then
+        run_bsdtrace_file decode -f json -m "$META_FILE" "$PT_FILE"
+        if grep -q '"insn"' "$ROUT_FILE"; then
             pass "decode: offline json format"
         else
             fail "decode: offline json format"
         fi
 
-        printf '%s\n' "$ROUT" | grep '^{' > "$TMPDIR/decode-json-lines.txt"
+        grep '^{' "$ROUT_FILE" > "$TMPDIR/decode-json-lines.txt"
         DECODE_JSON_LINES="$TMPDIR/decode-json-lines.txt"
         if [ -s "$TMPDIR/decode-json-lines.txt" ] &&
             json_lines_valid "$TMPDIR/decode-json-lines.txt"; then
@@ -1613,9 +1613,9 @@ PY
         fi
 
         # Explicit -m meta path — check both stderr summary and stdout decode
-        run_bsdtrace decode -m "$META_FILE" "$PT_FILE"
+        run_bsdtrace_file decode -m "$META_FILE" "$PT_FILE"
         if echo "$RERR" | grep -q 'instructions' &&
-            echo "$ROUT" | grep -Eq 'CALL|RETURN'; then
+            grep -Eq 'CALL|RETURN' "$ROUT_FILE"; then
             pass "decode: explicit -m meta path"
         else
             fail "decode: explicit -m meta path"
@@ -1633,9 +1633,9 @@ PY
         fi
 
         # Implicit sidecar discovery — check both stderr and stdout
-        run_bsdtrace decode "$PT_FILE"
+        run_bsdtrace_file decode "$PT_FILE"
         if echo "$RERR" | grep -q 'instructions' &&
-            echo "$ROUT" | grep -Eq 'CALL|RETURN'; then
+            grep -Eq 'CALL|RETURN' "$ROUT_FILE"; then
             pass "decode: implicit .meta discovery"
         else
             fail "decode: implicit .meta discovery"
@@ -1685,30 +1685,29 @@ PY
     echo "--- profile ---"
 
     if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
-        run_bsdtrace decode -f profile -m "$META_FILE" "$PT_FILE"
-        PROF_OUT="$ROUT"
+        run_bsdtrace_file decode -f profile -m "$META_FILE" "$PT_FILE"
         PROF_ERR="$RERR"
 
-        if echo "$PROF_OUT" | grep -q 'CALLS'; then
+        if grep -q 'CALLS' "$ROUT_FILE"; then
             pass "profile: header present"
         else
             fail "profile: header present"
         fi
 
-        if echo "$PROF_OUT" | grep -q 'leaf_add'; then
+        if grep -q 'leaf_add' "$ROUT_FILE"; then
             pass "profile: leaf_add in output"
         else
             fail "profile: leaf_add in output"
         fi
 
-        PROF_LEAF_CALLS=$(echo "$PROF_OUT" | awk '/leaf_add/{print $1}')
+        PROF_LEAF_CALLS=$(awk '/leaf_add/{print $1}' "$ROUT_FILE")
         if [ "$PROF_LEAF_CALLS" = "14" ]; then
             pass "profile: leaf_add call count = 14"
         else
             fail "profile: leaf_add call count (got $PROF_LEAF_CALLS)"
         fi
 
-        PROF_BRANCH_CALLS=$(echo "$PROF_OUT" | awk '/branch_test/{print $1}')
+        PROF_BRANCH_CALLS=$(awk '/branch_test/{print $1}' "$ROUT_FILE")
         if [ "$PROF_BRANCH_CALLS" = "2" ]; then
             pass "profile: branch_test call count = 2"
         else
@@ -1728,27 +1727,26 @@ PY
     echo "--- tree ---"
 
     if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
-        run_bsdtrace decode -f tree -m "$META_FILE" "$PT_FILE"
-        TREE_OUT="$ROUT"
+        run_bsdtrace_file decode -f tree -m "$META_FILE" "$PT_FILE"
         TREE_ERR="$RERR"
 
-        if echo "$TREE_OUT" | grep -q 'leaf_add'; then
+        if grep -q 'leaf_add' "$ROUT_FILE"; then
             pass "tree: leaf_add in tree"
         else
             fail "tree: leaf_add in tree"
         fi
 
-        if echo "$TREE_OUT" | grep -q 'nested_outer'; then
+        if grep -q 'nested_outer' "$ROUT_FILE"; then
             pass "tree: nested_outer in tree"
         else
             fail "tree: nested_outer in tree"
         fi
 
-        if echo "$TREE_OUT" | grep -Eq 'leaf_add.*\(10\)'; then
+        if grep -Eq 'leaf_add.*\(10\)' "$ROUT_FILE"; then
             pass "tree: leaf_add under loop_test count = 10"
         else
             fail "tree: leaf_add under loop_test count (expected 10)"
-            echo "    $(echo "$TREE_OUT" | grep 'leaf_add' | head -5)"
+            echo "    $(grep 'leaf_add' "$ROUT_FILE" | head -5)"
         fi
 
         if echo "$TREE_ERR" | grep -q 'call tree nodes'; then

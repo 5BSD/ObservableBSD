@@ -1157,24 +1157,37 @@ DPROG
 
     settle_hwt
 
-    # Thread 1 (worker): should see worker_work/worker_leaf, not main_*
+    # Thread 1 (worker): use trace mode since the thread must already
+    # exist when the HWT context is allocated (exec mode forks stopped,
+    # so only thread 0 exists at alloc time).
     PT_THR1="$TMPDIR/thread-1.pt"
-    run_bsdtrace exec -T 1 -t 10 -o "$PT_THR1" -- "$THREADPROG"
-    THR1_OUT="$ROUT"
-    THR1_ERR="$RERR"
-    if echo "$THR1_ERR" | grep -q 'instructions'; then
-        if echo "$THR1_OUT" | grep -Eq 'worker_work|worker_leaf'; then
-            pass "thread: -T 1 has worker_* symbols"
+    "$THREADPROG" &
+    THR1_PID=$!
+    PIDS_TO_KILL="$PIDS_TO_KILL $THR1_PID"
+    sleep 1  # let worker thread start
+    if kill -0 "$THR1_PID" 2>/dev/null; then
+        run_bsdtrace trace -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
+        THR1_OUT="$ROUT"
+        THR1_ERR="$RERR"
+        kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
+        if echo "$THR1_ERR" | grep -q 'instructions'; then
+            if echo "$THR1_OUT" | grep -Eq 'worker_work|worker_leaf'; then
+                pass "thread: -T 1 has worker_* symbols"
+            else
+                fail "thread: -T 1 has worker_* symbols"
+            fi
+            if echo "$THR1_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'main_work\|main_leaf'; then
+                fail "thread: -T 1 excludes main_* (main symbols found)"
+            else
+                pass "thread: -T 1 excludes main_*"
+            fi
         else
-            fail "thread: -T 1 has worker_* symbols"
-        fi
-        if echo "$THR1_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'main_work\|main_leaf'; then
-            fail "thread: -T 1 excludes main_* (main symbols found)"
-        else
-            pass "thread: -T 1 excludes main_*"
+            fail "thread: -T 1 basic trace"
+            skip "thread: -T 1 excludes main_*"
         fi
     else
-        fail "thread: -T 1 basic trace"
+        fail "thread: -T 1 could not start threadprog"
+        skip "thread: -T 1 has worker_* symbols"
         skip "thread: -T 1 excludes main_*"
     fi
 
@@ -1192,13 +1205,14 @@ DPROG
         skip "thread: .meta header has tid=0"
     fi
 
-    # Verify tid in JSON decode output
+    # Verify tid in JSON decode output (check any instruction line)
     if [ -f "$PT_THR0" ] && [ -f "$THR0_META" ]; then
         run_bsdtrace decode -f json -m "$THR0_META" "$PT_THR0"
-        if echo "$ROUT" | grep '^{' | head -1 | grep -q '"tid":0'; then
+        if echo "$ROUT" | grep '"insn"' | head -1 | grep -q '"tid":0'; then
             pass "thread: json output has tid field"
         else
             fail "thread: json output has tid field"
+            echo "    first json line: $(echo "$ROUT" | grep '"insn"' | head -1)"
         fi
     else
         skip "thread: json output has tid field"

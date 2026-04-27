@@ -1180,6 +1180,30 @@ DPROG
 
     settle_hwt
 
+    # Verify thread identity in .meta header
+    THR0_META="$TMPDIR/thread-0.meta"
+    if [ -f "$THR0_META" ]; then
+        if grep -q '"type":"header".*"tid":0' "$THR0_META"; then
+            pass "thread: .meta header has tid=0"
+        else
+            fail "thread: .meta header has tid=0"
+        fi
+    else
+        skip "thread: .meta header has tid=0"
+    fi
+
+    # Verify tid in JSON decode output
+    if [ -f "$PT_THR0" ] && [ -f "$THR0_META" ]; then
+        run_bsdtrace decode -f json -m "$THR0_META" "$PT_THR0"
+        if echo "$ROUT" | grep '^{' | head -1 | grep -q '"tid":0'; then
+            pass "thread: json output has tid field"
+        else
+            fail "thread: json output has tid field"
+        fi
+    else
+        skip "thread: json output has tid field"
+    fi
+
 
     # ── profile format ──────────────────────────────────────
     echo "--- profile ---"

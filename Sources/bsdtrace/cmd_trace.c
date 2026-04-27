@@ -60,6 +60,8 @@ cmd_trace(int argc, char **argv)
 	size_t bufsize;
 	pid_t pid;
 	struct ip_filter filter;
+	struct range_spec range_specs[2];
+	int nrange_specs;
 	int tid;
 	int maxrecords;
 	int totalrecords;
@@ -79,6 +81,7 @@ cmd_trace(int argc, char **argv)
 	maxrecords = 0;
 	tid = 0;
 	memset(&filter, 0, sizeof(filter));
+	nrange_specs = 0;
 	dryrun = false;
 	pause_on_mmap = false;
 
@@ -115,20 +118,15 @@ cmd_trace(int argc, char **argv)
 			pt_output = optarg;
 			break;
 		case 'r':
-			if (filter.nranges >= 2) {
+			if (nrange_specs >= 2) {
 				fprintf(stderr,
 				    "bsdtrace trace: max 2 IP ranges\n");
 				return (1);
 			}
-			if (sscanf(optarg, "0x%lx:0x%lx",
-			    &filter.ranges[filter.nranges].start,
-			    &filter.ranges[filter.nranges].end) != 2) {
-				fprintf(stderr,
-				    "bsdtrace trace: bad range '%s' "
-				    "(use 0xstart:0xend)\n", optarg);
+			if (parse_range_spec(optarg,
+			    &range_specs[nrange_specs]) != 0)
 				return (1);
-			}
-			filter.nranges++;
+			nrange_specs++;
 			break;
 		case 'T':
 			tid = atoi(optarg);
@@ -183,6 +181,25 @@ cmd_trace(int argc, char **argv)
 	if (execname == NULL)
 		execname = "?";
 
+	/* Resolve any symbol-based range specs to addresses. */
+	if (nrange_specs > 0) {
+		char fullpath[MAXPATHLEN];
+		bool unused_aslr;
+
+		if (process_exe_fullpath(pid, fullpath,
+		    sizeof(fullpath)) != 0) {
+			warnx("cannot determine executable path for pid %d",
+			    (int)pid);
+			free(detected_backend);
+			return (1);
+		}
+		if (resolve_range_specs(range_specs, nrange_specs,
+		    &filter, pid, fullpath, false, &unused_aslr) != 0) {
+			free(detected_backend);
+			return (1);
+		}
+	}
+
 	/* Allocate HWT context. */
 	if (hwt_ctx_alloc(&ctx, HWT_MODE_THREAD, pid, tid,
 	    bufsize, backend_name) != 0) {
@@ -234,6 +251,7 @@ cmd_trace(int argc, char **argv)
 	if (meta == NULL)
 		warnx("could not create %s — continuing without metadata",
 		    meta_path);
+	meta_writer_header(meta, pid, tid);
 	trace_state_init(&ts, meta);
 
 	clock_gettime(CLOCK_MONOTONIC, &start);

@@ -145,6 +145,24 @@ struct ip_filter {
 	} ranges[2];
 };
 
+/*
+ * Range specification — parsed from -r, either a hex address range
+ * or a function name to resolve from ELF symbols.
+ */
+#define	RANGE_SPEC_SYMLEN	256
+
+enum range_spec_type {
+	RANGE_ADDR,
+	RANGE_SYMBOL
+};
+
+struct range_spec {
+	enum range_spec_type	type;
+	uint64_t		start;		/* RANGE_ADDR only */
+	uint64_t		end;		/* RANGE_ADDR only */
+	char			symbol[RANGE_SPEC_SYMLEN]; /* RANGE_SYMBOL */
+};
+
 struct hwt_ctx {
 	int		ctl_fd;		/* /dev/hwt                       */
 	int		ctx_fd;		/* /dev/hwt_<ident>_<tid>         */
@@ -292,13 +310,28 @@ const struct sym_entry *sym_table_lookup(const struct sym_table *st,
 void	 sym_table_free(struct sym_table *st);
 
 /* ------------------------------------------------------------------ */
+/* resolve.c — symbol-to-address range resolution                      */
+/* ------------------------------------------------------------------ */
+
+int	 parse_range_spec(const char *arg, struct range_spec *spec);
+int	 resolve_symbol_in_elf(const char *path, int64_t slide,
+	    const char *name, uint64_t *start_out, uint64_t *end_out);
+int	 process_exe_fullpath(pid_t pid, char *buf, size_t bufsz);
+int	 process_load_addr(pid_t pid, const char *exe_path,
+	    uint64_t *load_out);
+int	 elf_is_pie(const char *path);
+int	 resolve_range_specs(struct range_spec *specs, int nspecs,
+	    struct ip_filter *filter, pid_t pid, const char *exe_path,
+	    bool is_exec_mode, bool *aslr_disable);
+
+/* ------------------------------------------------------------------ */
 /* decode.c — PT packet / instruction decoder                          */
 /* ------------------------------------------------------------------ */
 
 int	 decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
-	    enum bsdtrace_fmt fmt);
+	    enum bsdtrace_fmt fmt, int tid);
 int	 decode_pt_probe(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
 	    struct decode_probe_result *result);
@@ -310,9 +343,11 @@ int	 decode_pt_probe(const void *buf, size_t len,
 struct meta_writer;
 
 struct meta_writer *meta_writer_open(const char *path);
+void	 meta_writer_header(struct meta_writer *mw, pid_t pid, int tid);
 void	 meta_writer_record(struct meta_writer *mw,
 	    const struct bsdtrace_record *rec);
 void	 meta_writer_close(struct meta_writer *mw);
+int	 meta_read_tid(const char *path);
 int	 meta_read_sections(const char *path,
 	    struct pt_image_info **sections_out, int *nsections_out);
 
@@ -327,7 +362,7 @@ int	 trace_state_drain_post_stop(struct hwt_ctx *ctx,
 	    struct trace_state *ts);
 void	 trace_state_free(struct trace_state *ts);
 ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
-	    const char *pt_output, enum bsdtrace_fmt fmt);
+	    const char *pt_output, enum bsdtrace_fmt fmt, int tid);
 
 void	 emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
 	    enum bsdtrace_fmt fmt, bool pause_on_mmap, struct hwt_ctx *ctx,

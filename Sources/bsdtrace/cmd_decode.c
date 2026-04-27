@@ -38,6 +38,7 @@ cmd_decode(int argc, char **argv)
 	void *buf;
 	int rc;
 	int nsections;
+	int tid;
 	int fd;
 	int ch;
 
@@ -147,8 +148,9 @@ cmd_decode(int argc, char **argv)
 		    pt_path, (long long)sb.st_size, nsections,
 		    meta_path);
 
+	tid = meta_path[0] != '\0' ? meta_read_tid(meta_path) : -1;
 	rc = decode_pt_insn(buf, (size_t)sb.st_size, sections, nsections,
-	    fmt);
+	    fmt, tid);
 
 	munmap(buf, sb.st_size);
 	free(sections);

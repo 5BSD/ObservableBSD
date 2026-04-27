@@ -48,6 +48,17 @@ meta_writer_open(const char *path)
 }
 
 void
+meta_writer_header(struct meta_writer *mw, pid_t pid, int tid)
+{
+
+	if (mw == NULL || mw->fp == NULL)
+		return;
+	fprintf(mw->fp,
+	    "{\"type\":\"header\",\"pid\":%d,\"tid\":%d}\n",
+	    (int)pid, tid);
+}
+
+void
 meta_writer_record(struct meta_writer *mw, const struct bsdtrace_record *rec)
 {
 
@@ -100,6 +111,29 @@ meta_writer_close(struct meta_writer *mw)
 /* ------------------------------------------------------------------ */
 /* Reader                                                              */
 /* ------------------------------------------------------------------ */
+
+int
+meta_read_tid(const char *path)
+{
+	FILE *fp;
+	char line[256];
+	int tid;
+
+	fp = fopen(path, "r");
+	if (fp == NULL)
+		return (-1);
+
+	/* The header is the first line: {"type":"header","pid":N,"tid":N} */
+	if (fgets(line, sizeof(line), fp) != NULL &&
+	    sscanf(line, "{\"type\":\"header\",\"pid\":%*d,\"tid\":%d}",
+	    &tid) == 1) {
+		fclose(fp);
+		return (tid);
+	}
+
+	fclose(fp);
+	return (-1);
+}
 
 int
 meta_read_sections(const char *path,

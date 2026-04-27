@@ -808,7 +808,7 @@ profile_free(struct profile *p)
 int
 decode_pt_insn(const void *buf, size_t len,
     const struct pt_image_info *sections, int nsections,
-    enum bsdtrace_fmt fmt)
+    enum bsdtrace_fmt fmt, int tid)
 {
 	struct pt_config config;
 	struct pt_insn_decoder *decoder;
@@ -874,9 +874,16 @@ decode_pt_insn(const void *buf, size_t len,
 	}
 
 	if (fmt == FMT_TEXT) {
-		fprintf(stderr,
-		    "\nPT Instructions (%zu bytes)\n"
-		    "────────────────────────────────────────\n", len);
+		if (tid >= 0)
+			fprintf(stderr,
+			    "\nPT Instructions (%zu bytes, tid=%d)\n"
+			    "────────────────────────────────────────\n",
+			    len, tid);
+		else
+			fprintf(stderr,
+			    "\nPT Instructions (%zu bytes)\n"
+			    "────────────────────────────────────────\n",
+			    len);
 	}
 
 	total = 0;
@@ -959,7 +966,7 @@ decode_pt_insn(const void *buf, size_t len,
 				json_escape(ebin, sizeof(ebin), sym->binary);
 				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\","
 				    "\"sym\":\"%s\",\"off\":%lu,"
-				    "\"bin\":\"%s\"}\n",
+				    "\"bin\":\"%s\"",
 				    label,
 				    (unsigned long)insn.ip,
 				    esym,
@@ -969,15 +976,19 @@ decode_pt_insn(const void *buf, size_t len,
 				char ebin[256];
 				json_escape(ebin, sizeof(ebin), bn);
 				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\","
-				    "\"off\":%lu,\"bin\":\"%s\"}\n",
+				    "\"off\":%lu,\"bin\":\"%s\"",
 				    label,
 				    (unsigned long)insn.ip,
 				    (unsigned long)boff,
 				    ebin);
-			} else
-				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\"}\n",
+			} else {
+				printf("{\"insn\":\"%s\",\"ip\":\"0x%lx\"",
 				    label,
 				    (unsigned long)insn.ip);
+			}
+			if (tid >= 0)
+				printf(",\"tid\":%d", tid);
+			printf("}\n");
 		} else {
 			if (sym != NULL) {
 				uint64_t off = insn.ip - sym->addr;
@@ -1007,6 +1018,8 @@ decode_pt_insn(const void *buf, size_t len,
 	pt_image_free(image);
 
 	if (fmt == FMT_PROFILE) {
+		if (tid >= 0)
+			printf("Thread %d:\n", tid);
 		profile_print(&prof);
 		fprintf(stderr,
 		    "%d instructions, %d functions profiled\n",

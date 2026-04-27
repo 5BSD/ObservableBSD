@@ -19,6 +19,7 @@ BUILDDIR=".build/x86_64-unknown-freebsd/debug"
 BIN="$BUILDDIR/bsdtrace"
 TESTPROG="/tmp/bsdtrace-testprog-$$"
 ATTACHPROG="/tmp/bsdtrace-attachprog-$$"
+THREADPROG="/tmp/bsdtrace-threadprog-$$"
 OBJDUMP=$(command -v llvm-objdump 2>/dev/null || command -v objdump 2>/dev/null || true)
 PASS=0
 FAIL=0
@@ -321,6 +322,7 @@ cleanup() {
     rm -rf "$TMPDIR"
     rm -f "$TESTPROG"
     rm -f "$ATTACHPROG"
+    rm -f "$THREADPROG"
 }
 trap cleanup EXIT
 
@@ -365,6 +367,14 @@ if cc -O0 -o "$ATTACHPROG" Tests/bsdtrace/attachprog/main.c 2>&1; then
     echo "ok"
 else
     echo "FATAL: failed to compile attachprog"
+    exit 2
+fi
+
+printf "  Compiling threadprog... "
+if cc -O0 -lpthread -o "$THREADPROG" Tests/bsdtrace/threadprog/main.c 2>&1; then
+    echo "ok"
+else
+    echo "FATAL: failed to compile threadprog"
     exit 2
 fi
 
@@ -1116,6 +1126,106 @@ DPROG
         fi
     else
         skip "exec: dual -r range filter (compile or objdump failed)"
+    fi
+
+    settle_hwt
+
+
+    # ── multi-thread ────────────────────────────────────────
+    echo "--- threads ---"
+
+    # Thread 0 (main): should see main_work/main_leaf, not worker_*
+    PT_THR0="$TMPDIR/thread-0.pt"
+    run_bsdtrace exec -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
+    THR0_OUT="$ROUT"
+    THR0_ERR="$RERR"
+    if echo "$THR0_ERR" | grep -q 'instructions'; then
+        if echo "$THR0_OUT" | grep -Eq 'main_work|main_leaf'; then
+            pass "thread: -T 0 has main_* symbols"
+        else
+            fail "thread: -T 0 has main_* symbols"
+        fi
+        if echo "$THR0_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'worker_'; then
+            fail "thread: -T 0 excludes worker_* (worker symbols found)"
+        else
+            pass "thread: -T 0 excludes worker_*"
+        fi
+    else
+        fail "thread: -T 0 basic trace"
+        skip "thread: -T 0 excludes worker_*"
+    fi
+
+    settle_hwt
+
+    # Thread 1 (worker): should see worker_work/worker_leaf, not main_*
+    PT_THR1="$TMPDIR/thread-1.pt"
+    run_bsdtrace exec -T 1 -t 10 -o "$PT_THR1" -- "$THREADPROG"
+    THR1_OUT="$ROUT"
+    THR1_ERR="$RERR"
+    if echo "$THR1_ERR" | grep -q 'instructions'; then
+        if echo "$THR1_OUT" | grep -Eq 'worker_work|worker_leaf'; then
+            pass "thread: -T 1 has worker_* symbols"
+        else
+            fail "thread: -T 1 has worker_* symbols"
+        fi
+        if echo "$THR1_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'main_work\|main_leaf'; then
+            fail "thread: -T 1 excludes main_* (main symbols found)"
+        else
+            pass "thread: -T 1 excludes main_*"
+        fi
+    else
+        fail "thread: -T 1 basic trace"
+        skip "thread: -T 1 excludes main_*"
+    fi
+
+    settle_hwt
+
+
+    # ── profile format ──────────────────────────────────────
+    echo "--- profile ---"
+
+    # Profile the basic testprog trace
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace decode -f profile -m "$META_FILE" "$PT_FILE"
+        PROF_OUT="$ROUT"
+        PROF_ERR="$RERR"
+
+        if echo "$PROF_OUT" | grep -q 'CALLS'; then
+            pass "profile: header present"
+        else
+            fail "profile: header present"
+        fi
+
+        if echo "$PROF_OUT" | grep -q 'leaf_add'; then
+            pass "profile: leaf_add in output"
+        else
+            fail "profile: leaf_add in output"
+        fi
+
+        # leaf_add is called 14 times — verify the count
+        PROF_LEAF_CALLS=$(echo "$PROF_OUT" | awk '/leaf_add/{print $1}')
+        if [ "$PROF_LEAF_CALLS" = "14" ]; then
+            pass "profile: leaf_add call count = 14"
+        else
+            fail "profile: leaf_add call count (got $PROF_LEAF_CALLS)"
+        fi
+
+        # branch_test is called 2 times
+        PROF_BRANCH_CALLS=$(echo "$PROF_OUT" | awk '/branch_test/{print $1}')
+        if [ "$PROF_BRANCH_CALLS" = "2" ]; then
+            pass "profile: branch_test call count = 2"
+        else
+            fail "profile: branch_test call count (got $PROF_BRANCH_CALLS)"
+        fi
+
+        # Profile stderr should have instruction count
+        if echo "$PROF_ERR" | grep -q 'instructions'; then
+            pass "profile: summary on stderr"
+        else
+            fail "profile: summary on stderr"
+        fi
+    else
+        skip "profile: (no .pt/.meta from exec)"
     fi
 
     settle_hwt

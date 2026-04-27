@@ -108,7 +108,8 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
 /* Output format. */
 enum bsdtrace_fmt {
 	FMT_TEXT,
-	FMT_JSON
+	FMT_JSON,
+	FMT_PROFILE
 };
 
 /*

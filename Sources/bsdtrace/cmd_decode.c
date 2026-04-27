@@ -53,6 +53,8 @@ cmd_decode(int argc, char **argv)
 				fmt = FMT_JSON;
 			else if (strcmp(optarg, "text") == 0)
 				fmt = FMT_TEXT;
+			else if (strcmp(optarg, "profile") == 0)
+				fmt = FMT_PROFILE;
 			else {
 				fprintf(stderr,
 				    "bsdtrace decode: unknown format '%s'\n",

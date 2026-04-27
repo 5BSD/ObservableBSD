@@ -90,6 +90,8 @@ cmd_trace(int argc, char **argv)
 				fmt = FMT_JSON;
 			else if (strcmp(optarg, "text") == 0)
 				fmt = FMT_TEXT;
+			else if (strcmp(optarg, "profile") == 0)
+				fmt = FMT_PROFILE;
 			else {
 				fprintf(stderr,
 				    "bsdtrace trace: unknown format '%s'\n",

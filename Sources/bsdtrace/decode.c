@@ -21,6 +21,7 @@
 #include <gelf.h>
 #include <libelf.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -667,6 +668,141 @@ decode_pt_probe(const void *buf, size_t len,
 }
 
 /* ------------------------------------------------------------------ */
+/* Profile counters                                                    */
+/* ------------------------------------------------------------------ */
+
+struct profile_entry {
+	const char	*name;		/* sym name (borrowed from sym_table) */
+	const char	*binary;	/* binary name (borrowed) */
+	int		calls;
+	int		returns;
+	int		branches;
+};
+
+struct profile {
+	struct profile_entry	*entries;
+	int			count;
+	int			capacity;
+};
+
+static void
+profile_init(struct profile *p)
+{
+
+	memset(p, 0, sizeof(*p));
+}
+
+static void
+profile_record(struct profile *p, const struct sym_entry *sym,
+    enum pt_insn_class iclass)
+{
+	int i;
+
+	if (sym == NULL)
+		return;
+
+	/* Find existing entry. */
+	for (i = 0; i < p->count; i++) {
+		if (p->entries[i].name == sym->name &&
+		    p->entries[i].binary == sym->binary) {
+			switch (iclass) {
+			case ptic_call:
+			case ptic_far_call:
+				p->entries[i].calls++;
+				break;
+			case ptic_return:
+			case ptic_far_return:
+				p->entries[i].returns++;
+				break;
+			case ptic_jump:
+			case ptic_cond_jump:
+				p->entries[i].branches++;
+				break;
+			default:
+				break;
+			}
+			return;
+		}
+	}
+
+	/* New entry. */
+	if (p->count >= p->capacity) {
+		int newcap = p->capacity == 0 ? 128 : p->capacity * 2;
+		struct profile_entry *newent;
+
+		newent = realloc(p->entries, newcap * sizeof(*newent));
+		if (newent == NULL)
+			return;
+		p->entries = newent;
+		p->capacity = newcap;
+	}
+
+	memset(&p->entries[p->count], 0, sizeof(p->entries[p->count]));
+	p->entries[p->count].name = sym->name;
+	p->entries[p->count].binary = sym->binary;
+
+	switch (iclass) {
+	case ptic_call:
+	case ptic_far_call:
+		p->entries[p->count].calls = 1;
+		break;
+	case ptic_return:
+	case ptic_far_return:
+		p->entries[p->count].returns = 1;
+		break;
+	case ptic_jump:
+	case ptic_cond_jump:
+		p->entries[p->count].branches = 1;
+		break;
+	default:
+		break;
+	}
+
+	p->count++;
+}
+
+static int
+profile_cmp_calls(const void *a, const void *b)
+{
+	const struct profile_entry *ea = a;
+	const struct profile_entry *eb = b;
+
+	return (eb->calls - ea->calls);
+}
+
+static void
+profile_print(struct profile *p)
+{
+
+	qsort(p->entries, p->count, sizeof(p->entries[0]), profile_cmp_calls);
+
+	printf("%-8s %-8s %-8s  %-20s  %s\n",
+	    "CALLS", "RETURNS", "BRANCHES", "BINARY", "FUNCTION");
+	printf("%-8s %-8s %-8s  %-20s  %s\n",
+	    "--------", "--------", "--------",
+	    "--------------------", "--------------------");
+
+	for (int i = 0; i < p->count; i++) {
+		struct profile_entry *e = &p->entries[i];
+		if (e->calls == 0 && e->returns == 0 && e->branches == 0)
+			continue;
+		printf("%-8d %-8d %-8d  %-20s  %s\n",
+		    e->calls, e->returns, e->branches,
+		    e->binary, e->name);
+	}
+}
+
+static void
+profile_free(struct profile *p)
+{
+
+	free(p->entries);
+	p->entries = NULL;
+	p->count = 0;
+	p->capacity = 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Instruction decoder                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -681,6 +817,7 @@ decode_pt_insn(const void *buf, size_t len,
 	struct sym_table st;
 	struct bin_range ranges[MAX_BIN_RANGES];
 	int nranges;
+	struct profile prof;
 	struct pt_insn insn;
 	const struct sym_entry *sym;
 	const char *bn;
@@ -700,6 +837,7 @@ decode_pt_insn(const void *buf, size_t len,
 	}
 
 	sym_table_init(&st);
+	profile_init(&prof);
 
 	image = build_pt_image(sections, nsections, &st, true);
 	if (image == NULL) {
@@ -805,6 +943,11 @@ decode_pt_insn(const void *buf, size_t len,
 			bn = find_binary_for_ip(ranges, nranges, insn.ip,
 			    &boff);
 
+		if (fmt == FMT_PROFILE) {
+			profile_record(&prof, sym, insn.iclass);
+			continue;
+		}
+
 		if (fmt == FMT_JSON) {
 			if (sym != NULL) {
 				char esym[256], ebin[256];
@@ -859,7 +1002,12 @@ decode_pt_insn(const void *buf, size_t len,
 	pt_insn_free_decoder(decoder);
 	pt_image_free(image);
 
-	if (fmt == FMT_TEXT) {
+	if (fmt == FMT_PROFILE) {
+		profile_print(&prof);
+		fprintf(stderr,
+		    "%d instructions, %d functions profiled\n",
+		    total, prof.count);
+	} else if (fmt == FMT_TEXT) {
 		fflush(stdout);
 		fprintf(stderr,
 		    "%d instructions, %d branches, %d returns, "
@@ -868,6 +1016,7 @@ decode_pt_insn(const void *buf, size_t len,
 		    st.count);
 	}
 
+	profile_free(&prof);
 	sym_table_free(&st);
 	return (total > 0 ? 0 : -1);
 }

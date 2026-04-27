@@ -722,6 +722,23 @@ PY
         fi
     done
 
+    # Syscall name resolution: SYSCALL lines should show the resolved
+    # name (e.g. "SYSCALL write") not just the raw libsys symbol.
+    # The resolved format is: "SYSCALL  write (libsys.so.7:__sys_write)"
+    # The parenthesized original symbol distinguishes it from unresolved output.
+    if grep -qE 'SYSCALL\s+[a-z_]+.*\(libsys' "$EOUT_FILE"; then
+        pass "exec: syscall names resolved"
+    else
+        if grep -q 'SYSCALL' "$EOUT_FILE"; then
+            fail "exec: syscall names resolved (SYSCALL present but no resolved name)"
+            echo "    --- debug: first 3 SYSCALL lines ---"
+            grep 'SYSCALL' "$EOUT_FILE" | head -3
+            echo "    ---"
+        else
+            skip "exec: syscall names resolved (no SYSCALL events)"
+        fi
+    fi
+
     # Known function names from testprog
     FN_MISS=0
     for FN in leaf_add leaf_mul nested_outer nested_inner \
@@ -1133,7 +1150,7 @@ NOINLINE int group_b_loop(int n) {
 
 int main(void) {
     int i;
-    for (i = 0; i < 5000; i++) {
+    for (i = 0; i < 500000; i++) {
         sink = group_a_loop(100);
         sink = group_b_loop(100);
     }
@@ -1195,8 +1212,11 @@ DPROG
     # ── multi-thread ────────────────────────────────────────
     echo "--- threads ---"
 
-    # Clean up earlier .pt files to avoid filling /tmp.
-    rm -f "$TMPDIR"/*.pt
+    # Clean up range filter .pt files to free space, but keep
+    # testprog.pt and testprog.meta for the decode tests later.
+    rm -f "$TMPDIR"/rangeprog.pt "$TMPDIR"/dualprog*.pt
+    rm -f "$TMPDIR"/testprog-*.pt "$TMPDIR"/custom-*.pt
+    rm -f "$TMPDIR"/fast-exit.pt "$TMPDIR"/.stdout.*
 
     # Thread 0 (main): should see main_work/main_leaf, not worker_*
     PT_THR0="$TMPDIR/thread-0.pt"
@@ -1271,13 +1291,14 @@ DPROG
 
     # Verify tid in JSON decode output (check any instruction line)
     if [ -f "$PT_THR0" ] && [ -f "$THR0_META" ]; then
-        run_bsdtrace decode -f json -m "$THR0_META" "$PT_THR0"
-        if echo "$ROUT" | grep '"insn"' | head -1 | grep -q '"tid":0'; then
+        run_bsdtrace_file decode -f json -m "$THR0_META" "$PT_THR0"
+        if grep '"insn"' "$ROUT_FILE" | head -1 | grep -q '"tid":0'; then
             pass "thread: json output has tid field"
         else
             fail "thread: json output has tid field"
-            echo "    first json line: $(echo "$ROUT" | grep '"insn"' | head -1)"
+            echo "    first json line: $(grep '"insn"' "$ROUT_FILE" | head -1)"
         fi
+        rm -f "$ROUT_FILE"
     else
         skip "thread: json output has tid field"
     fi

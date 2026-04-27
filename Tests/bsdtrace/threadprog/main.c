@@ -78,7 +78,7 @@ main(void)
 	/* Give the worker time to start. */
 	usleep(10000);
 
-	for (i = 0; i < 50000; i++)
+	for (i = 0; i < 500000; i++)
 		sink = main_work(100);
 
 	running = 0;

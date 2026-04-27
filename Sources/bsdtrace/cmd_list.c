@@ -51,6 +51,12 @@ list_threads(pid_t pid)
 	}
 
 	nthreads = len / sizeof(*kip);
+	if (nthreads == 0) {
+		fprintf(stderr,
+		    "bsdtrace: no threads found for pid %d\n", (int)pid);
+		free(kip);
+		return;
+	}
 	printf("Threads for PID %d (%s):\n", (int)pid,
 	    kip[0].ki_comm);
 	printf("  %-6s  %-6s  %s\n", "INDEX", "TID", "NAME");

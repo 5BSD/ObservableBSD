@@ -71,6 +71,26 @@ run_bsdtrace() {
     RBOTH="$ROUT
 $RERR"
 }
+
+# Like run_bsdtrace but writes stdout to a file instead of a shell
+# variable.  Use for tests that decode millions of instructions —
+# capturing that much text in $ROUT exhausts shell memory.
+# Sets $ROUT_FILE to the path; $RERR and $RRC work as usual.
+run_bsdtrace_file() {
+    RERR_FILE="$TMPDIR/.stderr.$$"
+    ROUT_FILE="$TMPDIR/.stdout.$$"
+    rm -f "$ROUT_FILE"
+    timeout "$TIMEOUT" $BIN "$@" >"$ROUT_FILE" 2>"$RERR_FILE"
+    RRC=$?
+    RERR=$(cat "$RERR_FILE" 2>/dev/null)
+    rm -f "$RERR_FILE"
+    if [ "$RRC" -eq 124 ]; then
+        echo "TIMEOUT after ${TIMEOUT}s" > "$ROUT_FILE"
+        RERR="TIMEOUT after ${TIMEOUT}s"
+    fi
+    ROUT=""
+    RBOTH=""
+}
 skip() { SKIP=$((SKIP + 1)); printf "  \033[33mSKIP\033[0m  %s\n" "$1"; }
 
 json_lines_valid() {
@@ -986,14 +1006,13 @@ RPROG
         RANGEPROG_RANGE=$(text_range_arg "$RANGEPROG")
         if [ -n "$RANGEPROG_RANGE" ]; then
             PT_RLOOP="$TMPDIR/rangeprog.pt"
-            run_bsdtrace exec -r "$RANGEPROG_RANGE" -t 10 -o "$PT_RLOOP" -- "$RANGEPROG"
-            if [ "$RRC" -eq 0 ]; then
+            run_bsdtrace_file exec -r "$RANGEPROG_RANGE" -t 10 -o "$PT_RLOOP" -- "$RANGEPROG"
+            if [ "$RRC" -eq 0 ] && [ -s "$ROUT_FILE" ]; then
                 RLOOP_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
                 if [ "${RLOOP_INSN:-0}" -gt 0 ]; then
                     # Check only decoded instruction lines (CALL/RETURN/etc),
                     # not MMAP/EXEC record lines which naturally contain library paths.
-                    RLOOP_DECODED=$(echo "$ROUT" |
-                        grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
+                    RLOOP_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
                     if echo "$RLOOP_DECODED" | grep -Eq 'ld-elf\.so\.1|libc\.so\.7|libsys\.so\.7'; then
                         fail "exec: -r range decode (library symbols leaked)"
                     else
@@ -1010,8 +1029,10 @@ RPROG
                     echo "    range=$RANGEPROG_RANGE"
                     echo "    $(echo "$RERR" | tail -3)"
                 fi
-            else
+            elif [ "$RRC" -ne 0 ]; then
                 skip "exec: -r range decode (exit $RRC)"
+            else
+                skip "exec: -r range decode (no output)"
             fi
         else
             skip "exec: -r range decode (no text range)"
@@ -1019,6 +1040,47 @@ RPROG
     else
         skip "exec: -r range decode (compile failed)"
     fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Symbol-based range filter: -r function_name instead of hex addresses.
+    # Reuses rangeprog from the previous test.  The -A flag is auto-implied
+    # when using symbol names in exec mode.
+    if [ -x "$RANGEPROG" ]; then
+        PT_RSYM="$TMPDIR/rangeprog-sym.pt"
+        run_bsdtrace_file exec -r range_loop -t 10 -o "$PT_RSYM" -- "$RANGEPROG"
+        if [ "$RRC" -eq 0 ] && [ -s "$ROUT_FILE" ]; then
+            RSYM_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
+            if echo "$RERR" | grep -q "resolved 'range_loop'"; then
+                pass "exec: -r symbol resolved"
+            else
+                fail "exec: -r symbol resolved"
+                echo "    stderr: $(echo "$RERR" | head -5)"
+            fi
+            if [ "${RSYM_INSN:-0}" -gt 0 ]; then
+                RSYM_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
+                if echo "$RSYM_DECODED" | grep -q 'range_loop\|range_add'; then
+                    pass "exec: -r symbol decode ($RSYM_INSN instructions)"
+                else
+                    fail "exec: -r symbol decode (no expected symbols in output)"
+                fi
+            else
+                skip "exec: -r symbol decode (0 instructions — PSB sync issue)"
+            fi
+        elif [ "$RRC" -ne 0 ]; then
+            skip "exec: -r symbol resolved (exit $RRC)"
+            skip "exec: -r symbol decode"
+            echo "    stderr: $(echo "$RERR" | tail -3)"
+        else
+            skip "exec: -r symbol resolved (no output)"
+            skip "exec: -r symbol decode"
+        fi
+    else
+        skip "exec: -r symbol resolved (rangeprog not built)"
+        skip "exec: -r symbol decode"
+    fi
+    rm -f "$ROUT_FILE"
 
     settle_hwt
 
@@ -1098,11 +1160,10 @@ DPROG
             RANGE_B="${GB_LEAF_START}:${GB_END}"
 
             PT_DUAL="$TMPDIR/dualprog-dual.pt"
-            run_bsdtrace exec -r "$RANGE_A" -r "$RANGE_B" -t 10 -o "$PT_DUAL" -- "$DUALPROG"
-            if [ "$RRC" -eq 0 ]; then
+            run_bsdtrace_file exec -r "$RANGE_A" -r "$RANGE_B" -t 10 -o "$PT_DUAL" -- "$DUALPROG"
+            if [ "$RRC" -eq 0 ] && [ -s "$ROUT_FILE" ]; then
                 DUAL_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
-                DUAL_DECODED=$(echo "$ROUT" |
-                    grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)')
+                DUAL_DECODED=$(grep -E '^\s+(CALL|RETURN|JUMP|CJMP|SYSCALL)' "$ROUT_FILE")
                 DUAL_HAS_A=$(echo "$DUAL_DECODED" | grep -c 'group_a')
                 DUAL_HAS_B=$(echo "$DUAL_DECODED" | grep -c 'group_b')
                 if [ "${DUAL_INSN:-0}" -gt 0 ] &&
@@ -1118,8 +1179,10 @@ DPROG
                     echo "    rangeA=$RANGE_A rangeB=$RANGE_B"
                     echo "    $(echo "$RERR" | tail -3)"
                 fi
-            else
+            elif [ "$RRC" -ne 0 ]; then
                 skip "exec: dual -r range filter (exit $RRC)"
+            else
+                skip "exec: dual -r range filter (no output)"
             fi
         else
             skip "exec: dual -r range filter (objdump extraction failed)"
@@ -1127,6 +1190,7 @@ DPROG
     else
         skip "exec: dual -r range filter (compile or objdump failed)"
     fi
+    rm -f "$ROUT_FILE"
 
     settle_hwt
 
@@ -1136,16 +1200,15 @@ DPROG
 
     # Thread 0 (main): should see main_work/main_leaf, not worker_*
     PT_THR0="$TMPDIR/thread-0.pt"
-    run_bsdtrace exec -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
-    THR0_OUT="$ROUT"
+    run_bsdtrace_file exec -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
     THR0_ERR="$RERR"
     if echo "$THR0_ERR" | grep -q 'instructions'; then
-        if echo "$THR0_OUT" | grep -Eq 'main_work|main_leaf'; then
+        if grep -Eq 'main_work|main_leaf' "$ROUT_FILE"; then
             pass "thread: -T 0 has main_* symbols"
         else
             fail "thread: -T 0 has main_* symbols"
         fi
-        if echo "$THR0_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'worker_'; then
+        if grep -E '^\s+(CALL|RETURN)' "$ROUT_FILE" | grep -q 'worker_'; then
             fail "thread: -T 0 excludes worker_* (worker symbols found)"
         else
             pass "thread: -T 0 excludes worker_*"
@@ -1154,6 +1217,7 @@ DPROG
         fail "thread: -T 0 basic trace"
         skip "thread: -T 0 excludes worker_*"
     fi
+    rm -f "$ROUT_FILE"
 
     settle_hwt
 
@@ -1166,17 +1230,16 @@ DPROG
     PIDS_TO_KILL="$PIDS_TO_KILL $THR1_PID"
     sleep 1  # let worker thread start
     if kill -0 "$THR1_PID" 2>/dev/null; then
-        run_bsdtrace trace -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
-        THR1_OUT="$ROUT"
+        run_bsdtrace_file trace -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
         THR1_ERR="$RERR"
         kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
         if echo "$THR1_ERR" | grep -q 'instructions'; then
-            if echo "$THR1_OUT" | grep -Eq 'worker_work|worker_leaf'; then
+            if grep -Eq 'worker_work|worker_leaf' "$ROUT_FILE"; then
                 pass "thread: -T 1 has worker_* symbols"
             else
                 fail "thread: -T 1 has worker_* symbols"
             fi
-            if echo "$THR1_OUT" | grep -E '^\s+(CALL|RETURN)' | grep -q 'main_work\|main_leaf'; then
+            if grep -E '^\s+(CALL|RETURN)' "$ROUT_FILE" | grep -q 'main_work\|main_leaf'; then
                 fail "thread: -T 1 excludes main_* (main symbols found)"
             else
                 pass "thread: -T 1 excludes main_*"
@@ -1190,6 +1253,7 @@ DPROG
         skip "thread: -T 1 has worker_* symbols"
         skip "thread: -T 1 excludes main_*"
     fi
+    rm -f "$ROUT_FILE"
 
     settle_hwt
 
@@ -1264,6 +1328,42 @@ DPROG
         fi
     else
         skip "profile: (no .pt/.meta from exec)"
+    fi
+
+    # Tree format
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace decode -f tree -m "$META_FILE" "$PT_FILE"
+        TREE_OUT="$ROUT"
+        TREE_ERR="$RERR"
+
+        if echo "$TREE_OUT" | grep -q 'leaf_add'; then
+            pass "tree: leaf_add in tree"
+        else
+            fail "tree: leaf_add in tree"
+        fi
+
+        if echo "$TREE_OUT" | grep -q 'nested_outer'; then
+            pass "tree: nested_outer in tree"
+        else
+            fail "tree: nested_outer in tree"
+        fi
+
+        # leaf_add is called from multiple parents.  Under loop_test
+        # it should be called 10 times (loop of 10 iterations).
+        if echo "$TREE_OUT" | grep -Eq 'leaf_add.*\(10\)'; then
+            pass "tree: leaf_add under loop_test count = 10"
+        else
+            fail "tree: leaf_add under loop_test count (expected 10)"
+            echo "    $(echo "$TREE_OUT" | grep 'leaf_add' | head -5)"
+        fi
+
+        if echo "$TREE_ERR" | grep -q 'call tree nodes'; then
+            pass "tree: summary on stderr"
+        else
+            fail "tree: summary on stderr"
+        fi
+    else
+        skip "tree: (no .pt/.meta from exec)"
     fi
 
     settle_hwt

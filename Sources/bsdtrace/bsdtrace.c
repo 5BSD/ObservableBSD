@@ -37,7 +37,7 @@ usage(void)
 	    "  decode [opts] .pt Decode a saved trace offline\n"
 	    "\n"
 	    "Common options:\n"
-	    "  -f format   Output: text (default), json, or profile\n"
+	    "  -f format   Output: text, json, profile, or tree\n"
 	    "  -d seconds  Trace duration (-t also accepted)\n"
 	    "  -s size     Buffer size, e.g. 8m, 64m (default: 64m)\n"
 	    "  -o file     Output .pt file path\n"

@@ -56,6 +56,8 @@ cmd_decode(int argc, char **argv)
 				fmt = FMT_TEXT;
 			else if (strcmp(optarg, "profile") == 0)
 				fmt = FMT_PROFILE;
+			else if (strcmp(optarg, "tree") == 0)
+				fmt = FMT_TREE;
 			else {
 				fprintf(stderr,
 				    "bsdtrace decode: unknown format '%s'\n",
@@ -76,7 +78,7 @@ cmd_decode(int argc, char **argv)
 			    "Decode a saved .pt trace file offline.\n"
 			    "\n"
 			    "Options:\n"
-			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -f format   Output format: text, json, profile, or tree\n"
 			    "  -m file     Path to .meta sidecar (default: auto-discover)\n"
 			    "  -h          Show this help\n");
 			return (0);

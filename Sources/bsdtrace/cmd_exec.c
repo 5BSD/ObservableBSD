@@ -137,6 +137,8 @@ cmd_exec(int argc, char **argv)
 				fmt = FMT_TEXT;
 			else if (strcmp(optarg, "profile") == 0)
 				fmt = FMT_PROFILE;
+			else if (strcmp(optarg, "tree") == 0)
+				fmt = FMT_TREE;
 			else {
 				fprintf(stderr,
 				    "bsdtrace exec: unknown format '%s'\n",
@@ -190,7 +192,7 @@ cmd_exec(int argc, char **argv)
 			    "Run a command under hardware trace and decode the results.\n"
 			    "\n"
 			    "Options:\n"
-			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -f format   Output format: text, json, profile, or tree\n"
 			    "  -d seconds  Maximum trace duration (default: 30)\n"
 			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
 			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"

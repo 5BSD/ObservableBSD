@@ -95,6 +95,8 @@ cmd_trace(int argc, char **argv)
 				fmt = FMT_TEXT;
 			else if (strcmp(optarg, "profile") == 0)
 				fmt = FMT_PROFILE;
+			else if (strcmp(optarg, "tree") == 0)
+				fmt = FMT_TREE;
 			else {
 				fprintf(stderr,
 				    "bsdtrace trace: unknown format '%s'\n",
@@ -145,7 +147,7 @@ cmd_trace(int argc, char **argv)
 			    "Attach to a running process and trace it.\n"
 			    "\n"
 			    "Options:\n"
-			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -f format   Output format: text, json, profile, or tree\n"
 			    "  -d seconds  Trace duration (0 = until Ctrl-C, default)\n"
 			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
 			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"

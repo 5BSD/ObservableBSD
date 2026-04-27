@@ -802,6 +802,197 @@ profile_free(struct profile *p)
 }
 
 /* ------------------------------------------------------------------ */
+/* Call tree                                                            */
+/* ------------------------------------------------------------------ */
+
+struct ct_node {
+	const char		*name;		/* borrowed from sym_table */
+	const char		*binary;	/* borrowed from sym_table */
+	int			count;		/* times called at this position */
+	struct ct_node		*children;
+	int			nchildren;
+	int			children_cap;
+};
+
+struct calltree {
+	struct ct_node		root;		/* virtual root */
+	struct ct_node		**stack;	/* shadow call stack */
+	int			depth;
+	int			stack_cap;
+	const struct sym_entry	*prev_sym;
+	enum pt_insn_class	prev_class;
+};
+
+static void
+ct_node_init(struct ct_node *n, const char *name, const char *binary)
+{
+
+	memset(n, 0, sizeof(*n));
+	n->name = name;
+	n->binary = binary;
+}
+
+static struct ct_node *
+ct_find_or_add_child(struct ct_node *parent, const char *name,
+    const char *binary)
+{
+	int i;
+
+	for (i = 0; i < parent->nchildren; i++) {
+		if (parent->children[i].name == name &&
+		    parent->children[i].binary == binary)
+			return (&parent->children[i]);
+	}
+
+	if (parent->nchildren >= parent->children_cap) {
+		int newcap = parent->children_cap == 0 ?
+		    8 : parent->children_cap * 2;
+		struct ct_node *newc;
+
+		newc = realloc(parent->children,
+		    newcap * sizeof(*newc));
+		if (newc == NULL)
+			return (NULL);
+		parent->children = newc;
+		parent->children_cap = newcap;
+	}
+
+	ct_node_init(&parent->children[parent->nchildren], name, binary);
+	return (&parent->children[parent->nchildren++]);
+}
+
+static void
+calltree_init(struct calltree *ct)
+{
+
+	memset(ct, 0, sizeof(*ct));
+	ct_node_init(&ct->root, "<root>", "");
+	ct->stack_cap = 256;
+	ct->stack = calloc(ct->stack_cap, sizeof(*ct->stack));
+	ct->stack[0] = &ct->root;
+	ct->depth = 0;
+}
+
+static void
+calltree_push(struct calltree *ct, const struct sym_entry *sym)
+{
+	struct ct_node *parent, *child;
+
+	if (sym == NULL)
+		return;
+
+	parent = ct->stack[ct->depth];
+	child = ct_find_or_add_child(parent, sym->name, sym->binary);
+	if (child == NULL)
+		return;
+	child->count++;
+
+	ct->depth++;
+	if (ct->depth >= ct->stack_cap) {
+		int newcap = ct->stack_cap * 2;
+		struct ct_node **news;
+
+		news = realloc(ct->stack, newcap * sizeof(*news));
+		if (news == NULL) {
+			ct->depth--;
+			return;
+		}
+		ct->stack = news;
+		ct->stack_cap = newcap;
+	}
+	ct->stack[ct->depth] = child;
+}
+
+static void
+calltree_pop(struct calltree *ct)
+{
+
+	if (ct->depth > 0)
+		ct->depth--;
+}
+
+/*
+ * Feed each decoded instruction to the call tree.
+ * Push on CALL (using the callee's symbol), pop on RETURN.
+ */
+static void
+calltree_record(struct calltree *ct, const struct sym_entry *sym,
+    uint64_t ip, enum pt_insn_class iclass)
+{
+
+	/*
+	 * Detect function entry: the previous instruction was a CALL
+	 * and we're now at offset 0 of a new symbol.
+	 */
+	if (sym != NULL && ip == sym->addr &&
+	    (ct->prev_class == ptic_call ||
+	     ct->prev_class == ptic_far_call)) {
+		calltree_push(ct, sym);
+	}
+
+	if (iclass == ptic_return || iclass == ptic_far_return)
+		calltree_pop(ct);
+
+	ct->prev_sym = sym;
+	ct->prev_class = iclass;
+}
+
+static int
+ct_cmp_count(const void *a, const void *b)
+{
+	const struct ct_node *na = a;
+	const struct ct_node *nb = b;
+
+	return (nb->count - na->count);
+}
+
+static void
+ct_print_node(struct ct_node *n, int indent)
+{
+	int i;
+
+	/* Sort children by call count descending. */
+	if (n->nchildren > 1)
+		qsort(n->children, n->nchildren, sizeof(n->children[0]),
+		    ct_cmp_count);
+
+	for (i = 0; i < n->nchildren; i++) {
+		struct ct_node *c = &n->children[i];
+		printf("%*s%s:%s  (%d)\n",
+		    indent * 2, "", c->binary, c->name, c->count);
+		ct_print_node(c, indent + 1);
+	}
+}
+
+static void
+calltree_print(struct calltree *ct)
+{
+
+	ct_print_node(&ct->root, 0);
+}
+
+static void
+ct_node_free(struct ct_node *n)
+{
+	int i;
+
+	for (i = 0; i < n->nchildren; i++)
+		ct_node_free(&n->children[i]);
+	free(n->children);
+	n->children = NULL;
+	n->nchildren = 0;
+}
+
+static void
+calltree_free(struct calltree *ct)
+{
+
+	ct_node_free(&ct->root);
+	free(ct->stack);
+	ct->stack = NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* Instruction decoder                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -817,6 +1008,7 @@ decode_pt_insn(const void *buf, size_t len,
 	struct bin_range ranges[MAX_BIN_RANGES];
 	int nranges;
 	struct profile prof;
+	struct calltree ct;
 	struct pt_insn insn;
 	const struct sym_entry *sym;
 	const char *bn;
@@ -837,6 +1029,7 @@ decode_pt_insn(const void *buf, size_t len,
 
 	sym_table_init(&st);
 	profile_init(&prof);
+	calltree_init(&ct);
 
 	image = build_pt_image(sections, nsections, &st, true);
 	if (image == NULL) {
@@ -943,9 +1136,14 @@ decode_pt_insn(const void *buf, size_t len,
 		 * Profile mode needs every instruction (including ptic_other)
 		 * to detect function entries at offset 0.
 		 */
-		if (fmt == FMT_PROFILE) {
+		if (fmt == FMT_PROFILE || fmt == FMT_TREE) {
 			sym = sym_table_lookup(&st, insn.ip);
-			profile_record(&prof, sym, insn.ip, insn.iclass);
+			if (fmt == FMT_PROFILE)
+				profile_record(&prof, sym, insn.ip,
+				    insn.iclass);
+			else
+				calltree_record(&ct, sym, insn.ip,
+				    insn.iclass);
 			continue;
 		}
 
@@ -1024,6 +1222,13 @@ decode_pt_insn(const void *buf, size_t len,
 		fprintf(stderr,
 		    "%d instructions, %d functions profiled\n",
 		    total, prof.count);
+	} else if (fmt == FMT_TREE) {
+		if (tid >= 0)
+			printf("Thread %d:\n", tid);
+		calltree_print(&ct);
+		fprintf(stderr,
+		    "%d instructions, %d call tree nodes\n",
+		    total, ct.root.nchildren);
 	} else if (fmt == FMT_TEXT) {
 		fflush(stdout);
 		fprintf(stderr,
@@ -1033,6 +1238,7 @@ decode_pt_insn(const void *buf, size_t len,
 		    st.count);
 	}
 
+	calltree_free(&ct);
 	profile_free(&prof);
 	sym_table_free(&st);
 	return (total > 0 ? 0 : -1);

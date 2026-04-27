@@ -5,3 +5,5 @@ Package.resolved
 *.xcodeproj
 *.swp
 .DS_Store
+*.pt
+*.meta

@@ -10,6 +10,9 @@
  * Each function group is noinline with distinct names so the test
  * suite can verify that -T 0 traces only main_* functions and
  * -T 1 traces only worker_* functions.
+ *
+ * Both threads loop indefinitely.  The test suite kills the process
+ * when done (via bsdtrace -t timeout or explicit kill).
  */
 
 #include <pthread.h>
@@ -18,7 +21,6 @@
 #define	NOINLINE	__attribute__((noinline))
 
 static volatile int sink;
-static volatile int running = 1;
 
 /* --- Main thread functions --- */
 
@@ -62,7 +64,7 @@ static void *
 worker_entry(void *arg __unused)
 {
 
-	while (running)
+	for (;;)
 		sink = worker_work(200);
 	return (NULL);
 }
@@ -71,18 +73,17 @@ int
 main(void)
 {
 	pthread_t thr;
-	int i;
 
 	pthread_create(&thr, NULL, worker_entry, NULL);
 
 	/* Give the worker time to start. */
 	usleep(10000);
 
-	for (i = 0; i < 500000; i++)
+	/* Loop forever — bsdtrace kills us via timeout or the test
+	 * script kills us after tracing. */
+	for (;;)
 		sink = main_work(100);
 
-	running = 0;
-	pthread_join(thr, NULL);
-
+	/* NOTREACHED */
 	return (0);
 }

@@ -1220,7 +1220,7 @@ DPROG
 
     # Thread 0 (main): should see main_work/main_leaf, not worker_*
     PT_THR0="$TMPDIR/thread-0.pt"
-    run_bsdtrace_file exec -s 4m -T 0 -t 10 -o "$PT_THR0" -- "$THREADPROG"
+    run_bsdtrace_file exec -s 8m -T 0 -t 3 -o "$PT_THR0" -- "$THREADPROG"
     THR0_ERR="$RERR"
     if echo "$THR0_ERR" | grep -q 'instructions'; then
         if grep -Eq 'main_work|main_leaf' "$ROUT_FILE"; then
@@ -1250,7 +1250,7 @@ DPROG
     PIDS_TO_KILL="$PIDS_TO_KILL $THR1_PID"
     sleep 1  # let worker thread start
     if kill -0 "$THR1_PID" 2>/dev/null; then
-        run_bsdtrace_file trace -s 4m -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
+        run_bsdtrace_file trace -s 8m -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
         THR1_ERR="$RERR"
         kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
         if echo "$THR1_ERR" | grep -q 'instructions'; then

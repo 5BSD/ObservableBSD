@@ -280,40 +280,39 @@ Each trace produces two files:
 
 ### Roadmap
 
-**Analysis — make traces useful:**
+**Analysis:**
 - **Call tree output** — aggregated, indented call tree with function
   counts and nesting depth.  "main -> init -> parse_config -> crash"
   instead of thousands of flat CALL/RETURN lines.
-- ~~**Function summary**~~ — done: `-f profile` shows per-function call
-  counts, returns, and branches sorted by frequency.
-- **Timing from TSC** — PT timestamps (TSC/MTC/CYC packets) give
-  wall-clock and cycle-accurate timing per function call.
-- **Folded stacks output** — `--format collapsed` for piping to
+- **Folded stacks** — `-f collapsed` for piping to
   [flamegraph.pl](https://github.com/brendangregg/FlameGraph) or
   Speedscope.
+- **Timing from TSC** — PT timestamps (TSC/MTC/CYC packets) give
+  wall-clock and cycle-accurate timing per function call.
+  Requires kernel timing packet config (see below).
 - **Syscall name resolution** — map syscall IPs to names
   (`nanosleep`, `read`, `mmap`) instead of `libsys.so.7+0x1234`.
 
 **Collection:**
-- **Snapshot / flight recorder mode** — circular buffer with trigger
-  capture (e.g., SIGUSR2).  Always keeps the most recent window of
-  execution; dump on demand or on crash.
+- **Simultaneous multi-thread tracing** — trace all threads at once
+  with multiple HWT contexts and merged or per-thread output.
 
-**Kernel patches — pt.ko improvements:**
+**Kernel patches (pt.ko):**
 - **PSB frequency control** — wire `psb_freq` into `RTIT_CTL` bits
-  24-27 in `pt_backend_configure`.  Currently the hardware uses its
-  default PSB interval, which is too infrequent for short IP-filtered
-  traces.  Setting a higher PSB frequency (e.g. every 2-4 KB) ensures
-  libipt can sync even on small filtered traces.  Needed to make `-r`
-  work reliably on short-lived programs.
-- **`pt_backend_stop` implementation** — add a proper stop op so
-  `HWT_IOC_STOP` works without panicking.  Currently we close the
-  context fd as a workaround, which forces full teardown.  A proper
-  stop enables stop/restart on the same context, which is a
-  prerequisite for snapshot/flight-recorder mode.
+  24-27 in `pt_backend_configure`.  Needed for reliable decode of
+  short IP-filtered traces.
 - **Timing packet config** — wire `mtc_freq` and `cyc_thresh` into
   `RTIT_CTL` to enable MTC and CYC timing packets.  Required for
   wall-clock and cycle-accurate function timing.
+
+**Done:**
+- Per-function profiling (`-f profile`)
+- Symbol-based range filter (`-r function_name`)
+- Dual hardware IP range filtering
+- Multi-thread testing and thread identity in output
+- Thread listing (`bsdtrace list -p pid`)
+- Per-subcommand help (`-h`)
+- Unified `-d`/`-t` duration flags
 
 **ARM (CoreSight ETM) — not currently planned:**
 

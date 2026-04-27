@@ -264,16 +264,19 @@ Each trace produces two files:
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `-f text\|json` | all | Output format (default: text) |
-| `-s bufsize` | exec, trace | PT buffer size (default: 64m) |
-| `-t timeout` | exec | Max trace duration in seconds (default: 30) |
-| `-d duration` | trace | Trace duration (0 = until Ctrl-C) |
-| `-m maxrec` | exec, trace | Stop after N HWT records |
-| `-o ptfile` | exec, trace | Output path for .pt file |
+| `-f format` | all | Output format: text (default), json, or profile |
+| `-d seconds` | exec, trace | Trace duration (`-t` also accepted; exec default: 30) |
+| `-s size` | exec, trace | PT buffer size, e.g. 8m, 64m (default: 64m) |
+| `-o file` | exec, trace | Output path for .pt file |
+| `-r range` | exec, trace | IP filter: `0xstart:0xend` or `function_name` (up to 2) |
 | `-T tid` | exec, trace | Thread index to trace (default: 0) |
+| `-m count` | exec, trace | Stop after N HWT records |
 | `-b backend` | exec, trace | HWT backend (default: auto-detect) |
+| `-A` | exec | Disable ASLR for the child process |
 | `-n` | exec, trace | Dry run — validate setup without tracing |
 | `-p` | exec, trace | Pause target on mmap/exec events |
+| `-p pid` | list | Show threads for a process |
+| `-h` | all | Per-command help |
 
 ### Roadmap
 
@@ -281,8 +284,8 @@ Each trace produces two files:
 - **Call tree output** — aggregated, indented call tree with function
   counts and nesting depth.  "main -> init -> parse_config -> crash"
   instead of thousands of flat CALL/RETURN lines.
-- **Function summary** — top functions by call count, unique call
-  sites, hot path identification.
+- ~~**Function summary**~~ — done: `-f profile` shows per-function call
+  counts, returns, and branches sorted by frequency.
 - **Timing from TSC** — PT timestamps (TSC/MTC/CYC packets) give
   wall-clock and cycle-accurate timing per function call.
 - **Folded stacks output** — `--format collapsed` for piping to
@@ -311,6 +314,24 @@ Each trace produces two files:
 - **Timing packet config** — wire `mtc_freq` and `cyc_thresh` into
   `RTIT_CTL` to enable MTC and CYC timing packets.  Required for
   wall-clock and cycle-accurate function timing.
+
+**ARM (CoreSight ETM) — not currently planned:**
+
+FreeBSD 15 ships ~2,500 lines of CoreSight driver code
+(`sys/arm64/coresight/`) covering ETM4x, TMC, funnels, and replicators,
+with both FDT and ACPI discovery.  However these drivers are a standalone
+subsystem — they predate the HWT framework and are **not wired to
+`hwt_backend_register()`**.  Bridging them would require a ~800-line
+kernel module (similar in scope to `pt.c`) plus OpenCSD integration for
+trace decoding on the userspace side.
+
+The blocker is hardware: Raspberry Pi boards do not expose CoreSight
+register blocks in their device tree or firmware, so they cannot be used
+for testing.  Suitable boards (Ampere Altra, Qualcomm Snapdragon dev
+kits, NXP i.MX8M, ARM N1SDP) are not available to us.  The bsdtrace
+userspace code already detects `coresight` and `spe` backends
+(`hwt.c`, `cmd_list.c`), so if a kernel backend appears the tool will
+pick it up with minimal changes.
 
 ### Using bsdtrace with other tools
 

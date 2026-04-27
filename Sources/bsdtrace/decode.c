@@ -692,73 +692,72 @@ profile_init(struct profile *p)
 	memset(p, 0, sizeof(*p));
 }
 
+/*
+ * Record a profile event.
+ *
+ * "calls" counts function entries: an instruction at offset 0 within
+ * a symbol is an entry (the first instruction after a CALL lands at
+ * the target function's start address).
+ *
+ * "returns" counts RETURN events within the function.
+ * "branches" counts JUMP/CJMP events within the function.
+ */
 static void
 profile_record(struct profile *p, const struct sym_entry *sym,
-    enum pt_insn_class iclass)
+    uint64_t ip, enum pt_insn_class iclass)
 {
+	struct profile_entry *e;
 	int i;
 
 	if (sym == NULL)
 		return;
 
-	/* Find existing entry. */
+	/* Find or create entry. */
+	e = NULL;
 	for (i = 0; i < p->count; i++) {
 		if (p->entries[i].name == sym->name &&
 		    p->entries[i].binary == sym->binary) {
-			switch (iclass) {
-			case ptic_call:
-			case ptic_far_call:
-				p->entries[i].calls++;
-				break;
-			case ptic_return:
-			case ptic_far_return:
-				p->entries[i].returns++;
-				break;
-			case ptic_jump:
-			case ptic_cond_jump:
-				p->entries[i].branches++;
-				break;
-			default:
-				break;
-			}
-			return;
+			e = &p->entries[i];
+			break;
 		}
 	}
 
-	/* New entry. */
-	if (p->count >= p->capacity) {
-		int newcap = p->capacity == 0 ? 128 : p->capacity * 2;
-		struct profile_entry *newent;
+	if (e == NULL) {
+		if (p->count >= p->capacity) {
+			int newcap = p->capacity == 0 ? 128 : p->capacity * 2;
+			struct profile_entry *newent;
 
-		newent = realloc(p->entries, newcap * sizeof(*newent));
-		if (newent == NULL)
-			return;
-		p->entries = newent;
-		p->capacity = newcap;
+			newent = realloc(p->entries,
+			    newcap * sizeof(*newent));
+			if (newent == NULL)
+				return;
+			p->entries = newent;
+			p->capacity = newcap;
+		}
+
+		e = &p->entries[p->count];
+		memset(e, 0, sizeof(*e));
+		e->name = sym->name;
+		e->binary = sym->binary;
+		p->count++;
 	}
 
-	memset(&p->entries[p->count], 0, sizeof(p->entries[p->count]));
-	p->entries[p->count].name = sym->name;
-	p->entries[p->count].binary = sym->binary;
+	/* Entry at offset 0 = function was called/entered. */
+	if (ip == sym->addr)
+		e->calls++;
 
 	switch (iclass) {
-	case ptic_call:
-	case ptic_far_call:
-		p->entries[p->count].calls = 1;
-		break;
 	case ptic_return:
 	case ptic_far_return:
-		p->entries[p->count].returns = 1;
+		e->returns++;
 		break;
 	case ptic_jump:
 	case ptic_cond_jump:
-		p->entries[p->count].branches = 1;
+		e->branches++;
 		break;
 	default:
 		break;
 	}
-
-	p->count++;
 }
 
 static int
@@ -933,6 +932,16 @@ decode_pt_insn(const void *buf, size_t len,
 			break;
 		}
 
+		/*
+		 * Profile mode needs every instruction (including ptic_other)
+		 * to detect function entries at offset 0.
+		 */
+		if (fmt == FMT_PROFILE) {
+			sym = sym_table_lookup(&st, insn.ip);
+			profile_record(&prof, sym, insn.ip, insn.iclass);
+			continue;
+		}
+
 		if (label == NULL)
 			continue;
 
@@ -942,11 +951,6 @@ decode_pt_insn(const void *buf, size_t len,
 		if (sym == NULL)
 			bn = find_binary_for_ip(ranges, nranges, insn.ip,
 			    &boff);
-
-		if (fmt == FMT_PROFILE) {
-			profile_record(&prof, sym, insn.iclass);
-			continue;
-		}
 
 		if (fmt == FMT_JSON) {
 			if (sym != NULL) {

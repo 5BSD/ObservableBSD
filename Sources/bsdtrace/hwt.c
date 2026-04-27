@@ -179,7 +179,8 @@ hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	ha.kqueue_fd = ctx->kq_fd;
 
 	if (ioctl(ctx->ctl_fd, HWT_IOC_ALLOC, &ha) != 0) {
-		warn("HWT_IOC_ALLOC (backend=%s, pid=%d, bufsize=%zu)",
+		warn("failed to allocate trace context "
+		    "(backend=%s, pid=%d, bufsize=%zu)",
 		    backend, (int)pid, bufsize);
 		goto fail;
 	}
@@ -275,7 +276,7 @@ hwt_ctx_set_config_pt(struct hwt_ctx *ctx, bool pause_on_mmap)
 	sc.config_version = 0;
 
 	if (ioctl(ctx->ctx_fd, HWT_IOC_SET_CONFIG, &sc) != 0) {
-		warn("HWT_IOC_SET_CONFIG");
+		warn("failed to configure trace backend");
 		return (-1);
 	}
 
@@ -312,7 +313,7 @@ hwt_ctx_start(struct hwt_ctx *ctx)
 
 	memset(&hs, 0, sizeof(hs));
 	if (ioctl(ctx->ctx_fd, HWT_IOC_START, &hs) != 0) {
-		warn("HWT_IOC_START");
+		warn("failed to start tracing");
 		return (-1);
 	}
 	return (0);
@@ -328,7 +329,7 @@ hwt_ctx_stop(struct hwt_ctx *ctx)
 
 	memset(&hs, 0, sizeof(hs));
 	if (ioctl(ctx->ctx_fd, HWT_IOC_STOP, &hs) != 0) {
-		warn("HWT_IOC_STOP");
+		warn("failed to stop tracing");
 		return (-1);
 	}
 	return (0);
@@ -376,7 +377,7 @@ hwt_ctx_poll_records(struct hwt_ctx *ctx,
 	rg.wait = wait ? 1 : 0;
 
 	if (ioctl(ctx->ctx_fd, HWT_IOC_RECORD_GET, &rg) != 0) {
-		warn("HWT_IOC_RECORD_GET");
+		warn("failed to read trace records");
 		free(entries);
 		return (-1);
 	}
@@ -441,7 +442,7 @@ hwt_ctx_wakeup(struct hwt_ctx *ctx)
 
 	memset(&hw, 0, sizeof(hw));
 	if (ioctl(ctx->ctx_fd, HWT_IOC_WAKEUP, &hw) != 0) {
-		warn("HWT_IOC_WAKEUP");
+		warn("failed to resume target after mmap");
 		return (-1);
 	}
 	return (0);
@@ -489,7 +490,7 @@ hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
 	bg.data = NULL;
 
 	if (ioctl(ctx->ctx_fd, HWT_IOC_BUFPTR_GET, &bg) != 0) {
-		warn("HWT_IOC_BUFPTR_GET");
+		warn("failed to read buffer position");
 		return (-1);
 	}
 

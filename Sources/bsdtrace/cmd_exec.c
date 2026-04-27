@@ -7,7 +7,7 @@
  *
  * Forks the child stopped (via raise(SIGSTOP)), attaches HWT
  * thread-mode tracing, resumes the child, and collects records
- * until it exits or timeout.
+ * until it exits or duration.
  */
 
 #include <sys/types.h>
@@ -24,7 +24,7 @@
 
 #include "bsdtrace.h"
 
-#define	DEFAULT_TIMEOUT		30.0
+#define	DEFAULT_DURATION		30.0
 #define	DEFAULT_BUFSIZE		"64m"
 #define	MAX_POLL_RECORDS	256
 
@@ -90,7 +90,7 @@ cmd_exec(int argc, char **argv)
 	const char *bufsize_str;
 	const char *backend_name;
 	char *detected_backend;
-	double timeout;
+	double duration;
 	size_t bufsize;
 	pid_t child;
 	char pt_path[64];
@@ -118,7 +118,7 @@ cmd_exec(int argc, char **argv)
 	backend_name = NULL;
 	detected_backend = NULL;
 	pt_output = NULL;
-	timeout = DEFAULT_TIMEOUT;
+	duration = DEFAULT_DURATION;
 	maxrecords = 0;
 	tid = 0;
 	memset(&filter, 0, sizeof(filter));
@@ -128,7 +128,7 @@ cmd_exec(int argc, char **argv)
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:t:m:o:r:T:Anp")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:Ahnp")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -150,8 +150,9 @@ cmd_exec(int argc, char **argv)
 		case 's':
 			bufsize_str = optarg;
 			break;
+		case 'd':
 		case 't':
-			timeout = atof(optarg);
+			duration = atof(optarg);
 			break;
 		case 'm':
 			maxrecords = atoi(optarg);
@@ -182,9 +183,30 @@ cmd_exec(int argc, char **argv)
 		case 'p':
 			pause_on_mmap = true;
 			break;
+		case 'h':
+			fprintf(stderr,
+			    "usage: bsdtrace exec [options] -- command [args...]\n"
+			    "\n"
+			    "Run a command under hardware trace and decode the results.\n"
+			    "\n"
+			    "Options:\n"
+			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -d seconds  Maximum trace duration (default: 30)\n"
+			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
+			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"
+			    "  -r range    IP filter: 0xstart:0xend or function_name (up to 2)\n"
+			    "  -T tid      Thread index to trace (default: 0, main thread)\n"
+			    "  -m count    Stop after N records\n"
+			    "  -b backend  HWT backend name (default: auto-detect)\n"
+			    "  -A          Disable ASLR for the child process\n"
+			    "  -p          Pause target on mmap/exec events\n"
+			    "  -n          Dry run: validate setup without tracing\n"
+			    "  -h          Show this help\n");
+			return (0);
 		default:
 			fprintf(stderr,
-			    "usage: bsdtrace exec [opts] -- cmd [args...]\n");
+			    "usage: bsdtrace exec [options] -- command [args...]\n"
+			    "       (use -h for help)\n");
 			return (1);
 		}
 	}
@@ -305,21 +327,21 @@ cmd_exec(int argc, char **argv)
 	kill(child, SIGCONT);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Poll records until child exits or timeout. */
+	/* Poll records until child exits or duration. */
 	child_done = false;
 	exitcode = 0;
 	totalrecords = 0;
 	empty_drains = 0;
 
 	for (;;) {
-		/* Check timeout. */
+		/* Check duration. */
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		double elapsed = (now.tv_sec - start.tv_sec) +
 		    (now.tv_nsec - start.tv_nsec) / 1e9;
-		if (timeout > 0 && elapsed >= timeout) {
+		if (duration > 0 && elapsed >= duration) {
 			fprintf(stderr,
-			    "timeout: %.0fs elapsed, stopping trace\n",
-			    timeout);
+			    "duration: %.0fs elapsed, stopping trace\n",
+			    duration);
 			kill(child, SIGKILL);
 			break;
 		}
@@ -385,7 +407,7 @@ cmd_exec(int argc, char **argv)
 		usleep(nrecs > 0 ? 100 : 5000);
 	}
 
-	/* Reap child if we killed it above (timeout/maxrecords). */
+	/* Reap child if we killed it above (duration/maxrecords). */
 	if (!child_done) {
 		status = 0;
 		waitpid(child, &status, 0);

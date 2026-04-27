@@ -47,7 +47,7 @@ cmd_decode(int argc, char **argv)
 	nsections = 0;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:m:")) != -1) {
+	while ((ch = getopt(argc, argv, "f:m:h")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -69,10 +69,21 @@ cmd_decode(int argc, char **argv)
 			    &sections, &nsections) != 0)
 				return (1);
 			break;
+		case 'h':
+			fprintf(stderr,
+			    "usage: bsdtrace decode [options] file.pt\n"
+			    "\n"
+			    "Decode a saved .pt trace file offline.\n"
+			    "\n"
+			    "Options:\n"
+			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -m file     Path to .meta sidecar (default: auto-discover)\n"
+			    "  -h          Show this help\n");
+			return (0);
 		default:
 			fprintf(stderr,
-			    "usage: bsdtrace decode [-f text|json] "
-			    "[-m meta] file.pt\n");
+			    "usage: bsdtrace decode [options] file.pt\n"
+			    "       (use -h for help)\n");
 			return (1);
 		}
 	}

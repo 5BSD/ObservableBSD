@@ -8,6 +8,7 @@
 
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/user.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,54 @@
 #include <unistd.h>
 
 #include "bsdtrace.h"
+
+/* ------------------------------------------------------------------ */
+/* Thread listing                                                      */
+/* ------------------------------------------------------------------ */
+
+static void
+list_threads(pid_t pid)
+{
+	struct kinfo_proc *kip;
+	size_t len;
+	int mib[4];
+	unsigned int i, nthreads;
+
+	mib[0] = CTL_KERN;
+	mib[1] = KERN_PROC;
+	mib[2] = KERN_PROC_PID | KERN_PROC_INC_THREAD;
+	mib[3] = pid;
+
+	if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0) {
+		fprintf(stderr,
+		    "bsdtrace: cannot query threads for pid %d\n",
+		    (int)pid);
+		return;
+	}
+
+	kip = malloc(len);
+	if (kip == NULL)
+		return;
+
+	if (sysctl(mib, 4, kip, &len, NULL, 0) != 0) {
+		free(kip);
+		return;
+	}
+
+	nthreads = len / sizeof(*kip);
+	printf("Threads for PID %d (%s):\n", (int)pid,
+	    kip[0].ki_comm);
+	printf("  %-6s  %-6s  %s\n", "INDEX", "TID", "NAME");
+	for (i = 0; i < nthreads; i++) {
+		printf("  %-6u  %-6d  %s\n",
+		    i,
+		    (int)kip[i].ki_tid,
+		    kip[i].ki_tdname[0] != '\0' ?
+		    kip[i].ki_tdname : "(unnamed)");
+	}
+
+	free(kip);
+}
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -151,10 +200,12 @@ cmd_list(int argc, char **argv)
 	int hwt_avail;
 	int hooks;
 	int ch;
+	pid_t list_pid;
 
 	fmt = FMT_TEXT;
+	list_pid = 0;
 
-	while ((ch = getopt(argc, argv, "f:")) != -1) {
+	while ((ch = getopt(argc, argv, "f:p:h")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -168,8 +219,24 @@ cmd_list(int argc, char **argv)
 				return (1);
 			}
 			break;
+		case 'p':
+			list_pid = (pid_t)atoi(optarg);
+			break;
+		case 'h':
+			fprintf(stderr,
+			    "usage: bsdtrace list [options]\n"
+			    "\n"
+			    "Show HWT framework status and backend capabilities.\n"
+			    "\n"
+			    "Options:\n"
+			    "  -f format   Output: text (default) or json\n"
+			    "  -p pid      List threads for a process\n"
+			    "  -h          Show this help\n");
+			return (0);
 		default:
-			fprintf(stderr, "usage: bsdtrace list [-f text|json]\n");
+			fprintf(stderr,
+			    "usage: bsdtrace list [-f text|json] [-p pid]\n"
+			    "       (use -h for help)\n");
 			return (1);
 		}
 	}
@@ -189,5 +256,9 @@ cmd_list(int argc, char **argv)
 		list_text(hwt_avail, hooks, backend, cpu_model, machine);
 
 	free(backend);
+
+	if (list_pid > 0)
+		list_threads(list_pid);
+
 	return (0);
 }

@@ -86,7 +86,7 @@ cmd_trace(int argc, char **argv)
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:m:o:r:T:np")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:hnp")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -109,6 +109,7 @@ cmd_trace(int argc, char **argv)
 			bufsize_str = optarg;
 			break;
 		case 'd':
+		case 't':
 			duration = atof(optarg);
 			break;
 		case 'm':
@@ -137,9 +138,29 @@ cmd_trace(int argc, char **argv)
 		case 'p':
 			pause_on_mmap = true;
 			break;
+		case 'h':
+			fprintf(stderr,
+			    "usage: bsdtrace trace [options] pid\n"
+			    "\n"
+			    "Attach to a running process and trace it.\n"
+			    "\n"
+			    "Options:\n"
+			    "  -f format   Output format: text (default), json, or profile\n"
+			    "  -d seconds  Trace duration (0 = until Ctrl-C, default)\n"
+			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
+			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"
+			    "  -r range    IP filter: 0xstart:0xend or function_name (up to 2)\n"
+			    "  -T tid      Thread index to trace (default: 0, main thread)\n"
+			    "  -m count    Stop after N records\n"
+			    "  -b backend  HWT backend name (default: auto-detect)\n"
+			    "  -p          Pause target on mmap/exec events\n"
+			    "  -n          Dry run: validate setup without tracing\n"
+			    "  -h          Show this help\n");
+			return (0);
 		default:
 			fprintf(stderr,
-			    "usage: bsdtrace trace [opts] pid\n");
+			    "usage: bsdtrace trace [options] pid\n"
+			    "       (use -h for help)\n");
 			return (1);
 		}
 	}

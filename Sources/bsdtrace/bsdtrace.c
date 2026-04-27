@@ -28,30 +28,24 @@ usage(void)
 {
 
 	fprintf(stderr,
-	    "usage: bsdtrace list    [-f text|json]\n"
-	    "       bsdtrace exec    [-f text|json] [-b backend] [-s bufsize]\n"
-	    "                       [-t timeout] [-m maxrec] [-o ptfile] [-np]\n"
-	    "                       -- cmd [args...]\n"
-	    "       bsdtrace trace   [-f text|json] [-b backend] [-s bufsize]\n"
-	    "                       [-d duration] [-m maxrec] [-o ptfile] [-np]\n"
-	    "                       pid\n"
+	    "usage: bsdtrace <command> [options]\n"
 	    "\n"
-	    "Options:\n"
-	    "  -f format    Output format: text (default) or json\n"
-	    "  -b backend   HWT backend name (default: auto-detect)\n"
-	    "  -s bufsize   Trace buffer size, e.g. 4m, 16m (default: 4m)\n"
-	    "  -t timeout   Maximum trace duration in seconds (exec, default: 30)\n"
-	    "  -d duration  Trace duration in seconds (trace, 0 = until Ctrl-C)\n"
-	    "  -m maxrec    Stop after N records (0 = unlimited)\n"
-	    "  -o ptfile    Output path for raw PT data (default: bsdtrace-<pid>.pt)\n"
-	    "  -r range     Hardware IP filter: 0xstart:0xend (up to 2 ranges)\n"
-	    "  -T tid       Thread index to trace (default: 0)\n"
-	    "  -A           Disable ASLR for the child process (exec only)\n"
-	    "  -n           Dry run: validate setup without tracing\n"
-	    "  -p           Pause target on mmap/exec events\n"
+	    "Commands:\n"
+	    "  list              Show HWT framework and backend status\n"
+	    "  exec [opts] -- cmd  Run a command under hardware trace\n"
+	    "  trace [opts] pid  Attach to a running process\n"
+	    "  decode [opts] .pt Decode a saved trace offline\n"
 	    "\n"
-	    "Requires root and two kernel modules:\n"
-	    "  sudo kldload hwt && sudo kldload pt\n"
+	    "Common options:\n"
+	    "  -f format   Output: text (default), json, or profile\n"
+	    "  -d seconds  Trace duration (-t also accepted)\n"
+	    "  -s size     Buffer size, e.g. 8m, 64m (default: 64m)\n"
+	    "  -o file     Output .pt file path\n"
+	    "  -r range    IP filter: 0xstart:0xend or function_name\n"
+	    "  -T tid      Thread index (default: 0)\n"
+	    "  -h          Per-command help\n"
+	    "\n"
+	    "Requires root and kernel modules: kldload hwt && kldload pt\n"
 	    );
 	exit(1);
 }
@@ -95,25 +89,16 @@ parse_size(const char *s)
 
 /*
  * Look up the executable name for a PID via sysctl.
- * Returns buf on success, NULL on failure.
+ * Returns basename pointer into buf on success, NULL on failure.
  */
 const char *
 process_name(pid_t pid, char *buf, size_t bufsz)
 {
-	int mib[4];
-	size_t len;
 	char *p;
 
-	mib[0] = CTL_KERN;
-	mib[1] = KERN_PROC;
-	mib[2] = KERN_PROC_PATHNAME;
-	mib[3] = pid;
-	len = bufsz;
-
-	if (sysctl(mib, 4, buf, &len, NULL, 0) != 0)
+	if (process_exe_fullpath(pid, buf, bufsz) != 0)
 		return (NULL);
 
-	/* Return just the basename. */
 	p = strrchr(buf, '/');
 	if (p != NULL)
 		return (p + 1);

@@ -504,6 +504,7 @@ else
         python3 - "$PT_H" "$PT" << 'PYEOF'
 import sys
 
+T = '\t'
 pth = sys.argv[1]
 ptc = sys.argv[2]
 
@@ -511,25 +512,22 @@ ptc = sys.argv[2]
 with open(pth, 'r') as f:
     src = f.read()
 
-old_struct = '''\tstruct ipf_range {
-\t\tvm_offset_t start;
-\t\tvm_offset_t end;
-\t} ip_ranges[PT_IP_FILTER_MAX_RANGES];'''
+old_struct = f'{T}struct ipf_range {{\n{T}{T}vm_offset_t start;\n{T}{T}vm_offset_t end;\n{T}}} ip_ranges[PT_IP_FILTER_MAX_RANGES];'
 
-new_struct = '''/*
+new_struct = f'''/*
  * IP filter range modes (ADDR_CFG field encoding):
- *   0  \\xe2\\x80\\x94 disabled (default if nranges omits this range)
- *   1  \\xe2\\x80\\x94 FilterEn: trace only when IP is within [start, end)
- *   2  \\xe2\\x80\\x94 TraceStop: stop tracing when IP enters [start, end)
+ *   0 - disabled (default if nranges omits this range)
+ *   1 - FilterEn: trace only when IP is within [start, end)
+ *   2 - TraceStop: stop tracing when IP enters [start, end)
  */
-#define\\tPT_RANGE_FILTER\\t\\t1
-#define\\tPT_RANGE_TRACESTOP\\t2
+#define{T}PT_RANGE_FILTER{T}{T}1
+#define{T}PT_RANGE_TRACESTOP{T}2
 
-\\tstruct ipf_range {
-\\t\\tvm_offset_t start;
-\\t\\tvm_offset_t end;
-\\t\\tint mode;\\t/* PT_RANGE_FILTER or PT_RANGE_TRACESTOP */
-\\t} ip_ranges[PT_IP_FILTER_MAX_RANGES];'''
+{T}struct ipf_range {{
+{T}{T}vm_offset_t start;
+{T}{T}vm_offset_t end;
+{T}{T}int mode;{T}/* PT_RANGE_FILTER or PT_RANGE_TRACESTOP */
+{T}}} ip_ranges[PT_IP_FILTER_MAX_RANGES];'''
 
 if old_struct not in src:
     print("  ERROR: could not find ipf_range struct in pt.h", file=sys.stderr)
@@ -544,48 +542,48 @@ print("  Added mode field to ipf_range in pt.h")
 with open(ptc, 'r') as f:
     src = f.read()
 
-old_case2 = '''\t\tcase 2:
-\t\t\tpt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(1));
-\t\t\tpt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
-\t\t\tpt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
-\t\tcase 1:
-\t\t\tpt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(0));
-\t\t\tpt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
-\t\t\tpt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
-\t\t\tbreak;'''
+old_case2 = f'''{T}{T}case 2:
+{T}{T}{T}pt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(1));
+{T}{T}{T}pt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
+{T}{T}{T}pt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
+{T}{T}case 1:
+{T}{T}{T}pt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(0));
+{T}{T}{T}pt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
+{T}{T}{T}pt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
+{T}{T}{T}break;'''
 
-new_case2 = '''\t\tcase 2: {
-\t\t\tint mode1 = cfg->ip_ranges[1].mode;
-\t\t\tif (mode1 == 0)
-\t\t\t\tmode1 = PT_RANGE_FILTER;
-\t\t\tif (mode1 < 1 || mode1 > 2) {
-\t\t\t\tprintf("%s: ip_ranges[1].mode %d invalid "
-\t\t\t\t    "(1=filter, 2=tracestop)\\n",
-\t\t\t\t    __func__, cfg->ip_ranges[1].mode);
-\t\t\t\treturn (EINVAL);
-\t\t\t}
-\t\t\tpt_ext->rtit_ctl |=
-\t\t\t    ((uint64_t)mode1 << RTIT_CTL_ADDR_CFG_S(1));
-\t\t\tpt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
-\t\t\tpt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
-\t\t}
-\t\t/* FALLTHROUGH */
-\t\tcase 1: {
-\t\t\tint mode0 = cfg->ip_ranges[0].mode;
-\t\t\tif (mode0 == 0)
-\t\t\t\tmode0 = PT_RANGE_FILTER;
-\t\t\tif (mode0 < 1 || mode0 > 2) {
-\t\t\t\tprintf("%s: ip_ranges[0].mode %d invalid "
-\t\t\t\t    "(1=filter, 2=tracestop)\\n",
-\t\t\t\t    __func__, cfg->ip_ranges[0].mode);
-\t\t\t\treturn (EINVAL);
-\t\t\t}
-\t\t\tpt_ext->rtit_ctl |=
-\t\t\t    ((uint64_t)mode0 << RTIT_CTL_ADDR_CFG_S(0));
-\t\t\tpt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
-\t\t\tpt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
-\t\t\tbreak;
-\t\t}'''
+new_case2 = f'''{T}{T}case 2: {{
+{T}{T}{T}int mode1 = cfg->ip_ranges[1].mode;
+{T}{T}{T}if (mode1 == 0)
+{T}{T}{T}{T}mode1 = PT_RANGE_FILTER;
+{T}{T}{T}if (mode1 < 1 || mode1 > 2) {{
+{T}{T}{T}{T}printf("%s: ip_ranges[1].mode %d invalid "
+{T}{T}{T}{T}    "(1=filter, 2=tracestop)\\n",
+{T}{T}{T}{T}    __func__, cfg->ip_ranges[1].mode);
+{T}{T}{T}{T}return (EINVAL);
+{T}{T}{T}}}
+{T}{T}{T}pt_ext->rtit_ctl |=
+{T}{T}{T}    ((uint64_t)mode1 << RTIT_CTL_ADDR_CFG_S(1));
+{T}{T}{T}pt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
+{T}{T}{T}pt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
+{T}{T}}}
+{T}{T}/* FALLTHROUGH */
+{T}{T}case 1: {{
+{T}{T}{T}int mode0 = cfg->ip_ranges[0].mode;
+{T}{T}{T}if (mode0 == 0)
+{T}{T}{T}{T}mode0 = PT_RANGE_FILTER;
+{T}{T}{T}if (mode0 < 1 || mode0 > 2) {{
+{T}{T}{T}{T}printf("%s: ip_ranges[0].mode %d invalid "
+{T}{T}{T}{T}    "(1=filter, 2=tracestop)\\n",
+{T}{T}{T}{T}    __func__, cfg->ip_ranges[0].mode);
+{T}{T}{T}{T}return (EINVAL);
+{T}{T}{T}}}
+{T}{T}{T}pt_ext->rtit_ctl |=
+{T}{T}{T}    ((uint64_t)mode0 << RTIT_CTL_ADDR_CFG_S(0));
+{T}{T}{T}pt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
+{T}{T}{T}pt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
+{T}{T}{T}break;
+{T}{T}}}'''
 
 if old_case2 not in src:
     print("  ERROR: could not find pt_configure_ranges switch in pt.c", file=sys.stderr)

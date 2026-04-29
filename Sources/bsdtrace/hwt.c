@@ -286,6 +286,10 @@ hwt_ctx_set_config_on_fd(struct hwt_ctx *ctx, int fd, bool pause_on_mmap)
 	 */
 	memset(&ptcfg, 0, sizeof(ptcfg));
 	ptcfg.rtit_ctl = RTIT_CTL_USER | RTIT_CTL_BRANCHEN;
+	if (ctx->ptwrite)
+		ptcfg.rtit_ctl |= RTIT_CTL_PTWEN | RTIT_CTL_FUPONPTW;
+	if (ctx->os_trace)
+		ptcfg.rtit_ctl |= RTIT_CTL_OS;
 
 	/*
 	 * Hardware IP range filtering.
@@ -308,7 +312,7 @@ hwt_ctx_set_config_on_fd(struct hwt_ctx *ctx, int fd, bool pause_on_mmap)
 	for (int r = 0; r < ctx->filter.nranges && r < 2; r++) {
 		ptcfg.ip_ranges[r].start = ctx->filter.ranges[r].start;
 		ptcfg.ip_ranges[r].end = ctx->filter.ranges[r].end;
-		ptcfg.rtit_ctl |= (1ULL << RTIT_CTL_ADDR_CFG_S(r));
+		ptcfg.ip_ranges[r].mode = ctx->filter.modes[r];
 	}
 
 	/*
@@ -469,6 +473,7 @@ hwt_ctx_poll_records(struct hwt_ctx *ctx,
 			r->addr = e->addr;
 			break;
 		case HWT_RECORD_BUFFER:
+		case HWT_RECORD_OVERFLOW:
 			r->buf_id = e->buf_id;
 			r->curpage = e->curpage;
 			r->offset = e->offset;

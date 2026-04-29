@@ -94,6 +94,9 @@ trace_state_process(struct trace_state *ts,
 		ts->last_buf_offset = rec->offset;
 	}
 
+	if (rec->type == HWT_RECORD_OVERFLOW)
+		ts->overflow_count++;
+
 	if ((rec->type == HWT_RECORD_EXECUTABLE ||
 	    rec->type == HWT_RECORD_MMAP) &&
 	    rec->fullpath[0] != '\0') {
@@ -448,7 +451,8 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 					meta_writer_header(tmw,
 					    ctx->pid, tc->thread_id);
 					meta_writer_timing(tmw,
-					    (uint8_t)ctx->mtc_freq);
+					    (uint8_t)ctx->mtc_freq,
+					    (uint8_t)ctx->cyc_thresh);
 					meta_writer_sections(tmw,
 					    ts->sections, ts->nsections);
 					meta_writer_close(tmw);
@@ -626,6 +630,11 @@ trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
 		fprintf(stderr,
 		    "warning: PT buffer wrapped (data lost) — "
 		    "increase with -s\n");
+	if (ts->overflow_count > 0)
+		fprintf(stderr,
+		    "warning: %d PT internal overflow(s) — "
+		    "trace data was lost, increase buffer with -s\n",
+		    ts->overflow_count);
 
 	/*
 	 * Intel PT needs a PSB (Packet Stream Boundary) to sync the

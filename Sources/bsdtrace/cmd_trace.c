@@ -72,7 +72,11 @@ cmd_trace(int argc, char **argv)
 	int nrecs;
 	int ch, i;
 	int psb_freq;
+	int mtc_freq_cli;
+	int cyc_thresh_cli;
 	bool timing;
+	bool ptwrite;
+	bool os_trace;
 	bool dryrun;
 	bool pause_on_mmap;
 	bool target_gone;
@@ -90,12 +94,16 @@ cmd_trace(int argc, char **argv)
 	memset(&filter, 0, sizeof(filter));
 	nrange_specs = 0;
 	psb_freq = 0;
+	mtc_freq_cli = 0;
+	cyc_thresh_cli = 0;
 	timing = false;
+	ptwrite = false;
+	os_trace = false;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:P:hnpC")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:P:M:Y:hnpCWK")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -178,8 +186,32 @@ cmd_trace(int argc, char **argv)
 				return (1);
 			}
 			break;
+		case 'M':
+			mtc_freq_cli = atoi(optarg);
+			if (mtc_freq_cli < 1 || mtc_freq_cli > 15) {
+				fprintf(stderr,
+				    "bsdtrace trace: mtc-freq must be "
+				    "1-15\n");
+				return (1);
+			}
+			break;
+		case 'Y':
+			cyc_thresh_cli = atoi(optarg);
+			if (cyc_thresh_cli < 1 || cyc_thresh_cli > 15) {
+				fprintf(stderr,
+				    "bsdtrace trace: cyc-thresh must be "
+				    "1-15\n");
+				return (1);
+			}
+			break;
 		case 'C':
 			timing = true;
+			break;
+		case 'W':
+			ptwrite = true;
+			break;
+		case 'K':
+			os_trace = true;
 			break;
 		case 'n':
 			dryrun = true;
@@ -198,10 +230,14 @@ cmd_trace(int argc, char **argv)
 			    "  -d seconds  Trace duration (0 = until Ctrl-C, default)\n"
 			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
 			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"
-			    "  -r range    IP filter: 0xstart:0xend or function_name (up to 2)\n"
+			    "  -r range    IP filter: 0xstart:0xend or func_name (stop: prefix for TraceStop)\n"
 			    "  -T tid       Thread index (default: 0), list (0,1,3), or 'all'\n"
 			    "  -P freq     PSB sync frequency 0-15 (lower = more sync, 0 = default)\n"
-			    "  -C          Enable timing packets (MTC + cycle-accurate)\n"
+			    "  -C          Enable timing packets (MTC + CYC, auto-detect freq)\n"
+			    "  -M freq     MTC frequency 1-15 (explicit, overrides -C)\n"
+			    "  -Y thresh   CYC threshold 1-15 (explicit, overrides -C)\n"
+			    "  -W          Enable PTWRITE trace markers\n"
+			    "  -K          Include kernel/OS-mode tracing\n"
 			    "  -m count    Stop after N records\n"
 			    "  -b backend  HWT backend name (default: auto-detect)\n"
 			    "  -p          Pause target on mmap/exec events\n"
@@ -282,7 +318,13 @@ cmd_trace(int argc, char **argv)
 	/* Apply hardware IP range filter if specified. */
 	ctx.filter = filter;
 	ctx.psb_freq = psb_freq;
-	if (timing) {
+	ctx.ptwrite = ptwrite;
+	ctx.os_trace = os_trace;
+	if (mtc_freq_cli > 0)
+		ctx.mtc_freq = mtc_freq_cli;
+	if (cyc_thresh_cli > 0)
+		ctx.cyc_thresh = cyc_thresh_cli;
+	if (timing && ctx.mtc_freq == 0 && ctx.cyc_thresh == 0) {
 		hwt_pt_default_timing(&ctx.mtc_freq, &ctx.cyc_thresh);
 		if (ctx.mtc_freq == 0 && ctx.cyc_thresh == 0) {
 			fprintf(stderr,
@@ -345,7 +387,8 @@ cmd_trace(int argc, char **argv)
 		warnx("could not create %s — continuing without metadata",
 		    meta_path);
 	meta_writer_header(meta, pid, tid);
-	meta_writer_timing(meta, (uint8_t)ctx.mtc_freq);
+	meta_writer_timing(meta, (uint8_t)ctx.mtc_freq,
+	    (uint8_t)ctx.cyc_thresh);
 	trace_state_init(&ts, meta);
 	if (trace_state_seed_process_mmaps(&ts, pid) != 0)
 		warnx("could not snapshot existing executable mappings "

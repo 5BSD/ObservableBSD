@@ -1,0 +1,53 @@
+Add PTWRITE and FUPONPTW support to pt.ko.
+
+PTWRITE (RTIT_CTL_PTWEN, bit 12) enables the PTWRITE instruction,
+which lets userspace emit trace markers with arbitrary 32/64-bit
+payloads into the PT stream.  This is the highest-value feature
+for users who want to annotate their traces with application-level
+context (variable values, state machine transitions, etc.).
+
+FUPONPTW (RTIT_CTL_FUPONPTW, bit 5) causes the hardware to emit
+a FUP (Flow Update Packet) alongside each PTW packet, giving the
+marker an IP context so the decoder knows where in the code the
+PTWRITE was executed.  Without it, PTW packets are much harder to
+correlate with the instruction stream.
+
+Validation checks CPUPT_PRW (CPUID leaf 0x14 subleaf 0 EBX bit 4)
+before accepting PTWEN, and rejects FUPONPTW without PTWEN.
+
+Apply from /usr/src (on top of existing patches):
+  patch -p1 < /path/to/pt-ptwrite.patch
+
+---
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -82,7 +82,8 @@
+ #define PT_SUPPORTED_FLAGS						\
+ 	(RTIT_CTL_MTCEN | RTIT_CTL_CR3FILTER | RTIT_CTL_DIS_TNT |	\
+ 	    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN |		\
+ 	    RTIT_CTL_TSCEN | RTIT_CTL_CYCEN | RTIT_CTL_MTC_FREQ_M |	\
+-	    RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M)
++	    RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M |		\
++	    RTIT_CTL_PTWEN | RTIT_CTL_FUPONPTW)
+ #define PT_XSAVE_MASK (XFEATURE_ENABLED_X87 | XFEATURE_ENABLED_SSE)
+ #define PT_XSTATE_BV (PT_XSAVE_MASK | XFEATURE_ENABLED_PT)
+ #define PT_MAX_IP_RANGES 2
+@@ -471,6 +472,17 @@
+ 		}
+ 	}
+-	/* TODO: support for more config bits. */
++	if (cfg->rtit_ctl & RTIT_CTL_PTWEN) {
++		if ((pt_info.l0_ebx & CPUPT_PRW) == 0) {
++			printf("%s: CPU does not support PTWRITE\n",
++			    __func__);
++			return (ENXIO);
++		}
++	}
++	if ((cfg->rtit_ctl & RTIT_CTL_FUPONPTW) &&
++	    !(cfg->rtit_ctl & RTIT_CTL_PTWEN)) {
++		printf("%s: FUPONPTW requires PTWEN\n", __func__);
++		return (EINVAL);
++	}
+
+ 	/*
+ 	 * PSB frequency: controls how often the hardware emits a PSB

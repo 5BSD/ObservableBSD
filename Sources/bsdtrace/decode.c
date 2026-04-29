@@ -145,6 +145,11 @@ emit_packet_text(const struct pt_packet *pkt)
 	case ppt_ovf:
 		printf("  OVF\n");
 		break;
+	case ppt_ptw:
+		printf("  PTW       ip=%d payload=0x%016lx\n",
+		    pkt->payload.ptw.ip,
+		    (unsigned long)pkt->payload.ptw.payload);
+		break;
 	case ppt_stop:
 		printf("  STOP\n");
 		break;
@@ -239,6 +244,11 @@ emit_packet_json(const struct pt_packet *pkt)
 		break;
 	case ppt_ovf:
 		printf("{\"pkt\":\"ovf\"}\n");
+		break;
+	case ppt_ptw:
+		printf("{\"pkt\":\"ptw\",\"ip\":%d,\"payload\":\"0x%lx\"}\n",
+		    pkt->payload.ptw.ip,
+		    (unsigned long)pkt->payload.ptw.payload);
 		break;
 	case ppt_stop:
 		printf("{\"pkt\":\"stop\"}\n");
@@ -1272,6 +1282,8 @@ decode_pt_insn(const void *buf, size_t len,
 	int tid;
 	int status;
 	int total, calls, branches, returns, syscalls, nomaps, errors;
+	int ovf_count;
+	uint32_t total_lost_mtc, total_lost_cyc;
 
 	if (buf == NULL || len == 0) {
 		warnx("no PT data to decode");
@@ -1348,6 +1360,9 @@ decode_pt_insn(const void *buf, size_t len,
 	syscalls = 0;
 	nomaps = 0;
 	errors = 0;
+	ovf_count = 0;
+	total_lost_mtc = 0;
+	total_lost_cyc = 0;
 
 	status = pt_insn_sync_forward(decoder);
 	while (status >= 0) {
@@ -1356,6 +1371,19 @@ decode_pt_insn(const void *buf, size_t len,
 			status = pt_insn_event(decoder, &ev, sizeof(ev));
 			if (status < 0)
 				break;
+			if (ev.type == ptev_overflow)
+				ovf_count++;
+			if (ev.type == ptev_ptwrite) {
+				if (fmt == FMT_JSON)
+					printf("{\"ptwrite\":\"0x%lx\","
+					    "\"ip\":\"0x%lx\"}\n",
+					    (unsigned long)ev.variant.ptwrite.payload,
+					    (unsigned long)ev.variant.ptwrite.ip);
+				else if (fmt == FMT_TEXT)
+					printf("  PTWRITE   0x%016lx  ip=0x%lx\n",
+					    (unsigned long)ev.variant.ptwrite.payload,
+					    (unsigned long)ev.variant.ptwrite.ip);
+			}
 		}
 		if (status < 0)
 			break;
@@ -1379,6 +1407,8 @@ decode_pt_insn(const void *buf, size_t len,
 		lost_mtc = 0;
 		lost_cyc = 0;
 		pt_insn_time(decoder, &tsc, &lost_mtc, &lost_cyc);
+		total_lost_mtc += lost_mtc;
+		total_lost_cyc += lost_cyc;
 
 		total++;
 		label = insn_class_str(insn.iclass);
@@ -1554,6 +1584,15 @@ decode_pt_insn(const void *buf, size_t len,
 		    total, calls, returns, branches, syscalls,
 		    nomaps, errors);
 	}
+
+	if (ovf_count > 0)
+		fprintf(stderr,
+		    "warning: %d overflow event(s) — trace data was lost\n",
+		    ovf_count);
+	if (total_lost_mtc > 0 || total_lost_cyc > 0)
+		fprintf(stderr,
+		    "warning: lost timing packets — mtc=%u cyc=%u\n",
+		    total_lost_mtc, total_lost_cyc);
 
 	collapsed_free(&col);
 	calltree_free(&ct);

@@ -1,0 +1,86 @@
+Add PT internal buffer overflow detection and reporting.
+
+The Intel PT hardware sets RTIT_STATUS_ERROR (bit 4) when its
+internal buffer overflows before the ToPA PMI can drain it.  This
+is distinct from the ToPA buffer wrapping (which userspace already
+detects via BUFFER record page regression).
+
+This patch:
+
+  1. Adds an overflow_pending flag to struct pt_cpu.
+  2. Checks RTIT_STATUS_ERROR in pt_topa_intr after stopping PT.
+     Since this runs in NMI context, the flag is deferred.
+  3. In the SWI callback (pt_send_buffer_record), if overflow_pending
+     is set, enqueues an HWT_RECORD_OVERFLOW record and clears the
+     flag.  This is safe because the SWI runs in thread context
+     where malloc(M_NOWAIT) is permitted.
+  4. Adds HWT_RECORD_OVERFLOW to the hwt_record_type enum.
+
+  5. In hwt_record.c hwt_record_to_user, adds HWT_RECORD_OVERFLOW
+     as a fallthrough case alongside HWT_RECORD_BUFFER so the
+     copyout path copies buf_id/curpage/offset for overflow records.
+
+Apply from /usr/src (on top of existing patches):
+  patch -p1 < /path/to/pt-overflow.patch
+
+---
+--- a/sys/dev/hwt/hwt_record.c
++++ b/sys/dev/hwt/hwt_record.c
+@@ -97,6 +97,7 @@
+ 	case HWT_RECORD_BUFFER:
++	case HWT_RECORD_OVERFLOW:
+ 		usr->buf_id = ent->buf_id;
+ 		usr->curpage = ent->curpage;
+ 		usr->offset = ent->offset;
+ 		break;
+
+--- a/sys/sys/hwt_record.h
++++ b/sys/sys/hwt_record.h
+@@ -34,7 +34,8 @@
+ enum hwt_record_type {
+ 	HWT_RECORD_MMAP,
+ 	HWT_RECORD_MUNMAP,
+ 	HWT_RECORD_EXECUTABLE,
+ 	HWT_RECORD_KERNEL,
+ 	HWT_RECORD_THREAD_CREATE,
+ 	HWT_RECORD_THREAD_SET_NAME,
+-	HWT_RECORD_BUFFER
++	HWT_RECORD_BUFFER,
++	HWT_RECORD_OVERFLOW
+ };
+
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -135,6 +135,7 @@
+ static struct pt_cpu {
+ 	struct pt_ctx *ctx;	 /* active PT tracing context */
+ 	enum pt_cpu_state state; /* used as part of trace stop protocol */
+ 	void *swi_cookie;	 /* Software interrupt handler context */
+ 	int in_pcint_handler;
++	int overflow_pending;
+ } *pt_pcpu;
+
+@@ -920,6 +921,16 @@
+ 	pt_fill_buffer_record(ctx->id, &ctx->buf, &record);
+ 	hwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
++
++	if (cpu->overflow_pending) {
++		struct hwt_record_entry ovf_rec;
++		ovf_rec.record_type = HWT_RECORD_OVERFLOW;
++		ovf_rec.buf_id = ctx->id;
++		ovf_rec.curpage = 0;
++		ovf_rec.offset = 0;
++		hwt_record_ctx(ctx->hwt_ctx, &ovf_rec, M_ZERO | M_NOWAIT);
++		cpu->overflow_pending = 0;
++	}
+ }
+
+@@ -995,6 +996,10 @@
+ 	pt_cpu_toggle_local(ctx->save_area, false);
+ 	pt_update_buffer(ctx);
++
++	/* Check for internal buffer overflow (data loss). */
++	if (rdmsr(MSR_IA32_RTIT_STATUS) & RTIT_STATUS_ERROR)
++		cpu->overflow_pending = 1;
++
+ 	pt_topa_status_clear();

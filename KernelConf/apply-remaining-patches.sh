@@ -13,9 +13,11 @@
 #   1. Removes the broken TAILQ_FIRST restore from pt_backend_enable
 #      (caused GPF + cross-thread PT data corruption in multi-thread traces)
 #   2. Adds PSB/MTC/CYC timing support to pt_backend_configure
-#      (enables bsdtrace -P and -C flags)
+#      (enables bsdtrace -P, -C, -M, -Y flags)
 #   3. Widens PT_SUPPORTED_FLAGS to include timing control bits
-#   4. Builds and reloads hwt.ko and pt.ko
+#   4. Adds PTWRITE + FUPONPTW support (enables bsdtrace -W flag)
+#   5. Adds overflow detection (RTIT_STATUS_ERROR → HWT_RECORD_OVERFLOW)
+#   6. Builds and reloads hwt.ko and pt.ko
 #
 
 PT="/usr/src/sys/amd64/pt/pt.c"
@@ -306,6 +308,298 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────────────────────
+# Patch 4: Add PTWRITE + FUPONPTW support
+# ─────────────────────────────────────────────────────────
+
+echo ""
+echo "=== Patch 4: PTWRITE + FUPONPTW support ==="
+
+if grep -q 'RTIT_CTL_PTWEN' "$PT"; then
+    echo "  Already applied (RTIT_CTL_PTWEN found)"
+else
+    python3 - "$PT" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    src = f.read()
+
+# Add PTWEN | FUPONPTW to PT_SUPPORTED_FLAGS
+old_end = 'RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M)'
+new_end = '''RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M |\t\t\\
+\t    RTIT_CTL_PTWEN | RTIT_CTL_FUPONPTW)'''
+
+if old_end not in src:
+    print("  ERROR: could not find PT_SUPPORTED_FLAGS end", file=sys.stderr)
+    sys.exit(1)
+
+src = src.replace(old_end, new_end, 1)
+
+# Add PTWRITE validation after DIS_TNT check
+marker = '\t/* TODO: support for more config bits. */\n'
+if marker in src:
+    validation = '''\tif (cfg->rtit_ctl & RTIT_CTL_PTWEN) {
+\t\tif ((pt_info.l0_ebx & CPUPT_PRW) == 0) {
+\t\t\tprintf("%s: CPU does not support PTWRITE\\n",
+\t\t\t    __func__);
+\t\t\treturn (ENXIO);
+\t\t}
+\t}
+\tif ((cfg->rtit_ctl & RTIT_CTL_FUPONPTW) &&
+\t    !(cfg->rtit_ctl & RTIT_CTL_PTWEN)) {
+\t\tprintf("%s: FUPONPTW requires PTWEN\\n", __func__);
+\t\treturn (EINVAL);
+\t}
+'''
+    src = src.replace(marker, validation, 1)
+else:
+    # If TODO marker was already replaced, insert after DIS_TNT block
+    dis_tnt_end = "\t\t\treturn (ENXIO);\n\t\t}\n\t}\n"
+    # Find the last occurrence (DIS_TNT is last validation)
+    idx = src.rfind(dis_tnt_end)
+    if idx < 0:
+        print("  ERROR: could not find insertion point for PTWRITE", file=sys.stderr)
+        sys.exit(1)
+    insert_at = idx + len(dis_tnt_end)
+    validation = '''\tif (cfg->rtit_ctl & RTIT_CTL_PTWEN) {
+\t\tif ((pt_info.l0_ebx & CPUPT_PRW) == 0) {
+\t\t\tprintf("%s: CPU does not support PTWRITE\\n",
+\t\t\t    __func__);
+\t\t\treturn (ENXIO);
+\t\t}
+\t}
+\tif ((cfg->rtit_ctl & RTIT_CTL_FUPONPTW) &&
+\t    !(cfg->rtit_ctl & RTIT_CTL_PTWEN)) {
+\t\tprintf("%s: FUPONPTW requires PTWEN\\n", __func__);
+\t\treturn (EINVAL);
+\t}
+'''
+    src = src[:insert_at] + validation + src[insert_at:]
+
+with open(path, 'w') as f:
+    f.write(src)
+print("  Added PTWRITE + FUPONPTW to PT_SUPPORTED_FLAGS and validation")
+PYEOF
+
+    if [ $? -ne 0 ]; then
+        echo "  FAILED"
+        ERRORS=$((ERRORS + 1))
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────
+# Patch 5: Add overflow detection + HWT_RECORD_OVERFLOW
+# ─────────────────────────────────────────────────────────
+
+echo ""
+echo "=== Patch 5: Overflow detection ==="
+
+HWT_REC="/usr/src/sys/sys/hwt_record.h"
+
+if grep -q 'HWT_RECORD_OVERFLOW' "$HWT_REC" 2>/dev/null; then
+    echo "  hwt_record.h: Already applied"
+else
+    if [ -f "$HWT_REC" ]; then
+        sed -i '' 's/HWT_RECORD_BUFFER$/HWT_RECORD_BUFFER,\
+	HWT_RECORD_OVERFLOW/' "$HWT_REC"
+        echo "  Added HWT_RECORD_OVERFLOW to hwt_record.h"
+    else
+        echo "  WARNING: $HWT_REC not found — skip enum update"
+    fi
+fi
+
+HWT_RECC="/usr/src/sys/dev/hwt/hwt_record.c"
+if [ -f "$HWT_RECC" ] && ! grep -q 'HWT_RECORD_OVERFLOW' "$HWT_RECC"; then
+    sed -i '' '/case HWT_RECORD_BUFFER:/a\
+	case HWT_RECORD_OVERFLOW:' "$HWT_RECC"
+    echo "  Added HWT_RECORD_OVERFLOW to hwt_record_to_user copyout"
+elif [ -f "$HWT_RECC" ]; then
+    echo "  hwt_record.c: Already applied"
+fi
+
+if grep -q 'overflow_pending' "$PT"; then
+    echo "  pt.c: Already applied (overflow_pending found)"
+else
+    python3 - "$PT" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    src = f.read()
+
+# Add overflow_pending to struct pt_cpu
+old_field = '\tint in_pcint_handler;\n} *pt_pcpu;'
+new_field = '\tint in_pcint_handler;\n\tint overflow_pending;\n} *pt_pcpu;'
+if old_field not in src:
+    print("  ERROR: could not find in_pcint_handler field", file=sys.stderr)
+    sys.exit(1)
+src = src.replace(old_field, new_field, 1)
+
+# Add RTIT_STATUS_ERROR check in pt_topa_intr
+old_intr = '\tpt_cpu_toggle_local(ctx->save_area, false);\n\tpt_update_buffer(ctx);\n\tpt_topa_status_clear();'
+new_intr = '''\tpt_cpu_toggle_local(ctx->save_area, false);
+\tpt_update_buffer(ctx);
+
+\t/* Check for internal buffer overflow (data loss). */
+\tif (rdmsr(MSR_IA32_RTIT_STATUS) & RTIT_STATUS_ERROR)
+\t\tcpu->overflow_pending = 1;
+
+\tpt_topa_status_clear();'''
+if old_intr not in src:
+    print("  ERROR: could not find pt_topa_intr toggle/update/clear", file=sys.stderr)
+    sys.exit(1)
+src = src.replace(old_intr, new_intr, 1)
+
+# Add overflow record enqueue in pt_send_buffer_record
+old_send = '\tpt_fill_buffer_record(ctx->id, &ctx->buf, &record);\n\thwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);\n}'
+new_send = '''\tpt_fill_buffer_record(ctx->id, &ctx->buf, &record);
+\thwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
+
+\tif (cpu->overflow_pending) {
+\t\tstruct hwt_record_entry ovf_rec;
+\t\tovf_rec.record_type = HWT_RECORD_OVERFLOW;
+\t\tovf_rec.buf_id = ctx->id;
+\t\tovf_rec.curpage = 0;
+\t\tovf_rec.offset = 0;
+\t\thwt_record_ctx(ctx->hwt_ctx, &ovf_rec, M_ZERO | M_NOWAIT);
+\t\tcpu->overflow_pending = 0;
+\t}
+}'''
+if old_send not in src:
+    print("  ERROR: could not find pt_send_buffer_record body", file=sys.stderr)
+    sys.exit(1)
+src = src.replace(old_send, new_send, 1)
+
+with open(path, 'w') as f:
+    f.write(src)
+print("  Added overflow_pending, RTIT_STATUS_ERROR check, and overflow record")
+PYEOF
+
+    if [ $? -ne 0 ]; then
+        echo "  FAILED"
+        ERRORS=$((ERRORS + 1))
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────
+# Patch 6: TraceStop IP filter mode
+# ─────────────────────────────────────────────────────────
+
+echo ""
+echo "=== Patch 6: TraceStop IP filter mode ==="
+
+PT_H="/usr/src/sys/amd64/pt/pt.h"
+
+if grep -q 'PT_RANGE_TRACESTOP' "$PT_H" 2>/dev/null; then
+    echo "  Already applied (PT_RANGE_TRACESTOP found)"
+else
+    if [ -f "$PT_H" ]; then
+        python3 - "$PT_H" "$PT" << 'PYEOF'
+import sys
+
+pth = sys.argv[1]
+ptc = sys.argv[2]
+
+# Update pt.h: add mode field and defines
+with open(pth, 'r') as f:
+    src = f.read()
+
+old_struct = '''\tstruct ipf_range {
+\t\tvm_offset_t start;
+\t\tvm_offset_t end;
+\t} ip_ranges[PT_IP_FILTER_MAX_RANGES];'''
+
+new_struct = '''/*
+ * IP filter range modes (ADDR_CFG field encoding):
+ *   0  \\xe2\\x80\\x94 disabled (default if nranges omits this range)
+ *   1  \\xe2\\x80\\x94 FilterEn: trace only when IP is within [start, end)
+ *   2  \\xe2\\x80\\x94 TraceStop: stop tracing when IP enters [start, end)
+ */
+#define\\tPT_RANGE_FILTER\\t\\t1
+#define\\tPT_RANGE_TRACESTOP\\t2
+
+\\tstruct ipf_range {
+\\t\\tvm_offset_t start;
+\\t\\tvm_offset_t end;
+\\t\\tint mode;\\t/* PT_RANGE_FILTER or PT_RANGE_TRACESTOP */
+\\t} ip_ranges[PT_IP_FILTER_MAX_RANGES];'''
+
+if old_struct not in src:
+    print("  ERROR: could not find ipf_range struct in pt.h", file=sys.stderr)
+    sys.exit(1)
+
+src = src.replace(old_struct, new_struct, 1)
+with open(pth, 'w') as f:
+    f.write(src)
+print("  Added mode field to ipf_range in pt.h")
+
+# Update pt.c: use mode in pt_configure_ranges
+with open(ptc, 'r') as f:
+    src = f.read()
+
+old_case2 = '''\t\tcase 2:
+\t\t\tpt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(1));
+\t\t\tpt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
+\t\t\tpt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
+\t\tcase 1:
+\t\t\tpt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(0));
+\t\t\tpt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
+\t\t\tpt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
+\t\t\tbreak;'''
+
+new_case2 = '''\t\tcase 2: {
+\t\t\tint mode1 = cfg->ip_ranges[1].mode;
+\t\t\tif (mode1 == 0)
+\t\t\t\tmode1 = PT_RANGE_FILTER;
+\t\t\tif (mode1 < 1 || mode1 > 2) {
+\t\t\t\tprintf("%s: ip_ranges[1].mode %d invalid "
+\t\t\t\t    "(1=filter, 2=tracestop)\\n",
+\t\t\t\t    __func__, cfg->ip_ranges[1].mode);
+\t\t\t\treturn (EINVAL);
+\t\t\t}
+\t\t\tpt_ext->rtit_ctl |=
+\t\t\t    ((uint64_t)mode1 << RTIT_CTL_ADDR_CFG_S(1));
+\t\t\tpt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
+\t\t\tpt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
+\t\t}
+\t\t/* FALLTHROUGH */
+\t\tcase 1: {
+\t\t\tint mode0 = cfg->ip_ranges[0].mode;
+\t\t\tif (mode0 == 0)
+\t\t\t\tmode0 = PT_RANGE_FILTER;
+\t\t\tif (mode0 < 1 || mode0 > 2) {
+\t\t\t\tprintf("%s: ip_ranges[0].mode %d invalid "
+\t\t\t\t    "(1=filter, 2=tracestop)\\n",
+\t\t\t\t    __func__, cfg->ip_ranges[0].mode);
+\t\t\t\treturn (EINVAL);
+\t\t\t}
+\t\t\tpt_ext->rtit_ctl |=
+\t\t\t    ((uint64_t)mode0 << RTIT_CTL_ADDR_CFG_S(0));
+\t\t\tpt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
+\t\t\tpt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
+\t\t\tbreak;
+\t\t}'''
+
+if old_case2 not in src:
+    print("  ERROR: could not find pt_configure_ranges switch in pt.c", file=sys.stderr)
+    sys.exit(1)
+
+src = src.replace(old_case2, new_case2, 1)
+with open(ptc, 'w') as f:
+    f.write(src)
+print("  Updated pt_configure_ranges to use per-range mode")
+PYEOF
+
+        if [ $? -ne 0 ]; then
+            echo "  FAILED"
+            ERRORS=$((ERRORS + 1))
+        fi
+    else
+        echo "  WARNING: $PT_H not found — skip TraceStop"
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────
 # Verify
 # ─────────────────────────────────────────────────────────
 
@@ -359,6 +653,30 @@ check "CYC thresh validation" \
 check "hwt_owner.c TOCTOU fix" \
     "grep -B5 'hwt_contexthash_remove' /usr/src/sys/dev/hwt/hwt_owner.c | grep -q 'ctx->state = 0'"
 
+check "PTWRITE support (RTIT_CTL_PTWEN)" \
+    "grep -q 'RTIT_CTL_PTWEN' $PT"
+
+check "PTWRITE validation (CPUPT_PRW)" \
+    "grep -q 'CPUPT_PRW' $PT"
+
+check "FUPONPTW requires PTWEN check" \
+    "grep -q 'FUPONPTW requires PTWEN' $PT"
+
+check "overflow_pending field" \
+    "grep -q 'overflow_pending' $PT"
+
+check "RTIT_STATUS_ERROR overflow check" \
+    "grep -q 'RTIT_STATUS_ERROR' $PT"
+
+check "HWT_RECORD_OVERFLOW enum" \
+    "grep -q 'HWT_RECORD_OVERFLOW' /usr/src/sys/sys/hwt_record.h 2>/dev/null || echo skip"
+
+check "TraceStop mode defines" \
+    "grep -q 'PT_RANGE_TRACESTOP' /usr/src/sys/amd64/pt/pt.h 2>/dev/null || echo skip"
+
+check "Per-range mode field" \
+    "grep -q 'int mode' /usr/src/sys/amd64/pt/pt.h 2>/dev/null || echo skip"
+
 echo ""
 echo "  $PASS/$TOTAL checks passed"
 
@@ -406,4 +724,7 @@ echo ""
 echo "Changes applied:"
 echo "  1. Removed TAILQ_FIRST from pt_backend_enable (GPF + thread contamination fix)"
 echo "  2. Added PSB/MTC/CYC timing support to pt_backend_configure"
-echo "  3. Rebuilt and reloaded hwt.ko + pt.ko"
+echo "  3. Added PTWRITE + FUPONPTW support"
+echo "  4. Added overflow detection (RTIT_STATUS_ERROR + HWT_RECORD_OVERFLOW)"
+echo "  5. Added TraceStop IP filter mode (per-range mode field)"
+echo "  6. Rebuilt and reloaded hwt.ko + pt.ko"

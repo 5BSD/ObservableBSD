@@ -40,6 +40,9 @@
 #ifndef _AMD64_PT_PT_H_
 #define	PT_IP_FILTER_MAX_RANGES	2
 
+#define	PT_RANGE_FILTER		1
+#define	PT_RANGE_TRACESTOP	2
+
 struct pt_cpu_config {
 	uint64_t	rtit_ctl;
 	register_t	cr3_filter;
@@ -47,6 +50,7 @@ struct pt_cpu_config {
 	struct {
 		vm_offset_t	start;
 		vm_offset_t	end;
+		int		mode;	/* PT_RANGE_FILTER or _TRACESTOP */
 	} ip_ranges[PT_IP_FILTER_MAX_RANGES];
 	uint32_t	mtc_freq;
 	uint32_t	cyc_thresh;
@@ -55,7 +59,7 @@ struct pt_cpu_config {
 #endif /* !_AMD64_PT_PT_H_ */
 
 #ifdef __amd64__
-_Static_assert(sizeof(struct pt_cpu_config) == 72,
+_Static_assert(sizeof(struct pt_cpu_config) == 88,
     "pt_cpu_config size drifted from amd64/pt/pt.h");
 _Static_assert(offsetof(struct pt_cpu_config, cr3_filter) == 8,
     "pt_cpu_config.cr3_filter offset mismatch");
@@ -63,11 +67,11 @@ _Static_assert(offsetof(struct pt_cpu_config, nranges) == 16,
     "pt_cpu_config.nranges offset mismatch");
 _Static_assert(offsetof(struct pt_cpu_config, ip_ranges) == 24,
     "pt_cpu_config.ip_ranges offset mismatch");
-_Static_assert(offsetof(struct pt_cpu_config, mtc_freq) == 56,
+_Static_assert(offsetof(struct pt_cpu_config, mtc_freq) == 72,
     "pt_cpu_config.mtc_freq offset mismatch");
-_Static_assert(offsetof(struct pt_cpu_config, cyc_thresh) == 60,
+_Static_assert(offsetof(struct pt_cpu_config, cyc_thresh) == 76,
     "pt_cpu_config.cyc_thresh offset mismatch");
-_Static_assert(offsetof(struct pt_cpu_config, psb_freq) == 64,
+_Static_assert(offsetof(struct pt_cpu_config, psb_freq) == 80,
     "pt_cpu_config.psb_freq offset mismatch");
 #endif
 
@@ -102,8 +106,24 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
 #ifndef RTIT_CTL_TSCEN
 #define	RTIT_CTL_TSCEN		(1 << 10)
 #endif
+#ifndef RTIT_CTL_PTWEN
+#define	RTIT_CTL_PTWEN		(1 << 12)
+#endif
+#ifndef RTIT_CTL_FUPONPTW
+#define	RTIT_CTL_FUPONPTW	(1 << 5)
+#endif
+#ifndef RTIT_CTL_OS
+#define	RTIT_CTL_OS		(1 << 2)
+#endif
 #ifndef RTIT_CTL_ADDR_CFG_S
 #define	RTIT_CTL_ADDR_CFG_S(n)	(32 + (n) * 4)
+#endif
+
+/*
+ * HWT_RECORD_OVERFLOW may not be in the installed kernel headers yet.
+ */
+#ifndef HWT_RECORD_OVERFLOW
+#define	HWT_RECORD_OVERFLOW	7
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -148,6 +168,7 @@ struct ip_filter {
 		uint64_t	start;
 		uint64_t	end;
 	} ranges[2];
+	int		modes[2];	/* PT_RANGE_FILTER or _TRACESTOP */
 };
 
 /*
@@ -166,6 +187,7 @@ struct range_spec {
 	uint64_t		start;		/* RANGE_ADDR only */
 	uint64_t		end;		/* RANGE_ADDR only */
 	char			symbol[RANGE_SPEC_SYMLEN]; /* RANGE_SYMBOL */
+	int			mode;		/* PT_RANGE_FILTER(1) or _TRACESTOP(2) */
 };
 
 /*
@@ -196,6 +218,8 @@ struct hwt_ctx {
 	uint32_t	psb_freq;	/* PSB sync frequency (0=default) */
 	uint32_t	mtc_freq;	/* MTC timing frequency (0=off)   */
 	uint32_t	cyc_thresh;	/* CYC cycle-accurate thresh (0=off) */
+	bool		ptwrite;	/* true if -W (PTWRITE enabled)   */
+	bool		os_trace;	/* true if -K (OS/kernel trace)   */
 	bool		all_threads;	/* true if -T all                 */
 	int		requested_tids[MAX_THREADS]; /* -T 0,1,3 list      */
 	int		nrequested;	/* count of requested tids        */
@@ -286,6 +310,7 @@ struct trace_state {
 	int			max_buf_page;
 	vm_offset_t		last_buf_offset;
 	bool			buf_wrapped;
+	int			overflow_count;
 };
 
 struct decode_probe_result {
@@ -312,6 +337,7 @@ typedef struct _Elf Elf;
 struct pt_decode_opts {
 	int		tid;
 	uint8_t		mtc_freq;
+	uint8_t		cyc_thresh;
 };
 
 bool	 is_user_addr(uint64_t addr);
@@ -381,7 +407,8 @@ struct meta_writer;
 
 struct meta_writer *meta_writer_open(const char *path);
 void	 meta_writer_header(struct meta_writer *mw, pid_t pid, int tid);
-void	 meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq);
+void	 meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq,
+	    uint8_t cyc_thresh);
 void	 meta_writer_record(struct meta_writer *mw,
 	    const struct bsdtrace_record *rec);
 void	 meta_writer_sections(struct meta_writer *mw,
@@ -389,6 +416,7 @@ void	 meta_writer_sections(struct meta_writer *mw,
 void	 meta_writer_close(struct meta_writer *mw);
 int	 meta_read_tid(const char *path);
 int	 meta_read_mtc_freq(const char *path);
+int	 meta_read_cyc_thresh(const char *path);
 int	 meta_read_sections(const char *path,
 	    struct pt_image_info **sections_out, int *nsections_out);
 

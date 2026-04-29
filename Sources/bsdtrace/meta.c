@@ -59,14 +59,16 @@ meta_writer_header(struct meta_writer *mw, pid_t pid, int tid)
 }
 
 void
-meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq)
+meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq, uint8_t cyc_thresh)
 {
 
-	if (mw == NULL || mw->fp == NULL || mtc_freq == 0)
+	if (mw == NULL || mw->fp == NULL)
+		return;
+	if (mtc_freq == 0 && cyc_thresh == 0)
 		return;
 	fprintf(mw->fp,
-	    "{\"type\":\"timing\",\"mtc_freq\":%u}\n",
-	    mtc_freq);
+	    "{\"type\":\"timing\",\"mtc_freq\":%u,\"cyc_thresh\":%u}\n",
+	    mtc_freq, cyc_thresh);
 }
 
 void
@@ -187,10 +189,34 @@ meta_read_mtc_freq(const char *path)
 
 	while (fgets(line, sizeof(line), fp) != NULL) {
 		if (sscanf(line,
-		    "{\"type\":\"timing\",\"mtc_freq\":%u}",
+		    "{\"type\":\"timing\",\"mtc_freq\":%u",
 		    &mtc_freq) == 1) {
 			fclose(fp);
 			return ((int)mtc_freq);
+		}
+	}
+
+	fclose(fp);
+	return (0);
+}
+
+int
+meta_read_cyc_thresh(const char *path)
+{
+	FILE *fp;
+	char line[256];
+	unsigned int cyc_thresh;
+
+	fp = fopen(path, "r");
+	if (fp == NULL)
+		return (0);
+
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if (sscanf(line,
+		    "{\"type\":\"timing\",\"mtc_freq\":%*u,\"cyc_thresh\":%u}",
+		    &cyc_thresh) == 1) {
+			fclose(fp);
+			return ((int)cyc_thresh);
 		}
 	}
 

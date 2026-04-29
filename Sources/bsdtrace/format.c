@@ -136,6 +136,7 @@ record_type_name(enum hwt_record_type t)
 	case HWT_RECORD_THREAD_CREATE:	return ("thread_create");
 	case HWT_RECORD_THREAD_SET_NAME: return ("thread_set_name");
 	case HWT_RECORD_BUFFER:		return ("buffer");
+	case HWT_RECORD_OVERFLOW:	return ("overflow");
 	default:			return ("unknown");
 	}
 }
@@ -195,6 +196,11 @@ fmt_record_text(const struct bsdtrace_record *rec, pid_t pid)
 		printf("  BUFFER  buf_id=%d  page=%d  offset=0x%lx\n",
 		    rec->buf_id, rec->curpage,
 		    (unsigned long)rec->offset);
+		break;
+
+	case HWT_RECORD_OVERFLOW:
+		printf("  OVERFLOW  pid=%d  PT internal buffer overflow\n",
+		    (int)pid);
 		break;
 
 	default:

@@ -43,22 +43,32 @@
 int
 parse_range_spec(const char *arg, struct range_spec *spec)
 {
+	const char *inner;
 
 	memset(spec, 0, sizeof(*spec));
+	spec->mode = PT_RANGE_FILTER;
 
-	if (sscanf(arg, "0x%lx:0x%lx", &spec->start, &spec->end) == 2) {
+	/* Check for "stop:" prefix → TraceStop mode. */
+	if (strncmp(arg, "stop:", 5) == 0) {
+		spec->mode = PT_RANGE_TRACESTOP;
+		inner = arg + 5;
+	} else {
+		inner = arg;
+	}
+
+	if (sscanf(inner, "0x%lx:0x%lx", &spec->start, &spec->end) == 2) {
 		spec->type = RANGE_ADDR;
 		return (0);
 	}
 
-	if (arg[0] == '\0') {
+	if (inner[0] == '\0') {
 		warnx("empty -r argument");
 		return (-1);
 	}
 	spec->type = RANGE_SYMBOL;
-	if (strlcpy(spec->symbol, arg, sizeof(spec->symbol)) >=
+	if (strlcpy(spec->symbol, inner, sizeof(spec->symbol)) >=
 	    sizeof(spec->symbol)) {
-		warnx("symbol name too long: %s", arg);
+		warnx("symbol name too long: %s", inner);
 		return (-1);
 	}
 	return (0);
@@ -511,6 +521,7 @@ resolve_range_specs(struct range_spec *specs, int nspecs,
 		case RANGE_ADDR:
 			filter->ranges[filter->nranges].start = specs[i].start;
 			filter->ranges[filter->nranges].end = specs[i].end;
+			filter->modes[filter->nranges] = specs[i].mode;
 			filter->nranges++;
 			break;
 		case RANGE_SYMBOL:
@@ -520,10 +531,13 @@ resolve_range_specs(struct range_spec *specs, int nspecs,
 			    &filter->ranges[filter->nranges].end) != 0)
 				return (-1);
 			fprintf(stderr, "resolved '%s' -> "
-			    "0x%lx:0x%lx\n",
+			    "0x%lx:0x%lx%s\n",
 			    specs[i].symbol,
 			    filter->ranges[filter->nranges].start,
-			    filter->ranges[filter->nranges].end);
+			    filter->ranges[filter->nranges].end,
+			    specs[i].mode == PT_RANGE_TRACESTOP ?
+			    " (tracestop)" : "");
+			filter->modes[filter->nranges] = specs[i].mode;
 			filter->nranges++;
 			break;
 		}

@@ -168,6 +168,8 @@ cmd_decode(int argc, char **argv)
 	dopts.tid = meta_path[0] != '\0' ? meta_read_tid(meta_path) : -1;
 	dopts.mtc_freq = meta_path[0] != '\0' ?
 	    (uint8_t)meta_read_mtc_freq(meta_path) : 0;
+	dopts.cyc_thresh = meta_path[0] != '\0' ?
+	    (uint8_t)meta_read_cyc_thresh(meta_path) : 0;
 	rc = decode_pt_insn(buf, (size_t)sb.st_size, sections, nsections,
 	    fmt, &dopts);
 

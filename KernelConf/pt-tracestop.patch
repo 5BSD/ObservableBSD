@@ -1,0 +1,92 @@
+Add TraceStop IP filter mode and per-range mode field.
+
+The hardware supports two IP address filter modes via the ADDR_CFG
+field in RTIT_CTL:
+  1 — FilterEn: trace only when IP is within [start, end)
+  2 — TraceStop: stop tracing when IP enters [start, end)
+
+The driver previously hardcoded mode 1 (FilterEn) for all ranges.
+This patch adds a per-range mode field to struct ipf_range in
+pt_cpu_config, allowing userspace to select FilterEn or TraceStop
+per range.
+
+Mode 0 defaults to FilterEn for backward compatibility.  Modes
+greater than 2 are rejected with EINVAL.
+
+ABI change: struct pt_cpu_config grows from 72 to 88 bytes due to
+the new int mode field in each ipf_range.  Both kernel and
+userspace must be updated together.
+
+Apply from /usr/src (on top of existing patches):
+  patch -p1 < /path/to/pt-tracestop.patch
+
+---
+--- a/sys/amd64/pt/pt.h
++++ b/sys/amd64/pt/pt.h
+@@ -35,11 +35,21 @@
+ #define PT_IP_FILTER_MAX_RANGES (2) /* Intel SDM Vol. 3C, 33-29 */
+
++/*
++ * IP filter range modes (ADDR_CFG field encoding):
++ *   0  — disabled (default if nranges omits this range)
++ *   1  — FilterEn: trace only when IP is within [start, end)
++ *   2  — TraceStop: stop tracing when IP enters [start, end)
++ */
++#define	PT_RANGE_FILTER		1
++#define	PT_RANGE_TRACESTOP	2
++
+ struct pt_cpu_config {
+ 	uint64_t rtit_ctl;
+ 	register_t cr3_filter;
+ 	int nranges;
+ 	struct ipf_range {
+ 		vm_offset_t start;
+ 		vm_offset_t end;
++		int mode;	/* PT_RANGE_FILTER or PT_RANGE_TRACESTOP */
+ 	} ip_ranges[PT_IP_FILTER_MAX_RANGES];
+ 	uint32_t mtc_freq;
+ 	uint32_t cyc_thresh;
+
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -370,12 +370,34 @@
+ 		switch (n) {
+-		case 2:
+-			pt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(1));
++		case 2: {
++			int mode1 = cfg->ip_ranges[1].mode;
++			if (mode1 == 0)
++				mode1 = PT_RANGE_FILTER;
++			if (mode1 < 1 || mode1 > 2) {
++				printf("%s: ip_ranges[1].mode %d invalid "
++				    "(1=filter, 2=tracestop)\n",
++				    __func__, cfg->ip_ranges[1].mode);
++				return (EINVAL);
++			}
++			pt_ext->rtit_ctl |=
++			    ((uint64_t)mode1 << RTIT_CTL_ADDR_CFG_S(1));
+ 			pt_ext->rtit_addr1_a = cfg->ip_ranges[1].start;
+ 			pt_ext->rtit_addr1_b = cfg->ip_ranges[1].end;
+-		case 1:
+-			pt_ext->rtit_ctl |= (1UL << RTIT_CTL_ADDR_CFG_S(0));
++		}
++		/* FALLTHROUGH */
++		case 1: {
++			int mode0 = cfg->ip_ranges[0].mode;
++			if (mode0 == 0)
++				mode0 = PT_RANGE_FILTER;
++			if (mode0 < 1 || mode0 > 2) {
++				printf("%s: ip_ranges[0].mode %d invalid "
++				    "(1=filter, 2=tracestop)\n",
++				    __func__, cfg->ip_ranges[0].mode);
++				return (EINVAL);
++			}
++			pt_ext->rtit_ctl |=
++			    ((uint64_t)mode0 << RTIT_CTL_ADDR_CFG_S(0));
+ 			pt_ext->rtit_addr0_a = cfg->ip_ranges[0].start;
+ 			pt_ext->rtit_addr0_b = cfg->ip_ranges[0].end;
+ 			break;
++		}
+ 		default:
+ 			error = (EINVAL);
+ 			break;

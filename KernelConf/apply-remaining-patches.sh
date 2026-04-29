@@ -141,37 +141,36 @@ fi
 echo ""
 echo "=== Patch 2: Widen PT_SUPPORTED_FLAGS ==="
 
-if grep -q 'RTIT_CTL_TSCEN' "$PT" && grep -A5 'PT_SUPPORTED_FLAGS' "$PT" | grep -q 'RTIT_CTL_TSCEN'; then
+if grep -A5 'PT_SUPPORTED_FLAGS' "$PT" | grep -q 'RTIT_CTL_TSCEN'; then
     echo "  Already applied (RTIT_CTL_TSCEN found in PT_SUPPORTED_FLAGS)"
 else
     python3 - "$PT" << 'PYEOF'
-import sys
+import sys, re
 
 path = sys.argv[1]
 with open(path, 'r') as f:
     src = f.read()
 
-old = '''\
-#define PT_SUPPORTED_FLAGS\t\t\t\t\t\t\\
-\t(RTIT_CTL_MTCEN | RTIT_CTL_CR3FILTER | RTIT_CTL_DIS_TNT |\t\\
-\t    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN)'''
-
-new = '''\
-#define PT_SUPPORTED_FLAGS\t\t\t\t\t\t\\
-\t(RTIT_CTL_MTCEN | RTIT_CTL_CR3FILTER | RTIT_CTL_DIS_TNT |\t\\
-\t    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN |\t\t\\
-\t    RTIT_CTL_TSCEN | RTIT_CTL_CYCEN |\t\t\t\t\\
-\t    RTIT_CTL_MTC_FREQ_M |\t\t\t\t\t\\
-\t    RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M)'''
-
-if old not in src:
-    print("  ERROR: could not find expected PT_SUPPORTED_FLAGS", file=sys.stderr)
+# Match any existing PT_SUPPORTED_FLAGS definition and ensure TSCEN is present.
+# The flags may already have timing bits (CYCEN, MTC_FREQ_M, etc.) from a
+# previous partial patch — just not TSCEN.  Replace the entire macro.
+pattern = r'#define PT_SUPPORTED_FLAGS[^\n]*\\\n(?:\t[^\n]*\\\n)*\t[^\n]*\)'
+match = re.search(pattern, src)
+if not match:
+    print("  ERROR: could not find PT_SUPPORTED_FLAGS macro", file=sys.stderr)
     sys.exit(1)
 
-src = src.replace(old, new, 1)
+new = '''#define PT_SUPPORTED_FLAGS\t\t\t\t\t\t\\
+\t(RTIT_CTL_MTCEN | RTIT_CTL_CR3FILTER | RTIT_CTL_DIS_TNT |\t\\
+\t    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN |\t\t\\
+\t    RTIT_CTL_TSCEN | RTIT_CTL_CYCEN | RTIT_CTL_MTC_FREQ_M |\t\\
+\t    RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M |\t\t\\
+\t    RTIT_CTL_PTWEN | RTIT_CTL_FUPONPTW)'''
+
+src = src[:match.start()] + new + src[match.end():]
 with open(path, 'w') as f:
     f.write(src)
-print("  Widened PT_SUPPORTED_FLAGS to include timing bits")
+print("  Set PT_SUPPORTED_FLAGS to complete flag set (including TSCEN)")
 PYEOF
 
     if [ $? -ne 0 ]; then
@@ -450,8 +449,19 @@ if old_intr not in src:
     sys.exit(1)
 src = src.replace(old_intr, new_intr, 1)
 
-# Add overflow record enqueue in pt_send_buffer_record
-old_send = '\tpt_fill_buffer_record(ctx->id, &ctx->buf, &record);\n\thwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);\n}'
+# Add overflow record enqueue in pt_send_buffer_record.
+# The file may have mixed tabs/spaces from earlier edits, so match
+# flexibly: find hwt_record_ctx...NOWAIT);\n} in pt_send_buffer_record.
+import re
+send_pat = re.compile(
+    r'([ \t]*pt_fill_buffer_record\(ctx->id.*?\n)'
+    r'([ \t]*hwt_record_ctx\(ctx->hwt_ctx, &record, M_ZERO \| M_NOWAIT\);\n)'
+    r'\}',
+    re.DOTALL)
+send_match = send_pat.search(src)
+if send_match is None:
+    print("  ERROR: could not find pt_send_buffer_record body", file=sys.stderr)
+    sys.exit(1)
 new_send = '''\tpt_fill_buffer_record(ctx->id, &ctx->buf, &record);
 \thwt_record_ctx(ctx->hwt_ctx, &record, M_ZERO | M_NOWAIT);
 
@@ -465,10 +475,7 @@ new_send = '''\tpt_fill_buffer_record(ctx->id, &ctx->buf, &record);
 \t\tcpu->overflow_pending = 0;
 \t}
 }'''
-if old_send not in src:
-    print("  ERROR: could not find pt_send_buffer_record body", file=sys.stderr)
-    sys.exit(1)
-src = src.replace(old_send, new_send, 1)
+src = src[:send_match.start()] + new_send + src[send_match.end():]
 
 with open(path, 'w') as f:
     f.write(src)

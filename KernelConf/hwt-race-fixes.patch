@@ -11,13 +11,9 @@ Fix race conditions, data loss, and crash bugs in hwt.ko and pt.ko.
    SWI from a PT buffer-overflow PMI can fire after teardown sets
    cpu->ctx = NULL, causing a NULL deref panic.
 
-4. pt.c pt_backend_enable: Restore the per-CPU context pointer from
-   the thread's private data before calling pt_cpu_start.  The
-   switch-out hook (pt_backend_disable) clears cpu->ctx, but the
-   switch-in hook never restored it.  Without this fix, PT tracing
-   silently stops after the first context switch — the traced program
-   continues running untraced and BUFPTR_GET returns only the offset
-   captured during the first timeslice.
+4. (Removed — the previous TAILQ_FIRST restore in pt_backend_enable
+   was incorrect for multi-threaded programs; pt_backend_configure
+   already sets pt_pcpu[cpu_id].ctx correctly per-thread.)
 
 5. pt.c pt_update_buffer: Read the buffer position from the XSAVE
    save area instead of the MSR.  XSAVES stores the correct output
@@ -92,27 +88,15 @@ diff --git a/sys/amd64/pt/pt.c b/sys/amd64/pt/pt.c
 +	pt_update_buffer(ctx);
  }
 
-@@ -513,10 +520,22 @@
+@@ -513,10 +520,10 @@
  static void
  pt_backend_enable(struct hwt_context *ctx, int cpu_id)
  {
-+	struct hwt_thread *thr;
-+
  	if (ctx->mode == HWT_MODE_CPU)
  		return;
 
  	KASSERT(curcpu == cpu_id,
  	    ("%s: attempting to start PT on another cpu", __func__));
-+
-+	/*
-+	 * Restore the per-CPU context pointer.  pt_backend_disable clears
-+	 * cpu->ctx on every switch-out; we must re-set it here so that
-+	 * pt_cpu_start can find the tracing context on the new CPU.
-+	 */
-+	thr = TAILQ_FIRST(&ctx->threads);
-+	if (thr != NULL && thr->private != NULL)
-+		pt_pcpu[cpu_id].ctx = (struct pt_ctx *)thr->private;
-+
  	pt_cpu_start(NULL);
  	CPU_SET(cpu_id, &ctx->cpu_map);
  }

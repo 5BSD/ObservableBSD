@@ -63,11 +63,16 @@ cmd_trace(int argc, char **argv)
 	struct range_spec range_specs[2];
 	int nrange_specs;
 	int tid;
+	bool trace_all_threads;
+	int requested_tids[MAX_THREADS];
+	int nrequested_tids;
 	int maxrecords;
 	int totalrecords;
 	int empty_drains;
 	int nrecs;
 	int ch, i;
+	int psb_freq;
+	bool timing;
 	bool dryrun;
 	bool pause_on_mmap;
 	bool target_gone;
@@ -80,13 +85,17 @@ cmd_trace(int argc, char **argv)
 	duration = 0;
 	maxrecords = 0;
 	tid = 0;
+	trace_all_threads = false;
+	nrequested_tids = 0;
 	memset(&filter, 0, sizeof(filter));
 	nrange_specs = 0;
+	psb_freq = 0;
+	timing = false;
 	dryrun = false;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:hnp")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:P:hnpC")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -97,6 +106,8 @@ cmd_trace(int argc, char **argv)
 				fmt = FMT_PROFILE;
 			else if (strcmp(optarg, "tree") == 0)
 				fmt = FMT_TREE;
+			else if (strcmp(optarg, "collapsed") == 0)
+				fmt = FMT_COLLAPSED;
 			else {
 				fprintf(stderr,
 				    "bsdtrace trace: unknown format '%s'\n",
@@ -132,7 +143,43 @@ cmd_trace(int argc, char **argv)
 			nrange_specs++;
 			break;
 		case 'T':
-			tid = atoi(optarg);
+			if (strcmp(optarg, "all") == 0) {
+				tid = 0;
+				trace_all_threads = true;
+			} else if (strchr(optarg, ',') != NULL) {
+				char *tstr, *tok, *saveptr;
+				tstr = strdup(optarg);
+				nrequested_tids = 0;
+				tok = strtok_r(tstr, ",", &saveptr);
+				while (tok != NULL &&
+				    nrequested_tids < MAX_THREADS) {
+					requested_tids[nrequested_tids++] =
+					    atoi(tok);
+					tok = strtok_r(NULL, ",", &saveptr);
+				}
+				free(tstr);
+				if (nrequested_tids < 1) {
+					fprintf(stderr,
+					    "bsdtrace trace: -T requires "
+					    "at least one thread id\n");
+					return (1);
+				}
+				tid = requested_tids[0];
+			} else {
+				tid = atoi(optarg);
+			}
+			break;
+		case 'P':
+			psb_freq = atoi(optarg);
+			if (psb_freq < 0 || psb_freq > 15) {
+				fprintf(stderr,
+				    "bsdtrace trace: psb-freq must be "
+				    "0-15\n");
+				return (1);
+			}
+			break;
+		case 'C':
+			timing = true;
 			break;
 		case 'n':
 			dryrun = true;
@@ -147,12 +194,14 @@ cmd_trace(int argc, char **argv)
 			    "Attach to a running process and trace it.\n"
 			    "\n"
 			    "Options:\n"
-			    "  -f format   Output format: text, json, profile, or tree\n"
+			    "  -f format   Output format: text, json, profile, tree, or collapsed\n"
 			    "  -d seconds  Trace duration (0 = until Ctrl-C, default)\n"
 			    "  -s size     Trace buffer size, e.g. 8m, 64m (default: 64m)\n"
 			    "  -o file     Output path for .pt data (default: bsdtrace-<pid>.pt)\n"
 			    "  -r range    IP filter: 0xstart:0xend or function_name (up to 2)\n"
-			    "  -T tid      Thread index to trace (default: 0, main thread)\n"
+			    "  -T tid       Thread index (default: 0), list (0,1,3), or 'all'\n"
+			    "  -P freq     PSB sync frequency 0-15 (lower = more sync, 0 = default)\n"
+			    "  -C          Enable timing packets (MTC + cycle-accurate)\n"
 			    "  -m count    Stop after N records\n"
 			    "  -b backend  HWT backend name (default: auto-detect)\n"
 			    "  -p          Pause target on mmap/exec events\n"
@@ -232,6 +281,24 @@ cmd_trace(int argc, char **argv)
 
 	/* Apply hardware IP range filter if specified. */
 	ctx.filter = filter;
+	ctx.psb_freq = psb_freq;
+	if (timing) {
+		hwt_pt_default_timing(&ctx.mtc_freq, &ctx.cyc_thresh);
+		if (ctx.mtc_freq == 0 && ctx.cyc_thresh == 0) {
+			fprintf(stderr,
+			    "bsdtrace trace: -C requested but CPU does "
+			    "not support timing packets\n");
+			hwt_ctx_close(&ctx);
+			free(detected_backend);
+			return (1);
+		}
+	}
+	ctx.all_threads = trace_all_threads;
+	if (nrequested_tids > 0) {
+		memcpy(ctx.requested_tids, requested_tids,
+		    nrequested_tids * sizeof(int));
+		ctx.nrequested = nrequested_tids;
+	}
 
 	/*
 	 * CRITICAL: Set the PT backend config BEFORE starting.
@@ -253,9 +320,12 @@ cmd_trace(int argc, char **argv)
 		return (0);
 	}
 
-	/* Install SIGINT handler for clean shutdown. */
+	/* Install signal handlers for clean shutdown.
+	 * SIGPIPE must be ignored so a closed stdout doesn't kill
+	 * us before we can stop tracing and resume a paused target. */
 	trace_interrupted = 0;
 	signal(SIGINT, sigint_handler);
+	signal(SIGPIPE, SIG_IGN);
 
 	if (hwt_ctx_start(&ctx) != 0) {
 		hwt_ctx_close(&ctx);
@@ -275,7 +345,11 @@ cmd_trace(int argc, char **argv)
 		warnx("could not create %s — continuing without metadata",
 		    meta_path);
 	meta_writer_header(meta, pid, tid);
+	meta_writer_timing(meta, (uint8_t)ctx.mtc_freq);
 	trace_state_init(&ts, meta);
+	if (trace_state_seed_process_mmaps(&ts, pid) != 0)
+		warnx("could not snapshot existing executable mappings "
+		    "for pid %d", (int)pid);
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	totalrecords = 0;
@@ -352,7 +426,7 @@ cmd_trace(int argc, char **argv)
 	totalrecords = trace_finalize(&ctx, &ts, meta, pt_output,
 	    pid, fmt, totalrecords);
 
-	if (fmt == FMT_TEXT) {
+	if (fmt == FMT_TEXT && totalrecords >= 0) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		double elapsed = (now.tv_sec - start.tv_sec) +
 		    (now.tv_nsec - start.tv_nsec) / 1e9;
@@ -360,9 +434,10 @@ cmd_trace(int argc, char **argv)
 		    totalrecords, elapsed);
 	}
 
-	/* Restore default SIGINT. */
+	/* Restore default signals. */
 	signal(SIGINT, SIG_DFL);
+	signal(SIGPIPE, SIG_DFL);
 
 	free(detected_backend);
-	return (0);
+	return (totalrecords < 0 ? 1 : 0);
 }

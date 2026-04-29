@@ -99,6 +99,9 @@ _Static_assert(sizeof(struct hwt_wakeup) == 16 &&
 #ifndef RTIT_CTL_BRANCHEN
 #define	RTIT_CTL_BRANCHEN	(1 << 13)
 #endif
+#ifndef RTIT_CTL_TSCEN
+#define	RTIT_CTL_TSCEN		(1 << 10)
+#endif
 #ifndef RTIT_CTL_ADDR_CFG_S
 #define	RTIT_CTL_ADDR_CFG_S(n)	(32 + (n) * 4)
 #endif
@@ -110,7 +113,8 @@ enum bsdtrace_fmt {
 	FMT_TEXT,
 	FMT_JSON,
 	FMT_PROFILE,
-	FMT_TREE
+	FMT_TREE,
+	FMT_COLLAPSED
 };
 
 /*
@@ -164,6 +168,19 @@ struct range_spec {
 	char			symbol[RANGE_SPEC_SYMLEN]; /* RANGE_SYMBOL */
 };
 
+/*
+ * Per-thread trace context — one for each additional thread opened
+ * in all-threads mode.  The primary thread uses ctx_fd/trace_buf
+ * in hwt_ctx directly.
+ */
+#define	MAX_THREADS	64
+
+struct hwt_thread_ctx {
+	int		fd;		/* /dev/hwt_<ident>_<thread_id>, or -1 */
+	int		thread_id;
+	void		*trace_buf;	/* mmap'd buffer, or NULL */
+};
+
 struct hwt_ctx {
 	int		ctl_fd;		/* /dev/hwt                       */
 	int		ctx_fd;		/* /dev/hwt_<ident>_<tid>         */
@@ -176,6 +193,14 @@ struct hwt_ctx {
 	size_t		bufsize;	/* trace buffer size in bytes     */
 	void		*trace_buf;	/* mmap'd trace buffer, or NULL   */
 	struct ip_filter filter;	/* hardware IP range filter       */
+	uint32_t	psb_freq;	/* PSB sync frequency (0=default) */
+	uint32_t	mtc_freq;	/* MTC timing frequency (0=off)   */
+	uint32_t	cyc_thresh;	/* CYC cycle-accurate thresh (0=off) */
+	bool		all_threads;	/* true if -T all                 */
+	int		requested_tids[MAX_THREADS]; /* -T 0,1,3 list      */
+	int		nrequested;	/* count of requested tids        */
+	struct hwt_thread_ctx threads[MAX_THREADS];
+	int		nthreads;	/* count of opened thread devices */
 };
 
 /* ------------------------------------------------------------------ */
@@ -185,6 +210,8 @@ struct hwt_ctx {
 int	 hwt_available(void);
 int	 hwt_hooks_enabled(void);
 char	*hwt_detect_backend(void);
+
+void	 hwt_pt_default_timing(uint32_t *mtc_out, uint32_t *cyc_out);
 
 int	 hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	    int tid, size_t bufsize, const char *backend);
@@ -200,6 +227,8 @@ int	 hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
 	    vm_offset_t *offset_out);
 ssize_t	 hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
 	    int last_page, vm_offset_t last_offset);
+int	 hwt_ctx_open_thread(struct hwt_ctx *ctx, int thread_id,
+	    bool pause_on_mmap);
 void	 hwt_ctx_close(struct hwt_ctx *ctx);
 
 /* ------------------------------------------------------------------ */
@@ -280,6 +309,11 @@ struct pt_image;	/* forward decl (libipt) */
 struct _Elf;		/* forward decl (libelf) */
 typedef struct _Elf Elf;
 
+struct pt_decode_opts {
+	int		tid;
+	uint8_t		mtc_freq;
+};
+
 bool	 is_user_addr(uint64_t addr);
 int	 elf_base_vaddr(Elf *elf, uint64_t *base_out);
 int	 elf_exec_map_vaddr(Elf *elf, uint64_t *exec_out);
@@ -320,6 +354,8 @@ int	 resolve_symbol_in_elf(const char *path, int64_t slide,
 int	 process_exe_fullpath(pid_t pid, char *buf, size_t bufsz);
 int	 process_load_addr(pid_t pid, const char *exe_path,
 	    uint64_t *load_out);
+int	 process_exec_mmaps(pid_t pid,
+	    struct pt_image_info **sections_out, int *nsections_out);
 int	 elf_is_pie(const char *path);
 int	 resolve_range_specs(struct range_spec *specs, int nspecs,
 	    struct ip_filter *filter, pid_t pid, const char *exe_path,
@@ -332,7 +368,7 @@ int	 resolve_range_specs(struct range_spec *specs, int nspecs,
 int	 decode_pt_buffer(const void *buf, size_t len, enum bsdtrace_fmt fmt);
 int	 decode_pt_insn(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
-	    enum bsdtrace_fmt fmt, int tid);
+	    enum bsdtrace_fmt fmt, const struct pt_decode_opts *opts);
 int	 decode_pt_probe(const void *buf, size_t len,
 	    const struct pt_image_info *sections, int nsections,
 	    struct decode_probe_result *result);
@@ -345,10 +381,14 @@ struct meta_writer;
 
 struct meta_writer *meta_writer_open(const char *path);
 void	 meta_writer_header(struct meta_writer *mw, pid_t pid, int tid);
+void	 meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq);
 void	 meta_writer_record(struct meta_writer *mw,
 	    const struct bsdtrace_record *rec);
+void	 meta_writer_sections(struct meta_writer *mw,
+	    const struct pt_image_info *sections, int nsections);
 void	 meta_writer_close(struct meta_writer *mw);
 int	 meta_read_tid(const char *path);
+int	 meta_read_mtc_freq(const char *path);
 int	 meta_read_sections(const char *path,
 	    struct pt_image_info **sections_out, int *nsections_out);
 
@@ -361,6 +401,7 @@ void	 trace_state_process(struct trace_state *ts,
 	    const struct bsdtrace_record *rec);
 int	 trace_state_drain_post_stop(struct hwt_ctx *ctx,
 	    struct trace_state *ts);
+int	 trace_state_seed_process_mmaps(struct trace_state *ts, pid_t pid);
 void	 trace_state_free(struct trace_state *ts);
 ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 	    const char *pt_output, enum bsdtrace_fmt fmt, int tid);

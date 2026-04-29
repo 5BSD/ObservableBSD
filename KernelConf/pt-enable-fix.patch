@@ -1,9 +1,31 @@
-Fix pt_backend_enable to restore per-CPU context pointer on switch-in.
+Remove broken TAILQ_FIRST restore from pt_backend_enable.
 
-pt_backend_disable clears cpu->ctx on every context switch-out, but
-pt_backend_enable never restored it.  After the first scheduler
-preemption, pt_cpu_start sees cpu->ctx == NULL and returns early,
-silently disabling PT for the rest of the traced program's execution.
+The previous patch used TAILQ_FIRST(&ctx->threads) to restore
+cpu->ctx on switch-in.  This always picked thread 0's pt_ctx,
+even when a different thread was switching in.  For multi-threaded
+programs this caused:
+
+  1. Worker thread's PT data written to thread 0's ToPA buffer,
+     contaminating thread 0's trace with the wrong thread's
+     instructions.
+
+  2. xrstors loading thread 0's save area on a CPU about to run
+     a different thread — mismatched XSAVE state causes a GPF
+     (general protection fault → kernel panic).
+
+The fix is to simply remove the TAILQ_FIRST restore.  It was never
+needed: hwt_switch_in() calls hwt_backend_configure() immediately
+before hwt_backend_enable(), and pt_backend_configure() already
+sets pt_pcpu[cpu_id].ctx to the correct thread's pt_ctx by looking
+up the thread_id in the TAILQ:
+
+    TAILQ_FOREACH(thr, &ctx->threads, next) {
+        if (thr->thread_id != thread_id) continue;
+        pt_ctx = (struct pt_ctx *)thr->private;
+        break;
+    }
+    ...
+    pt_pcpu[cpu_id].ctx = pt_ctx;
 
 Apply from /usr/src (on top of existing hwt-race-fixes patches):
   patch -p1 < /path/to/pt-enable-fix.patch
@@ -11,27 +33,27 @@ Apply from /usr/src (on top of existing hwt-race-fixes patches):
 ---
 --- a/sys/amd64/pt/pt.c
 +++ b/sys/amd64/pt/pt.c
-@@ -514,10 +514,22 @@
+@@ -514,22 +514,10 @@
  static void
  pt_backend_enable(struct hwt_context *ctx, int cpu_id)
  {
-+	struct hwt_thread *thr;
-+
+-	struct hwt_thread *thr;
+-
  	if (ctx->mode == HWT_MODE_CPU)
  		return;
 
  	KASSERT(curcpu == cpu_id,
  	    ("%s: attempting to start PT on another cpu", __func__));
-+
-+	/*
-+	 * Restore the per-CPU context pointer.  pt_backend_disable clears
-+	 * cpu->ctx on every switch-out; we must re-set it here so that
-+	 * pt_cpu_start can find the tracing context on the new CPU.
-+	 */
-+	thr = TAILQ_FIRST(&ctx->threads);
-+	if (thr != NULL && thr->private != NULL)
-+		pt_pcpu[cpu_id].ctx = (struct pt_ctx *)thr->private;
-+
+-
+-	/*
+-	 * Restore the per-CPU context pointer.  pt_backend_disable clears
+-	 * cpu->ctx on every switch-out; we must re-set it here so that
+-	 * pt_cpu_start can find the tracing context on the new CPU.
+-	 */
+-	thr = TAILQ_FIRST(&ctx->threads);
+-	if (thr != NULL && thr->private != NULL)
+-		pt_pcpu[cpu_id].ctx = (struct pt_ctx *)thr->private;
+-
  	pt_cpu_start(NULL);
  	CPU_SET(cpu_id, &ctx->cpu_map);
  }

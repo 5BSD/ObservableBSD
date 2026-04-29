@@ -11,6 +11,7 @@
 #include <sys/param.h>
 
 #include <err.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,45 @@
 /* ------------------------------------------------------------------ */
 /* Trace state accumulator                                             */
 /* ------------------------------------------------------------------ */
+
+static int
+trace_state_add_section(struct trace_state *ts, const char *path,
+    uint64_t load_addr, uint64_t base_addr, int type)
+{
+	struct pt_image_info *newsecs;
+
+	if (path == NULL || path[0] == '\0')
+		return (-1);
+
+	if (ts->nsections >= ts->sections_cap) {
+		int newcap = ts->sections_cap == 0 ? 32 : ts->sections_cap * 2;
+
+		newsecs = realloc(ts->sections,
+		    (size_t)newcap * sizeof(*ts->sections));
+		if (newsecs == NULL)
+			return (-1);
+		ts->sections = newsecs;
+		ts->sections_cap = newcap;
+	}
+
+	strlcpy(ts->sections[ts->nsections].path, path,
+	    sizeof(ts->sections[ts->nsections].path));
+	ts->sections[ts->nsections].load_addr = load_addr;
+	ts->sections[ts->nsections].base_addr = base_addr;
+	ts->sections[ts->nsections].type = type;
+	ts->nsections++;
+	return (0);
+}
+
+static void
+trace_state_reset_sections(struct trace_state *ts)
+{
+
+	free(ts->sections);
+	ts->sections = NULL;
+	ts->nsections = 0;
+	ts->sections_cap = 0;
+}
 
 void
 trace_state_init(struct trace_state *ts, struct meta_writer *meta)
@@ -57,36 +97,47 @@ trace_state_process(struct trace_state *ts,
 	if ((rec->type == HWT_RECORD_EXECUTABLE ||
 	    rec->type == HWT_RECORD_MMAP) &&
 	    rec->fullpath[0] != '\0') {
-		struct pt_image_info *newsecs;
-
-		if (ts->nsections >= ts->sections_cap) {
-			int newcap = ts->sections_cap == 0 ?
-			    32 : ts->sections_cap * 2;
-			newsecs = realloc(ts->sections,
-			    newcap * sizeof(*ts->sections));
-			if (newsecs == NULL)
-				return;
-			ts->sections = newsecs;
-			ts->sections_cap = newcap;
-		}
-		strlcpy(ts->sections[ts->nsections].path,
-		    rec->fullpath,
-		    sizeof(ts->sections[ts->nsections].path));
-		ts->sections[ts->nsections].load_addr = rec->addr;
-		ts->sections[ts->nsections].base_addr = rec->baseaddr;
-		ts->sections[ts->nsections].type = rec->type;
-		ts->nsections++;
+		/*
+		 * EXECUTABLE denotes a fresh exec image load.  Any mappings
+		 * seeded from a pre-exec address space are now stale.
+		 */
+		if (rec->type == HWT_RECORD_EXECUTABLE)
+			trace_state_reset_sections(ts);
+		(void)trace_state_add_section(ts, rec->fullpath, rec->addr,
+		    rec->baseaddr, rec->type);
 	}
+}
+
+int
+trace_state_seed_process_mmaps(struct trace_state *ts, pid_t pid)
+{
+	struct pt_image_info *sections;
+	int nsections, i;
+
+	if (process_exec_mmaps(pid, &sections, &nsections) != 0)
+		return (-1);
+
+	if (sections == NULL || nsections == 0) {
+		free(sections);
+		return (0);
+	}
+
+	meta_writer_sections(ts->meta, sections, nsections);
+	for (i = 0; i < nsections; i++) {
+		(void)trace_state_add_section(ts, sections[i].path,
+		    sections[i].load_addr, sections[i].base_addr,
+		    sections[i].type);
+	}
+
+	free(sections);
+	return (0);
 }
 
 void
 trace_state_free(struct trace_state *ts)
 {
 
-	free(ts->sections);
-	ts->sections = NULL;
-	ts->nsections = 0;
-	ts->sections_cap = 0;
+	trace_state_reset_sections(ts);
 }
 
 int
@@ -129,14 +180,93 @@ trace_state_drain_post_stop(struct hwt_ctx *ctx, struct trace_state *ts)
 /* Snapshot and decode — shared between cmd_exec and cmd_trace         */
 /* ------------------------------------------------------------------ */
 
+static size_t
+pt_scan_last_nonzero(const uint8_t *buf, size_t len)
+{
+
+	while (len > 0 && buf[len - 1] == 0)
+		len--;
+	return (len);
+}
+
+static bool
+probe_result_better(const struct decode_probe_result *a,
+    const struct decode_probe_result *b)
+{
+
+	if (a->exec_hits != b->exec_hits)
+		return (a->exec_hits > b->exec_hits);
+	return (a->total > b->total);
+}
+
+/*
+ * Pick the most plausible PT extent from the kernel-reported buffer
+ * position and a conservative scan for the last non-zero byte.
+ *
+ * The stop pointer can under-report (lost ToPA page index) or
+ * over-report (include long zero-padded tails).  Probe both candidates
+ * when we have image sections and prefer the one that yields more
+ * decoded instructions in the main executable.
+ */
+static size_t
+choose_snapshot_len(const uint8_t *buf, size_t bufsz, size_t base_len,
+    const struct pt_image_info *sections, int nsections)
+{
+	struct decode_probe_result base_probe, scan_probe;
+	size_t scan_end, chosen;
+	int base_rc, scan_rc;
+	bool base_ok, scan_ok;
+
+	if (buf == NULL || bufsz == 0)
+		return (0);
+
+	if (base_len > bufsz)
+		base_len = bufsz;
+
+	scan_end = pt_scan_last_nonzero(buf, bufsz);
+	if (base_len == 0)
+		return (scan_end);
+	if (scan_end == 0 || scan_end == base_len)
+		return (base_len);
+
+	chosen = base_len;
+	base_ok = false;
+	scan_ok = false;
+
+	if (nsections > 0) {
+		memset(&base_probe, 0, sizeof(base_probe));
+		memset(&scan_probe, 0, sizeof(scan_probe));
+
+		base_rc = decode_pt_probe(buf, base_len,
+		    sections, nsections, &base_probe);
+		scan_rc = decode_pt_probe(buf, scan_end,
+		    sections, nsections, &scan_probe);
+		base_ok = base_rc == 0;
+		scan_ok = scan_rc == 0;
+
+		if (scan_ok &&
+		    (!base_ok || probe_result_better(&scan_probe,
+		    &base_probe)))
+			chosen = scan_end;
+		else if (!base_ok && !scan_ok && scan_end < base_len)
+			chosen = scan_end;
+	} else if (scan_end < base_len) {
+		chosen = scan_end;
+	}
+
+	if (chosen == base_len && base_len < PAGE_SIZE && scan_end > base_len)
+		chosen = scan_end;
+
+	return (chosen);
+}
+
 ssize_t
 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
-    const char *pt_output, enum bsdtrace_fmt fmt)
+    const char *pt_output, enum bsdtrace_fmt fmt, int tid)
 {
 	const uint8_t *buf;
-	struct decode_probe_result base_probe, scan_probe;
-	bool use_scan;
-	size_t actual_len, known_end, record_len, scan_end, scan_limit, stop_len;
+	struct pt_decode_opts dopts;
+	size_t actual_len, known_end, record_len, stop_len;
 	int actual_page;
 	vm_offset_t actual_offset;
 	ssize_t saved;
@@ -171,46 +301,23 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 	 * last async BUFFER record.  Only fall back to the old bounded scan
 	 * when the stop ioctl appears to have lost the ToPA page index.
 	 */
-	use_scan = stop_len == 0 ||
-	    (record_len > 0 && stop_len < record_len);
-	known_end = use_scan ? record_len : stop_len;
-
-	if (known_end == 0) {
-		warnx("PT buffer is empty");
-		return (0);
-	}
+	known_end = stop_len == 0 ||
+	    (record_len > 0 && stop_len < record_len) ?
+	    record_len : stop_len;
 
 	buf = hwt_ctx_map_buffer(ctx);
 	if (buf == NULL)
 		return (-1);
 
-	actual_len = known_end;
+	memset(&dopts, 0, sizeof(dopts));
+	dopts.tid = tid;
+	dopts.mtc_freq = (uint8_t)ctx->mtc_freq;
 
-	/*
-	 * When BUFPTR_GET loses the ToPA page index (returns only the
-	 * within-page offset) and no BUFFER records arrived, the
-	 * known_end is far too small.  Scan backward from the end of
-	 * the entire buffer to find the last non-zero byte — the
-	 * buffer is zeroed at allocation, so non-zero means PT data.
-	 */
-	if (record_len == 0 && stop_len > 0 && stop_len < PAGE_SIZE) {
-		scan_end = ctx->bufsize;
-		while (scan_end > 0 && buf[scan_end - 1] == 0)
-			scan_end--;
-
-		if (scan_end > known_end)
-			actual_len = scan_end;
-	} else if (use_scan) {
-		/*
-		 * BUFFER records gave us a lower bound but stop pointer
-		 * is missing or behind.  Scan ahead from the last BUFFER
-		 * record position.
-		 */
-		scan_end = ctx->bufsize;
-		while (scan_end > known_end && buf[scan_end - 1] == 0)
-			scan_end--;
-		if (scan_end > known_end)
-			actual_len = scan_end;
+	actual_len = choose_snapshot_len(buf, ctx->bufsize, known_end,
+	    ts->sections, ts->nsections);
+	if (actual_len == 0) {
+		warnx("PT buffer is empty");
+		return (0);
 	}
 
 	saved = hwt_ctx_snapshot_buffer(ctx, pt_output,
@@ -221,8 +328,146 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 		    "Saved %zd bytes of PT data to %s\n",
 		    saved, pt_output);
 		decode_pt_insn(buf, (size_t)saved,
-		    ts->sections, ts->nsections, fmt);
+		    ts->sections, ts->nsections, fmt, &dopts);
 	}
+
+	/*
+	 * Snapshot and decode additional threads.
+	 *
+	 * Each thread has its own PT buffer accessed via its own device
+	 * fd.  The image sections (binary mappings) are shared — all
+	 * threads in the process see the same address space.
+	 */
+	if ((ctx->all_threads || ctx->nrequested > 0) &&
+	    ctx->nthreads > 0) {
+		ssize_t thread_saved;
+		char tpath[MAXPATHLEN];
+		size_t baselen;
+		int i;
+
+		baselen = strlen(pt_output);
+		if (baselen > 3 &&
+		    strcmp(pt_output + baselen - 3, ".pt") == 0)
+			baselen -= 3;
+
+		for (i = 0; i < ctx->nthreads; i++) {
+			struct hwt_thread_ctx *tc = &ctx->threads[i];
+			struct hwt_bufptr_get bg;
+			const uint8_t *tbuf;
+			size_t tlen;
+			int tpage;
+			int ident_val = 0;
+			vm_offset_t toffset, off_val = 0;
+			ssize_t tnw;
+			size_t toff;
+			int tfd;
+
+			/*
+			 * Read buffer position and mmap the buffer.
+			 * Use the same fallback as the primary thread:
+			 * if BUFPTR_GET loses the page index, scan
+			 * backward from the end of the buffer.
+			 */
+			memset(&bg, 0, sizeof(bg));
+			bg.ident = &ident_val;
+			bg.offset = &off_val;
+			bg.data = NULL;
+
+			tlen = 0;
+			if (ioctl(tc->fd, HWT_IOC_BUFPTR_GET,
+			    &bg) == 0) {
+				tlen = (size_t)ident_val * PAGE_SIZE +
+				    off_val;
+			}
+			if (tlen > ctx->bufsize)
+				tlen = 0;
+
+			/* mmap the thread's buffer. */
+			if (tc->trace_buf == NULL) {
+				tc->trace_buf = mmap(NULL, ctx->bufsize,
+				    PROT_READ, MAP_SHARED, tc->fd, 0);
+				if (tc->trace_buf == MAP_FAILED) {
+					warn("mmap thread %d buffer",
+					    tc->thread_id);
+					tc->trace_buf = NULL;
+					continue;
+				}
+			}
+			tbuf = tc->trace_buf;
+
+			tlen = choose_snapshot_len(tbuf, ctx->bufsize, tlen,
+			    ts->sections, ts->nsections);
+
+			if (tlen == 0) {
+				fprintf(stderr,
+				    "thread %d: PT buffer empty, "
+				    "skipping\n", tc->thread_id);
+				continue;
+			}
+
+			/* Build per-thread output path. */
+			snprintf(tpath, sizeof(tpath), "%.*s-tid%d.pt",
+			    (int)baselen, pt_output, tc->thread_id);
+
+			tfd = open(tpath, O_WRONLY | O_CREAT | O_TRUNC,
+			    0644);
+			if (tfd < 0) {
+				warn("open %s", tpath);
+				continue;
+			}
+
+			toff = 0;
+			while (toff < tlen) {
+				tnw = write(tfd, tbuf + toff, tlen - toff);
+				if (tnw < 0) {
+					warn("write %s", tpath);
+					break;
+				}
+				toff += tnw;
+			}
+			close(tfd);
+
+			if (toff == tlen) {
+				char tmeta[MAXPATHLEN];
+				struct meta_writer *tmw;
+
+				fprintf(stderr,
+				    "Saved %zu bytes of PT data for "
+				    "thread %d to %s\n",
+				    tlen, tc->thread_id, tpath);
+
+				/*
+				 * Write a per-thread .meta sidecar so the
+				 * .pt file is replayable offline with the
+				 * correct tid.
+				 */
+				derive_meta_path(tpath, tmeta,
+				    sizeof(tmeta));
+				tmw = meta_writer_open(tmeta);
+				if (tmw != NULL) {
+					meta_writer_header(tmw,
+					    ctx->pid, tc->thread_id);
+					meta_writer_timing(tmw,
+					    (uint8_t)ctx->mtc_freq);
+					meta_writer_sections(tmw,
+					    ts->sections, ts->nsections);
+					meta_writer_close(tmw);
+				}
+
+				dopts.tid = tc->thread_id;
+				if (fmt == FMT_TEXT)
+					printf("Thread %d:\n",
+					    tc->thread_id);
+				decode_pt_insn(tbuf, tlen,
+				    ts->sections, ts->nsections,
+				    fmt, &dopts);
+				thread_saved = (ssize_t)tlen;
+				if (saved >= 0)
+					saved += thread_saved;
+			}
+		}
+	}
+
 	return (saved);
 }
 
@@ -245,6 +490,27 @@ emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
 	    (rec->type == HWT_RECORD_MMAP ||
 	     rec->type == HWT_RECORD_EXECUTABLE))
 		hwt_ctx_wakeup(ctx);
+
+	/*
+	 * Open new thread devices as the kernel reports them.
+	 * In all-threads mode, open every thread.  In multi-thread
+	 * mode (-T 0,1,3), only open threads in the requested list.
+	 */
+	if (rec->type == HWT_RECORD_THREAD_CREATE &&
+	    rec->thread_id != ctx->tid) {
+		bool want = ctx->all_threads;
+		if (!want) {
+			for (int t = 0; t < ctx->nrequested; t++) {
+				if (ctx->requested_tids[t] == rec->thread_id) {
+					want = true;
+					break;
+				}
+			}
+		}
+		if (want)
+			hwt_ctx_open_thread(ctx, rec->thread_id,
+			    pause_on_mmap);
+	}
 
 	trace_state_process(ts, rec);
 }
@@ -332,32 +598,54 @@ trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
     enum bsdtrace_fmt fmt, int totalrecords)
 {
 	struct bsdtrace_record records[POLL_RECORDS];
+	ssize_t saved;
 	int nrecs, i;
 
-	/* One final drain before stopping. */
+	/*
+	 * Final drain before stopping.  Always wake the target on
+	 * MMAP/EXEC records here — if pause-on-mmap was active and a
+	 * late record arrives only in this drain, the target would stay
+	 * suspended forever without the wakeup.
+	 */
 	nrecs = 0;
 	if (hwt_ctx_poll_records(ctx, records, POLL_RECORDS,
 	    false, &nrecs) == 0) {
 		for (i = 0; i < nrecs; i++) {
 			totalrecords++;
 			emit_and_process(&records[i], pid, fmt,
-			    false, ctx, ts);
+			    true, ctx, ts);
 		}
 	}
 
 	hwt_ctx_stop(ctx);
 	totalrecords += trace_state_drain_post_stop(ctx, ts);
 
-	snapshot_and_decode(ctx, ts, pt_output, fmt);
+	saved = snapshot_and_decode(ctx, ts, pt_output, fmt, ctx->tid);
 
 	if (ts->buf_wrapped)
 		fprintf(stderr,
 		    "warning: PT buffer wrapped (data lost) — "
 		    "increase with -s\n");
 
+	/*
+	 * Intel PT needs a PSB (Packet Stream Boundary) to sync the
+	 * decoder.  PSBs are emitted roughly every 2-4 KB of output.
+	 * If an IP range filter is active and the traced code didn't
+	 * execute enough times, the .pt file may be too small for
+	 * the decoder to find a sync point — producing 0 instructions.
+	 */
+	if (ctx->filter.nranges > 0 && saved >= 0 && saved < 2048)
+		fprintf(stderr,
+		    "warning: only %zd bytes of PT data with range filter "
+		    "active — the decoder likely cannot sync (needs ~2 KB).\n"
+		    "  Make the traced code run more iterations, or widen "
+		    "the filter range.\n", saved);
+
 	hwt_ctx_close(ctx);
 	meta_writer_close(meta);
 	trace_state_free(ts);
 
+	if (saved < 0)
+		return (-1);
 	return (totalrecords);
 }

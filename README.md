@@ -241,6 +241,18 @@ doas bsdtrace exec -t 5 -- /bin/sleep 1
 # Attach to a running process for 10 seconds
 doas bsdtrace trace -d 10 $(pidof nginx)
 
+# Trace all threads simultaneously
+doas bsdtrace trace -T all -d 5 $(pidof myserver)
+
+# Trace with timing data (MTC + cycle-accurate packets)
+doas bsdtrace exec -C -P 3 -t 5 -- ./mybench
+
+# Call tree view
+doas bsdtrace exec -f tree -t 5 -- ./myapp
+
+# Per-function profile
+doas bsdtrace exec -f profile -t 5 -- ./myapp
+
 # Check HWT/PT availability
 bsdtrace list
 ```
@@ -251,25 +263,31 @@ bsdtrace list
   CALL      ld-elf.so.1:dlopen+0x1a
   RETURN    ld-elf.so.1:dlclose+0x42
   CALL      libc.so.7:exit
-  SYSCALL   libsys.so.7+0x1234
+  SYSCALL   write (libsys.so.7:__sys_write)
   CJMP      libc.so.7:nanosleep+0x8
-375467 instructions, 14240 calls, 3520 returns, 4 syscalls
+375467 instructions, 14240 calls, 3520 returns, 8192 branches, 4 syscalls
 ```
 
 Each trace produces two files:
 - `bsdtrace-<pid>.pt` — raw Intel PT data (replayable)
 - `bsdtrace-<pid>.meta` — binary mapping metadata (JSONL)
 
+With `-T all`, additional per-thread files are saved:
+- `bsdtrace-<pid>-tid<N>.pt` — per-thread PT data
+- `bsdtrace-<pid>-tid<N>.meta` — per-thread mapping metadata for offline replay
+
 ### Options
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `-f format` | all | Output format: text (default), json, or profile |
+| `-f format` | all | Output format: text (default), json, profile, tree, or collapsed |
 | `-d seconds` | exec, trace | Trace duration (`-t` also accepted; exec default: 30) |
 | `-s size` | exec, trace | PT buffer size, e.g. 8m, 64m (default: 64m) |
 | `-o file` | exec, trace | Output path for .pt file |
 | `-r range` | exec, trace | IP filter: `0xstart:0xend` or `function_name` (up to 2) |
-| `-T tid` | exec, trace | Thread index to trace (default: 0) |
+| `-T tid` | exec, trace | Thread index (default: 0), comma list (`0,1,3`), or `all` |
+| `-P freq` | exec, trace | PSB sync frequency 0-15 (lower = more sync points, 0 = default) |
+| `-C` | exec, trace | Enable timing packets (MTC + cycle-accurate) |
 | `-m count` | exec, trace | Stop after N HWT records |
 | `-b backend` | exec, trace | HWT backend (default: auto-detect) |
 | `-A` | exec | Disable ASLR for the child process |
@@ -278,41 +296,15 @@ Each trace produces two files:
 | `-p pid` | list | Show threads for a process |
 | `-h` | all | Per-command help |
 
-### Roadmap
+### Output formats
 
-**Analysis:**
-- **Call tree output** — aggregated, indented call tree with function
-  counts and nesting depth.  "main -> init -> parse_config -> crash"
-  instead of thousands of flat CALL/RETURN lines.
-- **Folded stacks** — `-f collapsed` for piping to
-  [flamegraph.pl](https://github.com/brendangregg/FlameGraph) or
-  Speedscope.
-- **Timing from TSC** — PT timestamps (TSC/MTC/CYC packets) give
-  wall-clock and cycle-accurate timing per function call.
-  Requires kernel timing packet config (see below).
-- **Syscall name resolution** — map syscall IPs to names
-  (`nanosleep`, `read`, `mmap`) instead of `libsys.so.7+0x1234`.
-
-**Collection:**
-- **Simultaneous multi-thread tracing** — trace all threads at once
-  with multiple HWT contexts and merged or per-thread output.
-
-**Kernel patches (pt.ko):**
-- **PSB frequency control** — wire `psb_freq` into `RTIT_CTL` bits
-  24-27 in `pt_backend_configure`.  Needed for reliable decode of
-  short IP-filtered traces.
-- **Timing packet config** — wire `mtc_freq` and `cyc_thresh` into
-  `RTIT_CTL` to enable MTC and CYC timing packets.  Required for
-  wall-clock and cycle-accurate function timing.
-
-**Done:**
-- Per-function profiling (`-f profile`)
-- Symbol-based range filter (`-r function_name`)
-- Dual hardware IP range filtering
-- Multi-thread testing and thread identity in output
-- Thread listing (`bsdtrace list -p pid`)
-- Per-subcommand help (`-h`)
-- Unified `-d`/`-t` duration flags
+| Format | Flag | Description |
+|--------|------|-------------|
+| Text | `-f text` (default) | Symbolized control-flow events (CALL, RETURN, CJMP, SYSCALL) |
+| JSON | `-f json` | One JSON object per event, with `sym`, `ip`, `off`, `bin`, `tid`, `tsc` fields |
+| Profile | `-f profile` | Per-function call/return/branch counts with TSC timing when `-C` is used |
+| Tree | `-f tree` | Indented call tree with counts and TSC timing |
+| Collapsed | `-f collapsed` | Folded stacks for [flamegraph.pl](https://github.com/brendangregg/FlameGraph) / Speedscope |
 
 **ARM (CoreSight ETM) — not currently planned:**
 
@@ -355,10 +347,9 @@ bsdtrace decode -f json trace.pt | \
   llvm-symbolizer --obj=./myapp
 ```
 
-**Flame graphs** — once `--format collapsed` lands, pipe directly
-to flamegraph.pl or open in Speedscope:
+**Flame graphs** — pipe folded stacks to flamegraph.pl or Speedscope:
 ```sh
-bsdtrace decode --format collapsed trace.pt | flamegraph.pl > trace.svg
+bsdtrace decode -f collapsed trace.pt | flamegraph.pl > trace.svg
 ```
 
 **Filtering** — use `jq` on JSON output instead of built-in filters:
@@ -393,252 +384,126 @@ doas sh reload-hwt.sh
 
 #### Kernel patches (required)
 
-The stock hwt.ko and pt.ko modules have race conditions, a data-loss
-bug, and a critical buffer-position bug.  Seven patches are required
-(bundled in `KernelConf/hwt-race-fixes.patch`):
+The stock hwt.ko and pt.ko modules have race conditions, data-loss
+bugs, and missing features.  All patches are applied by a single
+idempotent script:
 
-**1. hwt_owner.c (hwt_owner_shutdown)** — Set `ctx->state = 0`
-*before* calling `hwt_contexthash_remove()`, not after.  The original
-ordering allows `hwt_switch_in` to see `state == CTX_STATE_RUNNING`
-on a context that is being torn down, leading to a use-after-free of
-the PT save area (GPF in `xrstors` during context switch).
+```sh
+# Apply remaining patches (TAILQ_FIRST fix + timing) and rebuild
+doas sh KernelConf/apply-remaining-patches.sh
+```
 
-**2. pt.c (pt_cpu_start)** — Replace `MPASS(cpu->ctx != NULL)` with
-a runtime NULL check that returns early.  Belt-and-suspenders guard
-against any path that leaves a stale per-CPU context pointer.
-
-**3. pt.c (pt_send_buffer_record)** — Add a `cpu->ctx == NULL` guard
-before dereferencing.  A queued SWI from a PT buffer-overflow PMI can
-fire after teardown sets `cpu->ctx = NULL`, causing a NULL deref
-panic.
-
-**4. pt.c (pt_backend_enable)** — Restore the per-CPU context pointer
-from the thread's private data before calling `pt_cpu_start()`.  The
-switch-out hook clears `cpu->ctx` on every context switch, but the
-switch-in hook never restored it.  Without this fix, PT tracing
-silently stops after the first scheduler preemption.
-
-**5. pt.c (pt_update_buffer)** — Read the buffer position from the
-XSAVE save area instead of the MSR.  XSAVES stores the correct value
-in the save area then sets `IA32_RTIT_OUTPUT_MASK_PTRS.MaskOrTable-
-Offset` to `0x7f` (Intel SDM 36.3.5.2).  The old code read the MSR
-after XSAVES, so the page index was always 0 — only the within-page
-offset survived.  Every trace captured at most one page of PT data
-regardless of buffer size.
-
-**6. pt.c (pt_topa_intr, ctx NULL)** — Replace `KASSERT(ctx != NULL)`
-with a runtime NULL check.  A PMI can race with context teardown; the
-KASSERT panics in debug builds and blindly dereferences NULL in
-release builds.
-
-**7. pt.c (pt_topa_intr, topa_hw NULL)** — Replace
-`KASSERT(buf->topa_hw != NULL)` with a runtime NULL check.  Same
-teardown race — `pt_deinit_ctx` frees `topa_hw` and zeroes the struct
-while a PMI is in flight.
-
-Apply from `/usr/src`:
+Or apply from a clean `/usr/src` tree:
 
 ```sh
 doas patch -p1 < KernelConf/hwt-race-fixes.patch
-```
-
-Rebuild and install:
-
-```sh
+doas sh KernelConf/apply-pmi-fix.sh
+doas sh KernelConf/pt-stop-impl.sh
+doas sh KernelConf/apply-remaining-patches.sh
 doas sh reload-hwt.sh
 ```
 
-#### Future kernel patches (hwt.ko + pt.ko enhancements)
+**Applied patches:**
 
-**4. Buffer page zeroing** (fixes stale data between traces)
+1. **hwt_owner.c** — TOCTOU fix: set `ctx->state = 0` before
+   `hwt_contexthash_remove()` to prevent use-after-free on teardown.
 
-`/usr/src/sys/dev/hwt/hwt_vm.c`, line ~155 in `hwt_vm_alloc_pages()`.
-The page zeroing code is disabled behind `#if 0`:
+2. **pt_cpu_start** — NULL check replacing MPASS assertion.
 
-```c
-#if 0
-    /* TODO: could not clean device memory on arm64. */
-    if ((m->flags & PG_ZERO) == 0)
-        pmap_zero_page(m);
-#endif
-```
+3. **pt_send_buffer_record** — NULL guard for PMI/SWI teardown race.
 
-Although `VM_ALLOC_ZERO` is in `pflags`, `vm_page_alloc_noobj_contig`
-doesn't guarantee zeroed pages — it sets `PG_ZERO` only if the page
-happened to be pre-zeroed by the VM idle thread.  On second and
-subsequent traces, buffer pages are recycled from previous allocations
-with stale PT data still present.  This causes userspace to
-misinterpret old data as valid trace output.
+4. **pt_backend_enable** — Removed the TAILQ_FIRST restore that
+   always picked thread 0's pt_ctx, clobbering the correct per-thread
+   value set by pt_backend_configure.  This was the root cause of
+   GPF panics and cross-thread PT data contamination in multi-threaded
+   traces.
 
-Fix for x86 (arm64 needs a separate solution per the TODO):
+5. **pt_update_buffer** — Read buffer position from XSAVE save area
+   instead of MSR (Intel SDM 36.3.5.2: XSAVES sets MaskOrTableOffset
+   to max value).
 
-```c
-#ifdef __amd64__
-    if ((m->flags & PG_ZERO) == 0)
-        pmap_zero_page(m);
-#endif
-```
+6. **pt_topa_intr** — Runtime NULL checks replacing KASSERTs for
+   ctx and topa_hw teardown races.
 
-This ensures every buffer page starts clean.  The cost is one
-memset per page at allocation time (~16K pages for a 64 MB buffer,
-~1 ms total).
+7. **pt_backend_stop_op** — Stop implementation enabling HWT_IOC_STOP.
 
-The code snippets below are based on the kernel source and verified
-against the defines in `/usr/src/sys/x86/include/specialreg.h`.
-The PSB/MTC/CYC encoding values (e.g. "every 2^(N+1) KiB") should
-be verified against the Intel SDM (Volume 3, Chapter 32) for
-your specific CPU model.  All changes are in
-`/usr/src/sys/amd64/pt/pt.c` inside `pt_backend_configure()`
-unless noted otherwise.  The `pt_cpu_config` struct already has the
-fields — the kernel just doesn't read them yet.
+8. **pt_backend_configure** — PSB/MTC/CYC timing support: validates
+   frequency values against CPUID leaf 0x14 capability bitmaps and
+   encodes into RTIT_CTL bit fields.  Enables `-P` and `-C` flags.
 
-**1. PSB frequency control** (fixes `-r` on short traces)
+9. **PT_SUPPORTED_FLAGS** — Widened to include RTIT_CTL_CYCEN,
+   MTC_FREQ_M, CYC_THRESH_M, PSB_FREQ_M so timing bits survive the
+   initial mask in pt_backend_configure.
 
-The hardware emits PSB (Packet Stream Boundary) sync markers at
-intervals controlled by `RTIT_CTL` bits 27:24.  libipt cannot
-decode without at least one PSB.  The default interval is
-implementation-specific and too infrequent for IP-filtered traces
-of short-lived programs (e.g. 166 bytes with no PSB).
+### PT kernel roadmap
 
-In `pt_backend_configure()`, after the existing `pt_configure_ranges()`
-call, add:
+`bsdtrace` already has the basic PT backend shape in place: thread-mode
+tracing via HWT, ToPA buffers, 2-range IP filtering, PSB/MTC/CYC
+configuration, per-thread save files, and offline replay.  The
+remaining PT work is mostly kernel-side feature enablement and cleanup.
 
-The valid PSB frequency values are CPU-specific.
-`CPUID.(EAX=14H, ECX=1):EAX[2:0]` reports the number of
-configurable values.  The kernel already queries this leaf at
-init and stores it in `pt_info.l1_eax`.  Follow the same pattern
-as `pt_configure_ranges()` — check the capability before using it:
+**Immediate priority: unlock decoded TSC timestamps**
 
-```c
-/* PSB frequency: RTIT_CTL bits [27:24] (RTIT_CTL_PSB_FREQ_S = 24).
- * Value N means emit PSB every 2^(N+1) KiB of output (per Intel SDM).
- * Valid range of N depends on CPUID leaf 14H, subleaf 1, EAX[2:0].
- * Uses existing macros from <x86/specialreg.h>. */
-if (cfg->psb_freq != 0) {
-    int psb_max = pt_info.l1_eax & 0x7;  /* supported PSB values */
-    int psb_val = cfg->psb_freq;
-    if (psb_val > psb_max) {
-        printf("%s: psb_freq %d exceeds CPU max %d, clamping\n",
-            __func__, psb_val, psb_max);
-        psb_val = psb_max;
-    }
-    pt_ext->rtit_ctl |= ((uint64_t)(psb_val & 0xf) << RTIT_CTL_PSB_FREQ_S);
-}
-```
+`-C` already requests timing and the packet stream now contains `MTC`
+and `CYC`, but decoded `tsc` output still depends on actual `TSC`
+packets being emitted.  libipt will not return time until a `TSC`
+packet has been seen.  The current running `pt.ko` still needs:
 
-Then in userspace (`hwt.c:hwt_ctx_set_config_pt`), set
-`ptcfg.psb_freq` when `-r` is active to get frequent sync points:
+- `RTIT_CTL_TSCEN` added to `PT_SUPPORTED_FLAGS`
+- `RTIT_CTL_TSCEN` preserved through `pt_backend_configure()`
+- `RTIT_CTL_TSCEN` ORed in when `mtc_freq` or `cyc_thresh` is enabled
 
-```c
-if (ctx->filter.nranges > 0)
-    ptcfg.psb_freq = 0;  /* most frequent PSB interval */
-```
+Once that patched module is rebuilt and reloaded, the existing
+userspace decoder path should start filling `tsc` in JSON, profile,
+and tree output without further format changes.
 
-**2. `pt_backend_stop` implementation** (enables `HWT_IOC_STOP`)
+**Kernel/PT features we can realistically implement**
 
-Currently `pt_ops.hwt_backend_stop` is NULL, so `HWT_IOC_STOP`
-dereferences NULL and panics.  bsdtrace works around this by
-closing the context fd.
+- `TSCEN` / `TSC` packets: required for decoded timestamp output.
+- `PTWRITE` (`PTW` packets): user-directed trace markers from software.
+- `FUPONPTW`: emit `FUP` context with `PTWRITE` so markers carry IP context.
+- `OS` tracing: allow kernel-space tracing in addition to user-space-only runs.
+- Richer address-filter modes: the current backend uses simple
+  “trace within range” filtering; hardware also supports TraceStop-style
+  address configuration.
+- Better overflow / wrap reporting: make `OVF`, partial buffers, and
+  lost timing packets first-class diagnostics instead of indirect warnings.
+- Explicit timing controls: surface `mtc_freq` and `cyc_thresh`
+  separately in the CLI instead of treating `-C` as one fixed preset.
+- Single-range output backend: larger backend project; current driver
+  hard-requires ToPA even on CPUs that support single-range mode.
 
-Add a new function modeled on `pt_backend_disable()` but without
-tearing down the context:
+**Features that exist in Intel PT but are CPU-gated**
 
-```c
-static void
-pt_backend_stop_op(struct hwt_context *ctx, int cpu_id)
-{
-    struct pt_cpu *cpu;
+Availability is determined by CPUID leaf `0x14`, not just by decoder
+support.  The kernel exposes those capability bits in
+`x86/include/specialreg.h`.
 
-    if (ctx->mode == HWT_MODE_CPU)
-        return;
-    KASSERT(curcpu == cpu_id,
-        ("%s: wrong cpu", __func__));
+- Power event tracing (`PWREVTEN` -> `PWRE` / `PWRX` / `MWAIT` packets):
+  useful for low-power and sleep-state analysis, but only on CPUs with
+  `CPUPT_PWR`.
+- `PTWRITE` requires `CPUPT_PRW`.
+- TNT suppression (`DIS_TNT`) requires `CPUPT_DIS_TNT`.
+- Trace Transport output requires `CPUPT_TT_OUT`; current driver does
+  not target that output path.
 
-    cpu = &pt_pcpu[cpu_id];
-    pt_cpu_set_state(cpu_id, PT_INACTIVE);
-    while (atomic_cmpset_int(&cpu->in_pcint_handler, 1, 0))
-        ;
-    pt_cpu_stop(NULL);
-    CPU_CLR(cpu_id, &ctx->cpu_map);
-    /* NOTE: do NOT set cpu->ctx = NULL — context stays alive
-     * for restart or buffer read. */
-}
-```
+**Current test hardware note**
 
-Wire it into `pt_ops`:
+On the 12th Gen Intel test host used during bring-up, CPUID reports:
 
-```c
-static struct hwt_backend_ops pt_ops = {
-    ...
-    .hwt_backend_stop = pt_backend_stop_op,
-    ...
-};
-```
+- supported: ToPA, multiple ToPA outputs, configurable PSB, MTC,
+  cycle-accurate mode, CR3/IP filtering, PTWRITE
+- not supported: power event tracing, TNT suppression, Trace Transport output
 
-Once this works, bsdtrace can issue `HWT_IOC_STOP` then
-`HWT_IOC_BUFPTR_GET` then `HWT_IOC_START` on the same context —
-prerequisite for snapshot/flight-recorder mode.
-
-The HWT state machine is a simple `STOPPED <-> RUNNING` toggle
-(`hwt_context.h`).  `HWT_IOC_START` only rejects if already
-`CTX_STATE_RUNNING`.  After `HWT_IOC_STOP` sets `CTX_STATE_STOPPED`,
-a subsequent `HWT_IOC_START` will pass the guard and call
-`hwt_backend_configure` + `hwt_backend_enable` again.  So the
-stop→start cycle works at the framework level — the backend just
-needs to leave hardware resources intact (don't free the ToPA or
-save area).
-
-**Note**: `HWT_IOC_STOP` does not take `HWT_CTX_LOCK`, while
-`HWT_IOC_START` does.  This is a locking asymmetry in the
-framework that could race under concurrent access, but is fine
-for single-threaded bsdtrace usage.
-
-**3. Timing packet configuration** (enables function timing)
-
-MTC (Mini Time Counter) and CYC (cycle-accurate) packets provide
-wall-clock and cycle timing.  Controlled by `RTIT_CTL` bits and
-the `mtc_freq` / `cyc_thresh` config fields.
-
-```c
-/* MTC frequency: RTIT_CTL bits [17:14] (RTIT_CTL_MTC_FREQ_S = 14).
- * Controls how often MTC packets are emitted.
- * Requires CPUPT_MTC support (already checked in pt_backend_configure). */
-if (cfg->mtc_freq != 0) {
-    pt_ext->rtit_ctl |= RTIT_CTL_MTCEN;
-    pt_ext->rtit_ctl |= ((uint64_t)(cfg->mtc_freq & 0xf) << RTIT_CTL_MTC_FREQ_S);
-}
-
-/* CYC threshold: RTIT_CTL bits [22:19] (RTIT_CTL_CYC_THRESH_S = 19).
- * Controls cycle-accurate mode threshold. */
-if (cfg->cyc_thresh != 0) {
-    pt_ext->rtit_ctl |= RTIT_CTL_CYCEN;
-    pt_ext->rtit_ctl |= ((uint64_t)(cfg->cyc_thresh & 0xf) << RTIT_CTL_CYC_THRESH_S);
-}
-```
-
-All macros (`RTIT_CTL_CYCEN`, `RTIT_CTL_MTCEN`, `RTIT_CTL_MTC_FREQ_S`,
-`RTIT_CTL_CYC_THRESH_S`, `RTIT_CTL_PSB_FREQ_S`) are already defined in
-`<x86/specialreg.h>`.  `RTIT_CTL_CYCEN` (bit 1) and `RTIT_CTL_MTCEN`
-(bit 9) need to be added to `PT_SUPPORTED_FLAGS` at the top of pt.c
-so they aren't masked out.  libipt decodes MTC/CYC packets
-automatically when present in the stream.
+So the highest-value next PT feature after `TSCEN` is `PTWRITE`, not
+power-management packets.
 
 #### Crash dump inspection
 
-If HWT or bsdtrace testing panics the kernel, inspect the latest
-crash dump with:
+If HWT or bsdtrace testing panics the kernel:
 ```sh
 doas cat /var/crash/info.last
-
-doas lldb -c /var/crash/vmcore.last /boot/kernel/kernel \
-  -o 'bt' \
-  -o 'frame select 9' \
-  -o 'frame variable dev dsw ref com' \
-  -o 'expr -f hex -- dev' \
-  -o 'expr -f hex -- dev->si_devsw' \
-  -o 'expr -f hex -- ((struct cdevsw *)dev->si_devsw)->d_ioctl' \
-  -o 'expr -f hex -- ((struct cdevsw *)dev->si_devsw)->d_name' \
-  -o 'quit'
+doas cat /var/crash/core.txt.last
 ```
 
 ### How it works
@@ -651,8 +516,10 @@ doas lldb -c /var/crash/vmcore.last /boot/kernel/kernel \
    to disk alongside the metadata records.
 3. **Decode**: The raw PT data is fed to libipt's instruction decoder.
    ELF program headers (parsed via libelf/gelf) build a binary image
-   so libipt can resolve compressed IPs.  The dynamic linker is
-   resolved via PT_INTERP.
+   so libipt can resolve compressed IPs.  Attach mode seeds the
+   target's current executable mappings up front, then resets that
+   image state on a later `exec` so offline decode follows the same
+   address space transitions as the live trace.
 4. **Symbolize**: ELF symbol tables (`.dynsym` / `.symtab`) provide
    function names.  A sorted symbol table with ASLR-adjusted addresses
    maps IPs to `binary:function+offset`.
@@ -718,33 +585,7 @@ doas sh test-bsdtrace.sh
 
 The bsdtrace test suite (`test-bsdtrace.sh`) has two tiers:
 - **No-root**: version, list, decode error handling
-- **Root**: exec, trace, decode with real PT hardware
-
-Current PT/HWT workaround:
-- After a failed or truncated hardware trace, the backend can retain stale
-  state and the next `bsdtrace exec`/suite run may decode only loader events
-  or `0 instructions`.
-- `test-bsdtrace.sh` now performs a warmup `bsdtrace exec` before the root HWT
-  tier to clear that stale state.
-- If you are running commands manually, the equivalent warmup is:
-
-```sh
-cc -O0 -o /tmp/bsdtrace-testprog Tests/bsdtrace/testprog/main.c
-.build/x86_64-unknown-freebsd/debug/bsdtrace exec -t 5 \
-  -o /tmp/bsdtrace-warmup.pt -- /tmp/bsdtrace-testprog
-```
-
-This is a workaround for backend/test instability, not a real fix for the
-underlying PT teardown issue.
-
-Known limitations:
-- Back-to-back root `bsdtrace` runs can still be flaky on some patched PT/HWT
-  kernels.  The warmup trace is only a best-effort reset, not a guarantee.
-- When the backend gets into a bad state, a run may decode only loader events
-  or `0 instructions`; rerunning the suite or manually running one successful
-  `bsdtrace exec` can still recover it.
-- The most reliable workflow remains: capture once, then analyze the saved
-  `.pt` + `.meta` files offline.
+- **Root**: exec, trace, decode, threads, timing with real PT hardware
 
 ## Dependencies
 

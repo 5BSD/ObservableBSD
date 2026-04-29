@@ -11,16 +11,23 @@
  * suite can verify that -T 0 traces only main_* functions and
  * -T 1 traces only worker_* functions.
  *
- * Both threads loop indefinitely.  The test suite kills the process
- * when done (via bsdtrace -t timeout or explicit kill).
+ * Both threads run long bounded loops with brief sleeps between
+ * iterations to limit PT data rate and avoid triggering the pt.ko
+ * switch-in GPF race.  The loops are long enough for attach tests.
  */
 
 #include <pthread.h>
+#include <pthread_np.h>
 #include <unistd.h>
 
 #define	NOINLINE	__attribute__((noinline))
+#define	EARLY_MAIN_LOOPS	2000
+#define	STEADY_MAIN_LOOPS	20000
+#define	MAIN_WORK_ITERS		20000
+#define	WORKER_WORK_ITERS	20000
 
 static volatile int sink;
+static volatile int running = 1;
 
 /* --- Main thread functions --- */
 
@@ -63,9 +70,12 @@ worker_work(int n)
 static void *
 worker_entry(void *arg __unused)
 {
+	pthread_set_name_np(pthread_self(), "worker_thr");
 
-	for (;;)
-		sink = worker_work(200);
+	while (running) {
+		sink = worker_work(WORKER_WORK_ITERS);
+		usleep(100);
+	}
 	return (NULL);
 }
 
@@ -73,17 +83,37 @@ int
 main(void)
 {
 	pthread_t thr;
+	int i;
+
+	pthread_set_name_np(pthread_self(), "main_thr");
+
+	/*
+	 * Give exec-mode -T 0 a main-thread-only window before the
+	 * worker exists.  This avoids relying on multi-thread context
+	 * switching before the attach tests begin.
+	 */
+	for (i = 0; i < EARLY_MAIN_LOOPS; i++) {
+		sink = main_work(MAIN_WORK_ITERS);
+		usleep(100);
+	}
 
 	pthread_create(&thr, NULL, worker_entry, NULL);
-
-	/* Give the worker time to start. */
+	pthread_set_name_np(thr, "worker_thr");
 	usleep(10000);
 
-	/* Loop forever — bsdtrace kills us via timeout or the test
-	 * script kills us after tracing. */
-	for (;;)
-		sink = main_work(100);
+	/*
+	 * Run long enough for attach tests while keeping each scheduled
+	 * slice dominated by the test work functions rather than the sleep
+	 * path.  Still bounded to avoid the pt.ko GPF race that infinite
+	 * tight loops trigger.
+	 */
+	for (i = 0; i < STEADY_MAIN_LOOPS; i++) {
+		sink = main_work(MAIN_WORK_ITERS);
+		usleep(100);
+	}
 
-	/* NOTREACHED */
+	running = 0;
+	pthread_join(thr, NULL);
+
 	return (0);
 }

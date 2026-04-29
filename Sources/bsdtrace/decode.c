@@ -677,12 +677,15 @@ struct profile_entry {
 	int		calls;
 	int		returns;
 	int		branches;
+	uint64_t	cumulative_tsc;	/* sum of per-call TSC deltas */
+	uint64_t	entry_tsc;	/* TSC at most recent entry (transient) */
 };
 
 struct profile {
 	struct profile_entry	*entries;
 	int			count;
 	int			capacity;
+	enum pt_insn_class	prev_class;
 };
 
 static void
@@ -704,7 +707,7 @@ profile_init(struct profile *p)
  */
 static void
 profile_record(struct profile *p, const struct sym_entry *sym,
-    uint64_t ip, enum pt_insn_class iclass)
+    uint64_t ip, enum pt_insn_class iclass, uint64_t tsc)
 {
 	struct profile_entry *e;
 	int i;
@@ -742,14 +745,29 @@ profile_record(struct profile *p, const struct sym_entry *sym,
 		p->count++;
 	}
 
-	/* Entry at offset 0 = function was called/entered. */
-	if (ip == sym->addr)
+	/*
+	 * Entry at offset 0 after a CALL = function was called.
+	 * Must check prev_class to avoid overcounting on sync-at-entry,
+	 * tail jumps, or other non-call control flow to function starts.
+	 */
+	if (ip == sym->addr &&
+	    (p->prev_class == ptic_call || p->prev_class == ptic_far_call)) {
 		e->calls++;
+		if (tsc > 0)
+			e->entry_tsc = tsc;
+	}
 
+	p->prev_class = iclass;
+
+	/* Accumulate per-call time on return. */
 	switch (iclass) {
 	case ptic_return:
 	case ptic_far_return:
 		e->returns++;
+		if (tsc > 0 && e->entry_tsc > 0 && tsc > e->entry_tsc) {
+			e->cumulative_tsc += tsc - e->entry_tsc;
+			e->entry_tsc = 0;
+		}
 		break;
 	case ptic_jump:
 	case ptic_cond_jump:
@@ -772,22 +790,50 @@ profile_cmp_calls(const void *a, const void *b)
 static void
 profile_print(struct profile *p)
 {
+	bool have_tsc;
+	int i;
 
 	qsort(p->entries, p->count, sizeof(p->entries[0]), profile_cmp_calls);
 
-	printf("%-8s %-8s %-8s  %-20s  %s\n",
-	    "CALLS", "RETURNS", "BRANCHES", "BINARY", "FUNCTION");
-	printf("%-8s %-8s %-8s  %-20s  %s\n",
-	    "--------", "--------", "--------",
-	    "--------------------", "--------------------");
+	/* Check if any entry has TSC data. */
+	have_tsc = false;
+	for (i = 0; i < p->count; i++) {
+		if (p->entries[i].cumulative_tsc > 0) {
+			have_tsc = true;
+			break;
+		}
+	}
 
-	for (int i = 0; i < p->count; i++) {
+	if (have_tsc) {
+		printf("%-8s %-8s %-8s  %-14s  %-20s  %s\n",
+		    "CALLS", "RETURNS", "BRANCHES", "TIME(tsc)",
+		    "BINARY", "FUNCTION");
+		printf("%-8s %-8s %-8s  %-14s  %-20s  %s\n",
+		    "--------", "--------", "--------",
+		    "--------------",
+		    "--------------------", "--------------------");
+	} else {
+		printf("%-8s %-8s %-8s  %-20s  %s\n",
+		    "CALLS", "RETURNS", "BRANCHES", "BINARY", "FUNCTION");
+		printf("%-8s %-8s %-8s  %-20s  %s\n",
+		    "--------", "--------", "--------",
+		    "--------------------", "--------------------");
+	}
+
+	for (i = 0; i < p->count; i++) {
 		struct profile_entry *e = &p->entries[i];
 		if (e->calls == 0 && e->returns == 0 && e->branches == 0)
 			continue;
-		printf("%-8d %-8d %-8d  %-20s  %s\n",
-		    e->calls, e->returns, e->branches,
-		    e->binary, e->name);
+		if (have_tsc) {
+			uint64_t dt = e->cumulative_tsc;
+			printf("%-8d %-8d %-8d  %-14lu  %-20s  %s\n",
+			    e->calls, e->returns, e->branches,
+			    (unsigned long)dt, e->binary, e->name);
+		} else {
+			printf("%-8d %-8d %-8d  %-20s  %s\n",
+			    e->calls, e->returns, e->branches,
+			    e->binary, e->name);
+		}
 	}
 }
 
@@ -809,6 +855,8 @@ struct ct_node {
 	const char		*name;		/* borrowed from sym_table */
 	const char		*binary;	/* borrowed from sym_table */
 	int			count;		/* times called at this position */
+	uint64_t		total_tsc;	/* accumulated TSC ticks */
+	uint64_t		entry_tsc;	/* TSC at push (transient) */
 	struct ct_node		*children;
 	int			nchildren;
 	int			children_cap;
@@ -874,7 +922,8 @@ calltree_init(struct calltree *ct)
 }
 
 static void
-calltree_push(struct calltree *ct, const struct sym_entry *sym)
+calltree_push(struct calltree *ct, const struct sym_entry *sym,
+    uint64_t tsc)
 {
 	struct ct_node *parent, *child;
 
@@ -886,6 +935,7 @@ calltree_push(struct calltree *ct, const struct sym_entry *sym)
 	if (child == NULL)
 		return;
 	child->count++;
+	child->entry_tsc = tsc;
 
 	ct->depth++;
 	if (ct->depth >= ct->stack_cap) {
@@ -904,11 +954,17 @@ calltree_push(struct calltree *ct, const struct sym_entry *sym)
 }
 
 static void
-calltree_pop(struct calltree *ct)
+calltree_pop(struct calltree *ct, uint64_t tsc)
 {
 
-	if (ct->depth > 0)
+	if (ct->depth > 0) {
+		struct ct_node *node = ct->stack[ct->depth];
+		if (tsc > 0 && node->entry_tsc > 0 &&
+		    tsc > node->entry_tsc)
+			node->total_tsc += tsc - node->entry_tsc;
+		node->entry_tsc = 0;
 		ct->depth--;
+	}
 }
 
 /*
@@ -917,7 +973,7 @@ calltree_pop(struct calltree *ct)
  */
 static void
 calltree_record(struct calltree *ct, const struct sym_entry *sym,
-    uint64_t ip, enum pt_insn_class iclass)
+    uint64_t ip, enum pt_insn_class iclass, uint64_t tsc)
 {
 
 	/*
@@ -927,11 +983,11 @@ calltree_record(struct calltree *ct, const struct sym_entry *sym,
 	if (sym != NULL && ip == sym->addr &&
 	    (ct->prev_class == ptic_call ||
 	     ct->prev_class == ptic_far_call)) {
-		calltree_push(ct, sym);
+		calltree_push(ct, sym, tsc);
 	}
 
 	if (iclass == ptic_return || iclass == ptic_far_return)
-		calltree_pop(ct);
+		calltree_pop(ct, tsc);
 
 	ct->prev_sym = sym;
 	ct->prev_class = iclass;
@@ -958,8 +1014,13 @@ ct_print_node(struct ct_node *n, int indent)
 
 	for (i = 0; i < n->nchildren; i++) {
 		struct ct_node *c = &n->children[i];
-		printf("%*s%s:%s  (%d)\n",
-		    indent * 2, "", c->binary, c->name, c->count);
+		if (c->total_tsc > 0)
+			printf("%*s%s:%s  (%d) [%lu tsc]\n",
+			    indent * 2, "", c->binary, c->name,
+			    c->count, (unsigned long)c->total_tsc);
+		else
+			printf("%*s%s:%s  (%d)\n",
+			    indent * 2, "", c->binary, c->name, c->count);
 		ct_print_node(c, indent + 1);
 	}
 }
@@ -969,6 +1030,17 @@ calltree_print(struct calltree *ct)
 {
 
 	ct_print_node(&ct->root, 0);
+}
+
+static int
+ct_node_count(struct ct_node *n)
+{
+	int total, i;
+
+	total = n->nchildren;
+	for (i = 0; i < n->nchildren; i++)
+		total += ct_node_count(&n->children[i]);
+	return (total);
 }
 
 static void
@@ -993,13 +1065,192 @@ calltree_free(struct calltree *ct)
 }
 
 /* ------------------------------------------------------------------ */
+/* Collapsed (folded) stacks for flamegraph.pl / Speedscope            */
+/* ------------------------------------------------------------------ */
+
+#define	MAX_COLLAPSED_STACKS	4096
+#define	MAX_STACK_DEPTH		256
+
+struct collapsed_entry {
+	char	*stack;		/* "func1;func2;func3" (strdup'd) */
+	int	count;
+};
+
+struct collapsed {
+	struct collapsed_entry	*entries;
+	int			count;
+	int			capacity;
+	/* Current shadow call stack. */
+	const char		*names[MAX_STACK_DEPTH];
+	int			depth;
+	const struct sym_entry	*prev_sym;
+	enum pt_insn_class	prev_class;
+};
+
+static void
+collapsed_init(struct collapsed *col)
+{
+
+	memset(col, 0, sizeof(*col));
+}
+
+/*
+ * Build the stack string by joining names[0..depth-1] with ";".
+ * Returns a malloc'd string, or NULL on failure.
+ */
+static char *
+collapsed_build_stack(struct collapsed *col)
+{
+	char buf[8192];
+	int i, off;
+
+	if (col->depth <= 0)
+		return (NULL);
+
+	off = 0;
+	for (i = 0; i < col->depth; i++) {
+		if (i > 0 && off < (int)sizeof(buf) - 1)
+			buf[off++] = ';';
+		off += snprintf(buf + off, sizeof(buf) - off, "%s",
+		    col->names[i]);
+		if (off >= (int)sizeof(buf) - 1)
+			break;
+	}
+	buf[off] = '\0';
+	return (strdup(buf));
+}
+
+/*
+ * Find or create the entry for the current stack and increment it.
+ */
+static void
+collapsed_count_stack(struct collapsed *col)
+{
+	char *stack;
+	int i;
+
+	stack = collapsed_build_stack(col);
+	if (stack == NULL)
+		return;
+
+	/* Look for existing entry. */
+	for (i = 0; i < col->count; i++) {
+		if (strcmp(col->entries[i].stack, stack) == 0) {
+			col->entries[i].count++;
+			free(stack);
+			return;
+		}
+	}
+
+	/* Add new entry. */
+	if (col->count >= col->capacity) {
+		int newcap = col->capacity == 0 ?
+		    256 : col->capacity * 2;
+		struct collapsed_entry *newent;
+
+		if (newcap > MAX_COLLAPSED_STACKS)
+			newcap = MAX_COLLAPSED_STACKS;
+		if (col->count >= newcap) {
+			static bool warned;
+			if (!warned) {
+				warnx("collapsed stacks: hit %d unique "
+				    "stack limit, dropping new stacks",
+				    MAX_COLLAPSED_STACKS);
+				warned = true;
+			}
+			free(stack);
+			return;
+		}
+		newent = realloc(col->entries,
+		    newcap * sizeof(*newent));
+		if (newent == NULL) {
+			free(stack);
+			return;
+		}
+		col->entries = newent;
+		col->capacity = newcap;
+	}
+
+	col->entries[col->count].stack = stack;
+	col->entries[col->count].count = 1;
+	col->count++;
+}
+
+/*
+ * Feed each decoded instruction to the collapsed stack tracker.
+ * Push on CALL (function entry at offset 0), count+pop on RETURN.
+ *
+ * Counting on RETURN (not PUSH) gives correct flamegraph semantics:
+ * a call chain main→foo→bar produces one sample at "main;foo;bar"
+ * instead of three separate prefix samples.
+ */
+static void
+collapsed_record(struct collapsed *col, const struct sym_entry *sym,
+    uint64_t ip, enum pt_insn_class iclass)
+{
+
+	/* Detect function entry. */
+	if (sym != NULL && ip == sym->addr &&
+	    (col->prev_class == ptic_call ||
+	     col->prev_class == ptic_far_call)) {
+		if (col->depth < MAX_STACK_DEPTH) {
+			col->names[col->depth] = sym->name;
+			col->depth++;
+		}
+	}
+
+	if (iclass == ptic_return || iclass == ptic_far_return) {
+		collapsed_count_stack(col);
+		if (col->depth > 0)
+			col->depth--;
+	}
+
+	col->prev_sym = sym;
+	col->prev_class = iclass;
+}
+
+static int
+collapsed_cmp_count(const void *a, const void *b)
+{
+	const struct collapsed_entry *ea = a;
+	const struct collapsed_entry *eb = b;
+
+	return (eb->count - ea->count);
+}
+
+static void
+collapsed_print(struct collapsed *col)
+{
+
+	qsort(col->entries, col->count, sizeof(col->entries[0]),
+	    collapsed_cmp_count);
+
+	for (int i = 0; i < col->count; i++)
+		printf("%s %d\n", col->entries[i].stack,
+		    col->entries[i].count);
+}
+
+static void
+collapsed_free(struct collapsed *col)
+{
+	int i;
+
+	for (i = 0; i < col->count; i++)
+		free(col->entries[i].stack);
+	free(col->entries);
+	col->entries = NULL;
+	col->count = 0;
+	col->capacity = 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Instruction decoder                                                 */
 /* ------------------------------------------------------------------ */
 
 int
 decode_pt_insn(const void *buf, size_t len,
     const struct pt_image_info *sections, int nsections,
-    enum bsdtrace_fmt fmt, int tid)
+    enum bsdtrace_fmt fmt, const struct pt_decode_opts *opts)
 {
 	struct pt_config config;
 	struct pt_insn_decoder *decoder;
@@ -1009,13 +1260,18 @@ decode_pt_insn(const void *buf, size_t len,
 	int nranges;
 	struct profile prof;
 	struct calltree ct;
+	struct collapsed col;
 	struct pt_insn insn;
 	const struct sym_entry *sym;
 	const char *bn;
 	const char *label;
+	const char *syscall_name;
 	uint64_t boff;
+	uint64_t tsc;
+	uint32_t lost_mtc, lost_cyc;
+	int tid;
 	int status;
-	int total, branches, returns, syscalls, nomaps, errors;
+	int total, calls, branches, returns, syscalls, nomaps, errors;
 
 	if (buf == NULL || len == 0) {
 		warnx("no PT data to decode");
@@ -1030,6 +1286,7 @@ decode_pt_insn(const void *buf, size_t len,
 	sym_table_init(&st);
 	profile_init(&prof);
 	calltree_init(&ct);
+	collapsed_init(&col);
 
 	image = build_pt_image(sections, nsections, &st, true);
 	if (image == NULL) {
@@ -1044,9 +1301,14 @@ decode_pt_insn(const void *buf, size_t len,
 	pt_config_init(&config);
 	config.begin = __DECONST(uint8_t *, buf);
 	config.end = __DECONST(uint8_t *, buf) + len;
+	tid = opts != NULL ? opts->tid : -1;
 
 	if (pt_cpu_read(&config.cpu) == 0)
 		pt_cpu_errata(&config.errata, &config.cpu);
+	if (opts != NULL && opts->mtc_freq > 0) {
+		config.mtc_freq = opts->mtc_freq;
+		config.flags.variant.insn.enable_tick_events = 1;
+	}
 
 	decoder = pt_insn_alloc_decoder(&config);
 	if (decoder == NULL) {
@@ -1080,6 +1342,7 @@ decode_pt_insn(const void *buf, size_t len,
 	}
 
 	total = 0;
+	calls = 0;
 	branches = 0;
 	returns = 0;
 	syscalls = 0;
@@ -1111,11 +1374,19 @@ decode_pt_insn(const void *buf, size_t len,
 			continue;
 		}
 
+		/* Extract timing — tsc stays 0 if unavailable. */
+		tsc = 0;
+		lost_mtc = 0;
+		lost_cyc = 0;
+		pt_insn_time(decoder, &tsc, &lost_mtc, &lost_cyc);
+
 		total++;
 		label = insn_class_str(insn.iclass);
 
 		switch (insn.iclass) {
 		case ptic_call:
+			calls++;
+			break;
 		case ptic_jump:
 		case ptic_cond_jump:
 			branches++;
@@ -1124,25 +1395,31 @@ decode_pt_insn(const void *buf, size_t len,
 			returns++;
 			break;
 		case ptic_far_call:
+			syscalls++;
+			break;
 		case ptic_far_return:
 		case ptic_far_jump:
-			syscalls++;
 			break;
 		default:
 			break;
 		}
 
 		/*
-		 * Profile mode needs every instruction (including ptic_other)
-		 * to detect function entries at offset 0.
+		 * Profile/tree/collapsed modes need every instruction
+		 * (including ptic_other) to detect function entries
+		 * at offset 0.
 		 */
-		if (fmt == FMT_PROFILE || fmt == FMT_TREE) {
+		if (fmt == FMT_PROFILE || fmt == FMT_TREE ||
+		    fmt == FMT_COLLAPSED) {
 			sym = sym_table_lookup(&st, insn.ip);
 			if (fmt == FMT_PROFILE)
 				profile_record(&prof, sym, insn.ip,
-				    insn.iclass);
-			else
+				    insn.iclass, tsc);
+			else if (fmt == FMT_TREE)
 				calltree_record(&ct, sym, insn.ip,
+				    insn.iclass, tsc);
+			else
+				collapsed_record(&col, sym, insn.ip,
 				    insn.iclass);
 			continue;
 		}
@@ -1157,6 +1434,19 @@ decode_pt_insn(const void *buf, size_t len,
 			bn = find_binary_for_ip(ranges, nranges, insn.ip,
 			    &boff);
 
+		/*
+		 * Syscall name resolution: libsys wrappers are named
+		 * __sys_write, __sys_read, etc.  Extract the syscall
+		 * name for display alongside the full symbol.
+		 */
+#define	SYSCALL_PREFIX	"__sys_"
+		syscall_name = NULL;
+		if (insn.iclass == ptic_far_call && sym != NULL &&
+		    strncmp(sym->name, SYSCALL_PREFIX,
+		    sizeof(SYSCALL_PREFIX) - 1) == 0)
+			syscall_name = sym->name +
+			    sizeof(SYSCALL_PREFIX) - 1;
+
 		if (fmt == FMT_JSON) {
 			if (sym != NULL) {
 				char esym[256], ebin[256];
@@ -1170,6 +1460,12 @@ decode_pt_insn(const void *buf, size_t len,
 				    esym,
 				    (unsigned long)(insn.ip - sym->addr),
 				    ebin);
+				if (syscall_name != NULL) {
+					char esc[256];
+					json_escape(esc, sizeof(esc),
+					    syscall_name);
+					printf(",\"syscall\":\"%s\"", esc);
+				}
 			} else if (bn != NULL) {
 				char ebin[256];
 				json_escape(ebin, sizeof(ebin), bn);
@@ -1184,21 +1480,35 @@ decode_pt_insn(const void *buf, size_t len,
 				    label,
 				    (unsigned long)insn.ip);
 			}
+			if (tsc > 0)
+				printf(",\"tsc\":%lu",
+				    (unsigned long)tsc);
 			if (tid >= 0)
 				printf(",\"tid\":%d", tid);
 			printf("}\n");
 		} else {
 			if (sym != NULL) {
 				uint64_t off = insn.ip - sym->addr;
-				if (off == 0)
+				if (syscall_name != NULL) {
+					if (off == 0)
+						printf("  %-9s %s (%s:%s)\n",
+						    label, syscall_name,
+						    sym->binary, sym->name);
+					else
+						printf("  %-9s %s (%s:%s+0x%lx)\n",
+						    label, syscall_name,
+						    sym->binary, sym->name,
+						    (unsigned long)off);
+				} else if (off == 0) {
 					printf("  %-9s %s:%s\n",
 					    label, sym->binary,
 					    sym->name);
-				else
+				} else {
 					printf("  %-9s %s:%s+0x%lx\n",
 					    label, sym->binary,
 					    sym->name,
 					    (unsigned long)off);
+				}
 			} else {
 				if (bn != NULL)
 					printf("  %-9s %s+0x%lx\n",
@@ -1228,16 +1538,24 @@ decode_pt_insn(const void *buf, size_t len,
 		calltree_print(&ct);
 		fprintf(stderr,
 		    "%d instructions, %d call tree nodes\n",
-		    total, ct.root.nchildren);
+		    total, ct_node_count(&ct.root));
+	} else if (fmt == FMT_COLLAPSED) {
+		if (tid >= 0)
+			fprintf(stderr, "Thread %d:\n", tid);
+		collapsed_print(&col);
+		fprintf(stderr,
+		    "%d instructions, %d unique stacks\n",
+		    total, col.count);
 	} else if (fmt == FMT_TEXT) {
 		fflush(stdout);
 		fprintf(stderr,
-		    "%d instructions, %d branches, %d returns, "
-		    "%d syscalls, %d nomap, %d errors, %d symbols\n",
-		    total, branches, returns, syscalls, nomaps, errors,
-		    st.count);
+		    "%d instructions, %d calls, %d returns, "
+		    "%d branches, %d syscalls, %d nomap, %d errors\n",
+		    total, calls, returns, branches, syscalls,
+		    nomaps, errors);
 	}
 
+	collapsed_free(&col);
 	calltree_free(&ct);
 	profile_free(&prof);
 	sym_table_free(&st);

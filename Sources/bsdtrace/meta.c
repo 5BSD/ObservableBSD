@@ -59,26 +59,40 @@ meta_writer_header(struct meta_writer *mw, pid_t pid, int tid)
 }
 
 void
+meta_writer_timing(struct meta_writer *mw, uint8_t mtc_freq)
+{
+
+	if (mw == NULL || mw->fp == NULL || mtc_freq == 0)
+		return;
+	fprintf(mw->fp,
+	    "{\"type\":\"timing\",\"mtc_freq\":%u}\n",
+	    mtc_freq);
+}
+
+void
 meta_writer_record(struct meta_writer *mw, const struct bsdtrace_record *rec)
 {
+	char epath[MAXPATHLEN];
 
 	if (mw == NULL || mw->fp == NULL)
 		return;
 
 	switch (rec->type) {
 	case HWT_RECORD_EXECUTABLE:
+		json_escape(epath, sizeof(epath), rec->fullpath);
 		fprintf(mw->fp,
 		    "{\"type\":\"exec\",\"path\":\"%s\","
 		    "\"addr\":\"0x%lx\",\"base\":\"0x%lx\"}\n",
-		    rec->fullpath,
+		    epath,
 		    (unsigned long)rec->addr,
 		    (unsigned long)rec->baseaddr);
 		break;
 	case HWT_RECORD_MMAP:
+		json_escape(epath, sizeof(epath), rec->fullpath);
 		fprintf(mw->fp,
 		    "{\"type\":\"mmap\",\"path\":\"%s\","
 		    "\"addr\":\"0x%lx\",\"base\":\"0x%lx\"}\n",
-		    rec->fullpath,
+		    epath,
 		    (unsigned long)rec->addr,
 		    (unsigned long)rec->baseaddr);
 		break;
@@ -89,11 +103,36 @@ meta_writer_record(struct meta_writer *mw, const struct bsdtrace_record *rec)
 		break;
 	case HWT_RECORD_THREAD_SET_NAME:
 		fprintf(mw->fp,
-		    "{\"type\":\"thread_name\",\"tid\":%d}\n",
+		    "{\"type\":\"thread_set_name\",\"tid\":%d}\n",
 		    rec->thread_id);
 		break;
 	default:
 		break;
+	}
+}
+
+void
+meta_writer_sections(struct meta_writer *mw,
+    const struct pt_image_info *sections, int nsections)
+{
+	char epath[MAXPATHLEN];
+	int i;
+
+	if (mw == NULL || mw->fp == NULL)
+		return;
+
+	for (i = 0; i < nsections; i++) {
+		const char *type;
+
+		type = sections[i].type == HWT_RECORD_EXECUTABLE ?
+		    "exec" : "mmap";
+		json_escape(epath, sizeof(epath), sections[i].path);
+		fprintf(mw->fp,
+		    "{\"type\":\"%s\",\"path\":\"%s\","
+		    "\"addr\":\"0x%lx\",\"base\":\"0x%lx\"}\n",
+		    type, epath,
+		    (unsigned long)sections[i].load_addr,
+		    (unsigned long)sections[i].base_addr);
 	}
 }
 
@@ -136,6 +175,30 @@ meta_read_tid(const char *path)
 }
 
 int
+meta_read_mtc_freq(const char *path)
+{
+	FILE *fp;
+	char line[256];
+	unsigned int mtc_freq;
+
+	fp = fopen(path, "r");
+	if (fp == NULL)
+		return (0);
+
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if (sscanf(line,
+		    "{\"type\":\"timing\",\"mtc_freq\":%u}",
+		    &mtc_freq) == 1) {
+			fclose(fp);
+			return ((int)mtc_freq);
+		}
+	}
+
+	fclose(fp);
+	return (0);
+}
+
+int
 meta_read_sections(const char *path,
     struct pt_image_info **sections_out, int *nsections_out)
 {
@@ -165,8 +228,9 @@ meta_read_sections(const char *path,
 
 		/*
 		 * Parse JSONL lines for exec/mmap records.
-		 * Simple sscanf — the JSON is machine-generated with
-		 * no special characters in paths.
+		 * Simple sscanf — paths are JSON-escaped on write but
+		 * FreeBSD filesystem paths never contain " or \ so the
+		 * escaped and raw forms are identical in practice.
 		 */
 		if (sscanf(line,
 		    "{\"type\":\"%31[^\"]\",\"path\":\"%1023[^\"]\","
@@ -175,6 +239,15 @@ meta_read_sections(const char *path,
 			if (strcmp(type, "exec") != 0 &&
 			    strcmp(type, "mmap") != 0)
 				continue;
+
+			/*
+			 * An EXEC record means the process replaced its
+			 * address space.  Discard any earlier seeded MMAPs
+			 * from the pre-exec image so offline decode matches
+			 * the live decoder's post-exec view.
+			 */
+			if (strcmp(type, "exec") == 0)
+				nsections = 0;
 
 			/*
 			 * Keep all records — section_should_use() handles

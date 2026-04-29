@@ -113,10 +113,18 @@ list_text(int hwt_avail, int hooks, const char *backend,
 		printf("────────────────────────────────────────\n");
 
 		if (strcmp(backend, "pt") == 0) {
+			uint32_t mtc, cyc;
 			printf("  Type:           Intel Processor Trace\n");
 			printf("  Modes:          thread, cpu\n");
-			printf("  Features:       branch tracing, timing, "
-			    "cycle-accurate\n");
+			hwt_pt_default_timing(&mtc, &cyc);
+			if (mtc > 0 && cyc > 0)
+				printf("  Features:       branch tracing, "
+				    "timing, cycle-accurate\n");
+			else if (mtc > 0)
+				printf("  Features:       branch tracing, "
+				    "timing\n");
+			else
+				printf("  Features:       branch tracing\n");
 		} else if (strcmp(backend, "coresight") == 0) {
 			printf("  Type:           ARM CoreSight ETM\n");
 			printf("  Modes:          thread, cpu\n");

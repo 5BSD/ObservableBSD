@@ -1,0 +1,121 @@
+Wire up psb_freq, mtc_freq, and cyc_thresh in pt_backend_configure.
+
+The pt_cpu_config struct already carries these fields from userspace,
+and the RTIT_CTL bit definitions already exist in specialreg.h, but
+pt_backend_configure never applied them to the MSR.  This patch:
+
+  1. Adds RTIT_CTL_TSCEN, RTIT_CTL_CYCEN, and the three frequency
+     masks to
+     PT_SUPPORTED_FLAGS so they survive the initial filter.
+  2. Validates each frequency value against the CPU's CPUID
+     capability bitmaps (leaf 0x14, subleaf 1).
+  3. Encodes the values into the appropriate RTIT_CTL bit fields.
+
+PSB frequency controls how often the hardware emits a sync point
+(PSB packet).  Lower values = more frequent sync = shorter traces
+can be decoded.  MTC and CYC enable timing packets for per-function
+wall-clock and cycle-accurate profiling.
+
+Apply from /usr/src (on top of existing patches):
+  patch -p1 < /path/to/pt-psb-freq.patch
+
+---
+--- a/sys/amd64/pt/pt.c
++++ b/sys/amd64/pt/pt.c
+@@ -82,7 +82,9 @@
+ #define PT_SUPPORTED_FLAGS						\
+ 	(RTIT_CTL_MTCEN | RTIT_CTL_CR3FILTER | RTIT_CTL_DIS_TNT |	\
+-	    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN)
++	    RTIT_CTL_USER | RTIT_CTL_OS | RTIT_CTL_BRANCHEN |		\
++	    RTIT_CTL_TSCEN | RTIT_CTL_CYCEN | RTIT_CTL_MTC_FREQ_M |	\
++	    RTIT_CTL_CYC_THRESH_M | RTIT_CTL_PSB_FREQ_M)
+ #define PT_XSAVE_MASK (XFEATURE_ENABLED_X87 | XFEATURE_ENABLED_SSE)
+ #define PT_XSTATE_BV (PT_XSAVE_MASK | XFEATURE_ENABLED_PT)
+ #define PT_MAX_IP_RANGES 2
+@@ -466,6 +468,56 @@
+ 	}
+ 	/* TODO: support for more config bits. */
+
++	/*
++	 * PSB frequency: controls how often the hardware emits a PSB
++	 * (Packet Stream Boundary) synchronization packet.  The 4-bit
++	 * encoding selects powers of 2 from 2K to 32M bytes of output.
++	 * Validate against CPUID leaf 0x14 subleaf 1 EBX[31:16] bitmap.
++	 */
++	if (cfg->psb_freq > 0) {
++		if ((pt_info.l0_ebx & CPUPT_PSB) == 0) {
++			printf("%s: CPU does not support configurable PSB\n",
++			    __func__);
++			return (ENXIO);
++		}
++		if (cfg->psb_freq > 0xf) {
++			printf("%s: psb_freq %u out of range (max 15)\n",
++			    __func__, cfg->psb_freq);
++			return (EINVAL);
++		}
++		if (((pt_info.l1_ebx >> CPUPT_PFE_BITMAP_S) &
++		    (1 << cfg->psb_freq)) == 0) {
++			printf("%s: psb_freq %u not supported by CPU\n",
++			    __func__, cfg->psb_freq);
++			return (EINVAL);
++		}
++		cfg->rtit_ctl |= (uint64_t)cfg->psb_freq << RTIT_CTL_PSB_FREQ_S;
++	}
++
++	/*
++	 * MTC frequency: controls Mini Time Counter packet rate.
++	 * Validate against CPUID leaf 0x14 subleaf 1 EAX[31:16] bitmap.
++	 * RTIT_CTL_MTCEN must also be set (handled above or by userspace).
++	 */
++	if (cfg->mtc_freq > 0) {
++		if ((pt_info.l0_ebx & CPUPT_MTC) == 0) {
++			printf("%s: CPU does not support MTC packets\n",
++			    __func__);
++			return (ENXIO);
++		}
++		if (cfg->mtc_freq > 0xf) {
++			printf("%s: mtc_freq %u out of range (max 15)\n",
++			    __func__, cfg->mtc_freq);
++			return (EINVAL);
++		}
++		if (((pt_info.l1_eax >> CPUPT_MTC_BITMAP_S) &
++		    (1 << cfg->mtc_freq)) == 0) {
++			printf("%s: mtc_freq %u not supported by CPU\n",
++			    __func__, cfg->mtc_freq);
++			return (EINVAL);
++		}
++		cfg->rtit_ctl |= RTIT_CTL_MTC_FREQ(cfg->mtc_freq);
++		cfg->rtit_ctl |= RTIT_CTL_MTCEN;
++		cfg->rtit_ctl |= RTIT_CTL_TSCEN;
++	}
++
++	/*
++	 * Cycle-accurate threshold: controls CYC packet granularity.
++	 * CPUPT_PSB capability bit covers both PSB and CYC support.
++	 * Validate against CPUID leaf 0x14 subleaf 1 EBX[15:0] bitmap.
++	 */
++	if (cfg->cyc_thresh > 0) {
++		if ((pt_info.l0_ebx & CPUPT_PSB) == 0) {
++			printf("%s: CPU does not support cycle-accurate mode\n",
++			    __func__);
++			return (ENXIO);
++		}
++		if (cfg->cyc_thresh > 0xf) {
++			printf("%s: cyc_thresh %u out of range (max 15)\n",
++			    __func__, cfg->cyc_thresh);
++			return (EINVAL);
++		}
++		if ((((pt_info.l1_ebx & CPUPT_CT_BITMAP_M) >>
++		    CPUPT_CT_BITMAP_S) & (1 << cfg->cyc_thresh)) == 0) {
++			printf("%s: cyc_thresh %u not supported by CPU\n",
++			    __func__, cfg->cyc_thresh);
++			return (EINVAL);
++		}
++		cfg->rtit_ctl |= (uint64_t)cfg->cyc_thresh << RTIT_CTL_CYC_THRESH_S;
++		cfg->rtit_ctl |= RTIT_CTL_CYCEN;
++		cfg->rtit_ctl |= RTIT_CTL_TSCEN;
++	}
++
+ 	if (ctx->mode == HWT_MODE_CPU) {
+ 		TAILQ_FOREACH(hwt_cpu, &ctx->cpus, next) {
+ 			if (hwt_cpu->cpu_id != cpu_id)

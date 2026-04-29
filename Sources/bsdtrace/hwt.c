@@ -100,6 +100,46 @@ hwt_detect_backend(void)
 	return (NULL);
 }
 
+/*
+ * Query CPUID leaf 0x14 to find the lowest supported MTC frequency
+ * and CYC threshold encodings.  Returns 0/0 if the CPU doesn't
+ * support configurable timing.  Encoding 0 is the kernel's sentinel
+ * for "off", so we scan from 1.
+ */
+void
+hwt_pt_default_timing(uint32_t *mtc_out, uint32_t *cyc_out)
+{
+	uint32_t eax, ebx, ecx, edx;
+	uint32_t mtc_bitmap, cyc_bitmap;
+	int i;
+
+	*mtc_out = 0;
+	*cyc_out = 0;
+
+	/* Leaf 0x14 subleaf 1: timing bitmaps. */
+	__asm__ __volatile__("cpuid"
+	    : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+	    : "a"(0x14), "c"(1));
+
+	/* MTC bitmap: EAX[31:16] — scan from 1, skip 0. */
+	mtc_bitmap = (eax >> 16) & 0xffff;
+	for (i = 1; i < 16; i++) {
+		if (mtc_bitmap & (1 << i)) {
+			*mtc_out = i;
+			break;
+		}
+	}
+
+	/* CYC bitmap: EBX[15:0] — scan from 1, skip 0. */
+	cyc_bitmap = ebx & 0xffff;
+	for (i = 1; i < 16; i++) {
+		if (cyc_bitmap & (1 << i)) {
+			*cyc_out = i;
+			break;
+		}
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Context allocation                                                  */
 /* ------------------------------------------------------------------ */
@@ -116,6 +156,8 @@ hwt_ctx_alloc(struct hwt_ctx *ctx, int mode, pid_t pid,
 	ctx->ctl_fd = -1;
 	ctx->ctx_fd = -1;
 	ctx->kq_fd = -1;
+	for (int i = 0; i < MAX_THREADS; i++)
+		ctx->threads[i].fd = -1;
 	ctx->mode = mode;
 	ctx->tid = tid;
 	ctx->pid = pid;
@@ -212,8 +254,14 @@ fail:
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Send the PT backend configuration to a specific device fd.
+ * This is the common implementation used by both the primary thread
+ * (ctx->ctx_fd) and additional thread devices opened via
+ * hwt_ctx_open_thread().
+ */
 static int
-hwt_ctx_set_config_pt(struct hwt_ctx *ctx, bool pause_on_mmap)
+hwt_ctx_set_config_on_fd(struct hwt_ctx *ctx, int fd, bool pause_on_mmap)
 {
 	struct hwt_set_config sc;
 	struct pt_cpu_config ptcfg;
@@ -249,6 +297,13 @@ hwt_ctx_set_config_pt(struct hwt_ctx *ctx, bool pause_on_mmap)
 	 *   1 = FilterEn (trace within range)
 	 *   2 = TraceStop (stop on entering range)
 	 */
+	/* PSB / MTC / CYC frequency fields — passed to kernel as-is. */
+	ptcfg.psb_freq = ctx->psb_freq;
+	ptcfg.mtc_freq = ctx->mtc_freq;
+	ptcfg.cyc_thresh = ctx->cyc_thresh;
+	if (ctx->mtc_freq > 0 || ctx->cyc_thresh > 0)
+		ptcfg.rtit_ctl |= RTIT_CTL_TSCEN;
+
 	ptcfg.nranges = ctx->filter.nranges;
 	for (int r = 0; r < ctx->filter.nranges && r < 2; r++) {
 		ptcfg.ip_ranges[r].start = ctx->filter.ranges[r].start;
@@ -275,8 +330,8 @@ hwt_ctx_set_config_pt(struct hwt_ctx *ctx, bool pause_on_mmap)
 	sc.config_size = sizeof(ptcfg);
 	sc.config_version = 0;
 
-	if (ioctl(ctx->ctx_fd, HWT_IOC_SET_CONFIG, &sc) != 0) {
-		warn("failed to configure trace backend");
+	if (ioctl(fd, HWT_IOC_SET_CONFIG, &sc) != 0) {
+		warn("failed to configure trace backend (fd=%d)", fd);
 		return (-1);
 	}
 
@@ -294,7 +349,8 @@ hwt_ctx_set_config(struct hwt_ctx *ctx, bool pause_on_mmap)
 	}
 
 	if (strcmp(ctx->backend_name, "pt") == 0)
-		return (hwt_ctx_set_config_pt(ctx, pause_on_mmap));
+		return (hwt_ctx_set_config_on_fd(ctx, ctx->ctx_fd,
+		    pause_on_mmap));
 
 	warnx("unsupported HWT backend '%s': refusing to send Intel PT config "
 	    "bytes to a non-PT backend", ctx->backend_name);
@@ -471,14 +527,12 @@ hwt_ctx_map_buffer(struct hwt_ctx *ctx)
 }
 
 /*
- * Query the kernel for the authoritative buffer write position.
- * This reads the value that pt_cpu_stop() saved from the hardware
- * MSR after tracing stopped — it's exact, unlike BUFFER records
- * which are delivered asynchronously and may not arrive at all.
+ * Query the kernel for the authoritative buffer write position on
+ * a specific device fd.  Used for both the primary thread and
+ * additional thread devices.
  */
-int
-hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
-    vm_offset_t *offset_out)
+static int
+hwt_ctx_bufptr_get_fd(int fd, int *page_out, vm_offset_t *offset_out)
 {
 	struct hwt_bufptr_get bg;
 	int ident;
@@ -489,14 +543,28 @@ hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
 	bg.offset = &offset;
 	bg.data = NULL;
 
-	if (ioctl(ctx->ctx_fd, HWT_IOC_BUFPTR_GET, &bg) != 0) {
-		warn("failed to read buffer position");
+	if (ioctl(fd, HWT_IOC_BUFPTR_GET, &bg) != 0) {
+		warn("failed to read buffer position (fd=%d)", fd);
 		return (-1);
 	}
 
 	*page_out = ident;
 	*offset_out = offset;
 	return (0);
+}
+
+/*
+ * Query the kernel for the authoritative buffer write position.
+ * This reads the value that pt_cpu_stop() saved from the hardware
+ * MSR after tracing stopped — it's exact, unlike BUFFER records
+ * which are delivered asynchronously and may not arrive at all.
+ */
+int
+hwt_ctx_bufptr_get(struct hwt_ctx *ctx, int *page_out,
+    vm_offset_t *offset_out)
+{
+
+	return (hwt_ctx_bufptr_get_fd(ctx->ctx_fd, page_out, offset_out));
 }
 
 /* ------------------------------------------------------------------ */
@@ -552,12 +620,65 @@ hwt_ctx_snapshot_buffer(struct hwt_ctx *ctx, const char *path,
 }
 
 /* ------------------------------------------------------------------ */
+/* Multi-thread support                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Open an additional thread's device node and set PT config.
+ * Called when a THREAD_CREATE record arrives and all_threads mode
+ * is active.  Returns 0 on success, -1 on failure (the thread may
+ * have already exited — that's normal, warn and continue).
+ */
+int
+hwt_ctx_open_thread(struct hwt_ctx *ctx, int thread_id, bool pause_on_mmap)
+{
+	char devpath[64];
+	int fd, i;
+
+	if (ctx->nthreads >= MAX_THREADS) {
+		warnx("too many threads (%d max), ignoring thread %d",
+		    MAX_THREADS, thread_id);
+		return (-1);
+	}
+
+	/* Skip if this thread_id is already open. */
+	for (i = 0; i < ctx->nthreads; i++) {
+		if (ctx->threads[i].thread_id == thread_id)
+			return (0);
+	}
+
+	snprintf(devpath, sizeof(devpath), "/dev/hwt_%d_%d",
+	    ctx->ident, thread_id);
+	fd = open(devpath, O_RDWR);
+	if (fd < 0) {
+		warn("open %s (thread may have already exited)", devpath);
+		return (-1);
+	}
+
+	ctx->threads[ctx->nthreads].fd = fd;
+	ctx->threads[ctx->nthreads].thread_id = thread_id;
+	ctx->threads[ctx->nthreads].trace_buf = NULL;
+	ctx->nthreads++;
+
+	/*
+	 * HWT_IOC_SET_CONFIG is context-scoped, not per-device.  Once the
+	 * primary thread device has started tracing, repeating SET_CONFIG on
+	 * a later-opened thread device returns ENXIO because ctx->state is
+	 * already RUNNING.  The shared ctx->config set before START applies
+	 * to all per-thread devices in this context.
+	 */
+	fprintf(stderr, "opened thread %d device %s\n", thread_id, devpath);
+	return (0);
+}
+
+/* ------------------------------------------------------------------ */
 /* Cleanup                                                             */
 /* ------------------------------------------------------------------ */
 
 void
 hwt_ctx_close(struct hwt_ctx *ctx)
 {
+	int i;
 
 	/*
 	 * Ensure tracing is stopped before closing fds.  If the caller
@@ -571,6 +692,19 @@ hwt_ctx_close(struct hwt_ctx *ctx)
 		memset(&hs, 0, sizeof(hs));
 		(void)ioctl(ctx->ctx_fd, HWT_IOC_STOP, &hs);
 	}
+
+	/* Close additional thread devices. */
+	for (i = 0; i < ctx->nthreads; i++) {
+		if (ctx->threads[i].trace_buf != NULL) {
+			munmap(ctx->threads[i].trace_buf, ctx->bufsize);
+			ctx->threads[i].trace_buf = NULL;
+		}
+		if (ctx->threads[i].fd >= 0) {
+			close(ctx->threads[i].fd);
+			ctx->threads[i].fd = -1;
+		}
+	}
+	ctx->nthreads = 0;
 
 	if (ctx->trace_buf != NULL) {
 		munmap(ctx->trace_buf, ctx->bufsize);

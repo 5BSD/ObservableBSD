@@ -31,6 +31,7 @@ int
 cmd_decode(int argc, char **argv)
 {
 	struct pt_image_info *sections;
+	struct pt_decode_opts dopts;
 	enum bsdtrace_fmt fmt;
 	struct stat sb;
 	const char *pt_path;
@@ -38,13 +39,13 @@ cmd_decode(int argc, char **argv)
 	void *buf;
 	int rc;
 	int nsections;
-	int tid;
 	int fd;
 	int ch;
 
 	fmt = FMT_TEXT;
 	sections = NULL;
 	nsections = 0;
+	memset(&dopts, 0, sizeof(dopts));
 
 	optind = 1;
 	while ((ch = getopt(argc, argv, "f:m:h")) != -1) {
@@ -58,6 +59,8 @@ cmd_decode(int argc, char **argv)
 				fmt = FMT_PROFILE;
 			else if (strcmp(optarg, "tree") == 0)
 				fmt = FMT_TREE;
+			else if (strcmp(optarg, "collapsed") == 0)
+				fmt = FMT_COLLAPSED;
 			else {
 				fprintf(stderr,
 				    "bsdtrace decode: unknown format '%s'\n",
@@ -67,6 +70,7 @@ cmd_decode(int argc, char **argv)
 			break;
 		case 'm':
 			/* Explicit .meta file path. */
+			strlcpy(meta_path, optarg, sizeof(meta_path));
 			if (meta_read_sections(optarg,
 			    &sections, &nsections) != 0)
 				return (1);
@@ -78,7 +82,7 @@ cmd_decode(int argc, char **argv)
 			    "Decode a saved .pt trace file offline.\n"
 			    "\n"
 			    "Options:\n"
-			    "  -f format   Output format: text, json, profile, or tree\n"
+			    "  -f format   Output format: text, json, profile, tree, or collapsed\n"
 			    "  -m file     Path to .meta sidecar (default: auto-discover)\n"
 			    "  -h          Show this help\n");
 			return (0);
@@ -161,9 +165,11 @@ cmd_decode(int argc, char **argv)
 		    pt_path, (long long)sb.st_size, nsections,
 		    meta_path);
 
-	tid = meta_path[0] != '\0' ? meta_read_tid(meta_path) : -1;
+	dopts.tid = meta_path[0] != '\0' ? meta_read_tid(meta_path) : -1;
+	dopts.mtc_freq = meta_path[0] != '\0' ?
+	    (uint8_t)meta_read_mtc_freq(meta_path) : 0;
 	rc = decode_pt_insn(buf, (size_t)sb.st_size, sections, nsections,
-	    fmt, tid);
+	    fmt, &dopts);
 
 	munmap(buf, sb.st_size);
 	free(sections);

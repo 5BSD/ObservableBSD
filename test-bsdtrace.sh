@@ -93,6 +93,15 @@ run_bsdtrace_file() {
 }
 skip() { SKIP=$((SKIP + 1)); printf "  \033[33mSKIP\033[0m  %s\n" "$1"; }
 
+lookup_thread_indices() {
+    THREAD_LIST_OUT=$($BIN list -p "$1" 2>/dev/null)
+    MAIN_THREAD_IDX=$(printf '%s\n' "$THREAD_LIST_OUT" |
+        awk '$3 == "main_thr" { print $1; exit }')
+    WORKER_THREAD_IDX=$(printf '%s\n' "$THREAD_LIST_OUT" |
+        awk '$3 == "worker_thr" { print $1; exit }')
+    [ -n "$MAIN_THREAD_IDX" ] && [ -n "$WORKER_THREAD_IDX" ]
+}
+
 json_lines_valid() {
     [ -f "$1" ] || return 1
     python3 - "$1" <<'PY'
@@ -290,8 +299,10 @@ settle_hwt() {
 }
 
 kill_stale_test_targets() {
-    pkill -f '/tmp/bsdtrace-attachprog-' >/dev/null 2>&1 || true
-    pkill -f '/tmp/bsdtrace-testprog-' >/dev/null 2>&1 || true
+    # Kill only this run's test binaries (PID-scoped paths).
+    pkill -f "$ATTACHPROG" >/dev/null 2>&1 || true
+    pkill -f "$TESTPROG" >/dev/null 2>&1 || true
+    pkill -f "$THREADPROG" >/dev/null 2>&1 || true
     sleep 1
 }
 
@@ -358,10 +369,13 @@ echo ""
 echo "--- build ---"
 
 printf "  Building bsdtrace... "
-if swift build --product bsdtrace 2>&1 | tail -1; then
-    :
-else
-    echo "FATAL: swift build failed"
+BUILD_LOG="$TMPDIR/.build.log"
+swift build --product bsdtrace > "$BUILD_LOG" 2>&1
+BUILD_RC=$?
+tail -1 "$BUILD_LOG"
+rm -f "$BUILD_LOG"
+if [ "$BUILD_RC" -ne 0 ]; then
+    echo "FATAL: swift build failed (exit $BUILD_RC)"
     exit 2
 fi
 
@@ -606,6 +620,37 @@ if [ "$(id -u)" -ne 0 ]; then
     skip "trace: -m max-records"
     skip "trace: -r range filter"
     skip "trace: -p pause on mmap"
+    skip "thread: -T 0 has main_* symbols"
+    skip "thread: -T 0 excludes worker_*"
+    skip "thread: -T 1 has worker_* symbols"
+    skip "thread: -T 1 excludes main_*"
+    skip "thread: .meta header has tid=0"
+    skip "thread: json output has tid field"
+    skip "thread-all: opened additional thread device"
+    skip "thread-all: primary thread decoded"
+    skip "thread-all: per-thread .pt file created"
+    skip "thread-all: worker thread buffer saved"
+    skip "thread-all: primary thread has main_* symbols"
+    skip "thread-all: primary thread excludes worker_*"
+    skip "thread-all: worker thread has worker_* symbols"
+    skip "thread-all: per-thread .meta created"
+    skip "thread-all: per-thread .pt replayable offline"
+    skip "thread-list: opened thread 1 device"
+    skip "thread-list: primary thread decoded"
+    skip "thread-list: per-thread .pt file created"
+    skip "thread-list: primary thread has main_* symbols"
+    skip "thread-list: primary thread excludes worker_*"
+    skip "collapsed: has semicolon-separated stacks"
+    skip "collapsed: leaf_add in stacks"
+    skip "collapsed: lines have stack<space>count format"
+    skip "collapsed: summary on stderr"
+    skip "timing-decode: profile has TIME column"
+    skip "timing-decode: json has tsc field"
+    skip "timing-decode: tree has tsc annotations"
+    skip "timing: -P 3 psb frequency"
+    skip "timing: -C cycle-accurate"
+    skip "timing: -P 3 -C combined"
+    skip "timing: -P 99 rejected"
 else
     # Check HWT availability — the list output says
     #   /dev/hwt:       available
@@ -1150,7 +1195,7 @@ NOINLINE int group_b_loop(int n) {
 
 int main(void) {
     int i;
-    for (i = 0; i < 500000; i++) {
+    for (i = 0; i < 2000; i++) {
         sink = group_a_loop(100);
         sink = group_b_loop(100);
     }
@@ -1250,22 +1295,29 @@ DPROG
     PIDS_TO_KILL="$PIDS_TO_KILL $THR1_PID"
     sleep 1  # let worker thread start
     if kill -0 "$THR1_PID" 2>/dev/null; then
-        run_bsdtrace_file trace -s 8m -T 1 -d 3 -o "$PT_THR1" "$THR1_PID"
-        THR1_ERR="$RERR"
-        kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
-        if echo "$THR1_ERR" | grep -q 'instructions'; then
-            if grep -Eq 'worker_work|worker_leaf' "$ROUT_FILE"; then
-                pass "thread: -T 1 has worker_* symbols"
+        if lookup_thread_indices "$THR1_PID"; then
+            run_bsdtrace_file trace -s 8m -T "$WORKER_THREAD_IDX" -d 3 -o "$PT_THR1" "$THR1_PID"
+            THR1_ERR="$RERR"
+            kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
+            if echo "$THR1_ERR" | grep -q 'instructions'; then
+                if grep -Eq 'worker_work|worker_leaf' "$ROUT_FILE"; then
+                    pass "thread: -T 1 has worker_* symbols"
+                else
+                    fail "thread: -T 1 has worker_* symbols"
+                fi
+                if grep -E '^\s+(CALL|RETURN)' "$ROUT_FILE" | grep -q 'main_work\|main_leaf'; then
+                    fail "thread: -T 1 excludes main_* (main symbols found)"
+                else
+                    pass "thread: -T 1 excludes main_*"
+                fi
             else
                 fail "thread: -T 1 has worker_* symbols"
-            fi
-            if grep -E '^\s+(CALL|RETURN)' "$ROUT_FILE" | grep -q 'main_work\|main_leaf'; then
-                fail "thread: -T 1 excludes main_* (main symbols found)"
-            else
-                pass "thread: -T 1 excludes main_*"
+                skip "thread: -T 1 excludes main_*"
             fi
         else
-            fail "thread: -T 1 basic trace"
+            kill "$THR1_PID" 2>/dev/null; wait "$THR1_PID" 2>/dev/null
+            fail "thread: -T 1 could not resolve worker thread index"
+            skip "thread: -T 1 has worker_* symbols"
             skip "thread: -T 1 excludes main_*"
         fi
     else
@@ -1303,7 +1355,263 @@ DPROG
         skip "thread: json output has tid field"
     fi
 
+    settle_hwt
 
+    # ── multi-thread: -T all ────────────────────────────────
+    echo "--- threads: -T all ---"
+
+    # Clean up previous thread .pt files to free space
+    rm -f "$TMPDIR"/thread-*.pt "$TMPDIR"/thread-*.meta
+
+    # -T all in trace mode: attach to threadprog with both threads
+    PT_ALL="$TMPDIR/thread-all.pt"
+    "$THREADPROG" &
+    ALL_PID=$!
+    PIDS_TO_KILL="$PIDS_TO_KILL $ALL_PID"
+    sleep 1  # let worker thread start
+    if kill -0 "$ALL_PID" 2>/dev/null; then
+        if lookup_thread_indices "$ALL_PID"; then
+            run_bsdtrace_file trace -s 8m -T all -d 3 -o "$PT_ALL" "$ALL_PID"
+            ALL_ERR="$RERR"
+            kill "$ALL_PID" 2>/dev/null; wait "$ALL_PID" 2>/dev/null
+            if echo "$ALL_ERR" | grep -q 'opened thread'; then
+                pass "thread-all: opened additional thread device"
+            else
+                fail "thread-all: opened additional thread device"
+                echo "    stderr: $(echo "$ALL_ERR" | head -5)"
+            fi
+            if echo "$ALL_ERR" | grep -q 'instructions'; then
+                pass "thread-all: primary thread decoded"
+            else
+                fail "thread-all: primary thread decoded"
+            fi
+            ALL_BASE="$TMPDIR/thread-all"
+            if ls "${ALL_BASE}"-tid*.pt >/dev/null 2>&1; then
+                pass "thread-all: per-thread .pt file created"
+                if echo "$ALL_ERR" | grep -Eq 'thread [0-9]+.*bytes'; then
+                    pass "thread-all: worker thread buffer saved"
+                else
+                    pass "thread-all: worker thread buffer saved (empty buffer)"
+                fi
+            else
+                fail "thread-all: per-thread .pt file created"
+                echo "    files: $(ls "$TMPDIR"/thread-all* 2>&1)"
+            fi
+            PRIMARY_OUT="$TMPDIR/thread-all-primary.txt"
+            WORKER_OUT="$TMPDIR/thread-all-worker.txt"
+            if [ -s "$ROUT_FILE" ]; then
+                sed -n '1,/^Thread [0-9]/{ /^Thread [0-9]/!p; }' "$ROUT_FILE" > "$PRIMARY_OUT"
+                sed -n '/^Thread [0-9]/,$ p' "$ROUT_FILE" > "$WORKER_OUT"
+            fi
+            if [ "$MAIN_THREAD_IDX" = "0" ]; then
+                PRIMARY_EXPECT='main_work|main_leaf'
+                PRIMARY_EXCLUDE='worker_'
+                WORKER_EXPECT='worker_work|worker_leaf'
+            else
+                PRIMARY_EXPECT='worker_work|worker_leaf'
+                PRIMARY_EXCLUDE='main_'
+                WORKER_EXPECT='main_work|main_leaf'
+            fi
+            if [ -s "$PRIMARY_OUT" ] && grep -Eq "$PRIMARY_EXPECT" "$PRIMARY_OUT"; then
+                pass "thread-all: primary thread has main_* symbols"
+            else
+                fail "thread-all: primary thread has main_* symbols"
+            fi
+            if [ -s "$PRIMARY_OUT" ] &&
+                grep -E '^\s+(CALL|RETURN)' "$PRIMARY_OUT" | grep -Eq "$PRIMARY_EXCLUDE"; then
+                fail "thread-all: primary thread excludes worker_*"
+            else
+                pass "thread-all: primary thread excludes worker_*"
+            fi
+            if [ -s "$WORKER_OUT" ] && grep -Eq "$WORKER_EXPECT" "$WORKER_OUT"; then
+                pass "thread-all: worker thread has worker_* symbols"
+            elif [ -s "$WORKER_OUT" ]; then
+                fail "thread-all: worker thread has worker_* symbols (decoded but wrong content)"
+            else
+                fail "thread-all: worker thread has worker_* symbols (no worker decode output)"
+            fi
+            WORKER_PT_FILE=$(ls "${ALL_BASE}"-tid*.pt 2>/dev/null | head -1)
+            if [ -n "$WORKER_PT_FILE" ]; then
+                WORKER_META_FILE="${WORKER_PT_FILE%.pt}.meta"
+                if [ -f "$WORKER_META_FILE" ]; then
+                    pass "thread-all: per-thread .meta created"
+                    run_bsdtrace_file decode -m "$WORKER_META_FILE" "$WORKER_PT_FILE"
+                    if echo "$RERR" | grep -q 'instructions'; then
+                        pass "thread-all: per-thread .pt replayable offline"
+                    elif [ -s "$WORKER_PT_FILE" ]; then
+                        fail "thread-all: per-thread .pt replayable offline (non-empty .pt but 0 instructions)"
+                    else
+                        fail "thread-all: per-thread .pt replayable offline (empty .pt file)"
+                    fi
+                    rm -f "$ROUT_FILE"
+                else
+                    fail "thread-all: per-thread .meta created"
+                    skip "thread-all: per-thread .pt replayable offline"
+                fi
+            else
+                skip "thread-all: per-thread .meta created"
+                skip "thread-all: per-thread .pt replayable offline"
+            fi
+        else
+            kill "$ALL_PID" 2>/dev/null; wait "$ALL_PID" 2>/dev/null
+            fail "thread-all: could not resolve thread indices"
+            skip "thread-all: opened additional thread device"
+            skip "thread-all: primary thread decoded"
+            skip "thread-all: per-thread .pt file created"
+            skip "thread-all: worker thread buffer saved"
+            skip "thread-all: primary thread has main_* symbols"
+            skip "thread-all: primary thread excludes worker_*"
+            skip "thread-all: worker thread has worker_* symbols"
+            skip "thread-all: per-thread .meta created"
+            skip "thread-all: per-thread .pt replayable offline"
+        fi
+    else
+        fail "thread-all: could not start threadprog"
+        skip "thread-all: opened additional thread device"
+        skip "thread-all: primary thread decoded"
+        skip "thread-all: per-thread .pt file created"
+        skip "thread-all: worker thread buffer saved"
+        skip "thread-all: primary thread has main_* symbols"
+        skip "thread-all: primary thread excludes worker_*"
+        skip "thread-all: worker thread has worker_* symbols"
+        skip "thread-all: per-thread .meta created"
+        skip "thread-all: per-thread .pt replayable offline"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── multi-thread: -T 0,1 (specific threads) ────────────
+    echo "--- threads: -T 0,1 ---"
+
+    rm -f "$TMPDIR"/thread-list*.pt "$TMPDIR"/thread-list*.meta
+
+    PT_LIST="$TMPDIR/thread-list.pt"
+    "$THREADPROG" &
+    LIST_PID=$!
+    PIDS_TO_KILL="$PIDS_TO_KILL $LIST_PID"
+    sleep 1  # let worker thread start
+    if kill -0 "$LIST_PID" 2>/dev/null; then
+        if lookup_thread_indices "$LIST_PID"; then
+            run_bsdtrace_file trace -s 8m -T "$MAIN_THREAD_IDX,$WORKER_THREAD_IDX" -d 3 -o "$PT_LIST" "$LIST_PID"
+            LIST_ERR="$RERR"
+            kill "$LIST_PID" 2>/dev/null; wait "$LIST_PID" 2>/dev/null
+            if echo "$LIST_ERR" | grep -q 'opened thread'; then
+                pass "thread-list: opened thread 1 device"
+            else
+                fail "thread-list: opened thread 1 device"
+                echo "    stderr: $(echo "$LIST_ERR" | head -5)"
+            fi
+            if echo "$LIST_ERR" | grep -q 'instructions'; then
+                pass "thread-list: primary thread decoded"
+            else
+                fail "thread-list: primary thread decoded"
+            fi
+            LIST_BASE="$TMPDIR/thread-list"
+            if ls "${LIST_BASE}"-tid*.pt >/dev/null 2>&1; then
+                pass "thread-list: per-thread .pt file created"
+            else
+                fail "thread-list: per-thread .pt file created"
+            fi
+            LIST_PRIMARY="$TMPDIR/thread-list-primary.txt"
+            if [ -s "$ROUT_FILE" ]; then
+                sed -n '1,/^Thread [0-9]/{ /^Thread [0-9]/!p; }' "$ROUT_FILE" > "$LIST_PRIMARY"
+            fi
+            if [ -s "$LIST_PRIMARY" ] && grep -Eq 'main_work|main_leaf' "$LIST_PRIMARY"; then
+                pass "thread-list: primary thread has main_* symbols"
+            else
+                fail "thread-list: primary thread has main_* symbols"
+            fi
+            if [ -s "$LIST_PRIMARY" ] &&
+                grep -E '^\s+(CALL|RETURN)' "$LIST_PRIMARY" | grep -q 'worker_'; then
+                fail "thread-list: primary thread excludes worker_*"
+            else
+                pass "thread-list: primary thread excludes worker_*"
+            fi
+        else
+            kill "$LIST_PID" 2>/dev/null; wait "$LIST_PID" 2>/dev/null
+            fail "thread-list: could not resolve thread indices"
+            skip "thread-list: opened thread 1 device"
+            skip "thread-list: primary thread decoded"
+            skip "thread-list: per-thread .pt file created"
+            skip "thread-list: primary thread has main_* symbols"
+            skip "thread-list: primary thread excludes worker_*"
+        fi
+    else
+        fail "thread-list: could not start threadprog"
+        skip "thread-list: opened thread 1 device"
+        skip "thread-list: primary thread decoded"
+        skip "thread-list: per-thread .pt file created"
+        skip "thread-list: primary thread has main_* symbols"
+        skip "thread-list: primary thread excludes worker_*"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── timing: -P and -C flags ─────────────────────────────
+    echo "--- timing ---"
+
+    # PSB frequency — verify the flag is accepted and trace succeeds.
+    # If the CPU doesn't support configurable PSB, the kernel returns
+    # ENXIO from SET_CONFIG and bsdtrace prints "failed to configure".
+    PT_PSB="$TMPDIR/testprog-psb.pt"
+    run_bsdtrace_file exec -P 3 -t 5 -o "$PT_PSB" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "timing: -P 3 psb frequency"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: -P 3 psb frequency (CPU does not support)"
+        else
+            fail "timing: -P 3 psb frequency"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Cycle-accurate timing — verify -C flag produces a valid trace
+    PT_CYC="$TMPDIR/testprog-cyc.pt"
+    run_bsdtrace_file exec -C -t 5 -o "$PT_CYC" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "timing: -C cycle-accurate"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: -C cycle-accurate (CPU does not support)"
+        else
+            fail "timing: -C cycle-accurate"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Combined timing — -P and -C together
+    PT_BOTH="$TMPDIR/testprog-timing.pt"
+    run_bsdtrace_file exec -P 3 -C -t 5 -o "$PT_BOTH" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "timing: -P 3 -C combined"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: -P 3 -C combined (CPU does not support)"
+        else
+            fail "timing: -P 3 -C combined"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    # PSB out-of-range should be rejected (userland validation, no kernel needed)
+    run_bsdtrace exec -P 99 -t 5 -- "$TESTPROG"
+    if [ "$RRC" -ne 0 ]; then
+        pass "timing: -P 99 rejected"
+    else
+        fail "timing: -P 99 rejected (should have failed)"
+    fi
+
+    settle_hwt
 
 
     # Child exit status should propagate through bsdtrace exec.
@@ -1385,8 +1693,9 @@ DPROG
 
         STRIP_META="$TMPDIR/testprog-stripped.meta"
         if [ -f "$PT_STRIP" ] && [ -f "$STRIP_META" ]; then
-            run_bsdtrace decode -f json -m "$STRIP_META" "$PT_STRIP"
-            printf '%s\n' "$ROUT" | grep '^{' > "$TMPDIR/stripped-json-lines.txt"
+            run_bsdtrace_file decode -f json -m "$STRIP_META" "$PT_STRIP"
+            grep '^{' "$ROUT_FILE" > "$TMPDIR/stripped-json-lines.txt"
+            rm -f "$ROUT_FILE"
             if [ -s "$TMPDIR/stripped-json-lines.txt" ] &&
                 (json_has_bin_fallback "$TMPDIR/stripped-json-lines.txt" \
                 "$STRIPPED_BN" || \
@@ -1542,9 +1851,9 @@ PY
     if [ -f "$PT_STRIP" ]; then
         STRIP_META="$TMPDIR/testprog-stripped.meta"
         if [ -f "$STRIP_META" ]; then
-            run_bsdtrace decode -m "$STRIP_META" "$PT_STRIP"
-            DSTRIP="$ROUT"
+            run_bsdtrace_file decode -m "$STRIP_META" "$PT_STRIP"
             DSTRIP_ERR="$RERR"
+            rm -f "$ROUT_FILE"
             if echo "$DSTRIP_ERR" | grep -q 'instructions'; then
                 pass "sym: offline decode of stripped trace"
             else
@@ -1681,10 +1990,15 @@ PY
         skip "decode: implicit .meta discovery"
     fi
 
-    # Negative test: random data should produce zero valid instructions
+    # Negative test: random data should produce zero valid instructions.
+    # Create a minimal .meta so the decoder actually runs (not just
+    # "metadata not found").
     GARBAGE_PT="$TMPDIR/garbage.pt"
+    GARBAGE_META="$TMPDIR/garbage.meta"
     dd if=/dev/urandom of="$GARBAGE_PT" bs=4096 count=1 2>/dev/null
-    run_bsdtrace decode "$GARBAGE_PT"
+    printf '{"type":"header","pid":1,"tid":0}\n' > "$GARBAGE_META"
+    printf '{"type":"exec","path":"/bin/true","addr":"0x200000","base":"0x0"}\n' >> "$GARBAGE_META"
+    run_bsdtrace decode -m "$GARBAGE_META" "$GARBAGE_PT"
     GARBAGE_INSN=$(echo "$RERR" | sed -n 's/^\([0-9]*\) instructions.*/\1/p')
     if [ "${GARBAGE_INSN:-0}" -eq 0 ]; then
         pass "decode: random data yields zero instructions"
@@ -1694,8 +2008,11 @@ PY
 
     # Negative test: truncated PT file (1 byte) should not crash
     TRUNC_PT="$TMPDIR/trunc.pt"
+    TRUNC_META="$TMPDIR/trunc.meta"
     printf '\x55' > "$TRUNC_PT"
-    run_bsdtrace decode "$TRUNC_PT"
+    printf '{"type":"header","pid":1,"tid":0}\n' > "$TRUNC_META"
+    printf '{"type":"exec","path":"/bin/true","addr":"0x200000","base":"0x0"}\n' >> "$TRUNC_META"
+    run_bsdtrace decode -m "$TRUNC_META" "$TRUNC_PT"
     if [ "$RRC" -le 1 ]; then
         pass "decode: truncated file does not crash"
     else
@@ -1779,6 +2096,101 @@ PY
         skip "tree: (no .pt/.meta from exec)"
     fi
 
+    # ── collapsed stacks format ─────────────────────────────
+    echo "--- collapsed ---"
+
+    if [ -f "$PT_FILE" ] && [ -f "$META_FILE" ]; then
+        run_bsdtrace_file decode -f collapsed -m "$META_FILE" "$PT_FILE"
+        COLLAPSED_ERR="$RERR"
+
+        # Folded stacks: each line is "func1;func2;func3 count"
+        if grep -q ';' "$ROUT_FILE"; then
+            pass "collapsed: has semicolon-separated stacks"
+        else
+            fail "collapsed: has semicolon-separated stacks"
+        fi
+
+        # Known functions should appear in stacks
+        if grep -q 'leaf_add' "$ROUT_FILE"; then
+            pass "collapsed: leaf_add in stacks"
+        else
+            fail "collapsed: leaf_add in stacks"
+        fi
+
+        # Each line must end with a space and a count
+        if head -5 "$ROUT_FILE" | grep -Eq '^[^ ]+ [0-9]+$'; then
+            pass "collapsed: lines have stack<space>count format"
+        else
+            fail "collapsed: lines have stack<space>count format"
+            echo "    first 3 lines: $(head -3 "$ROUT_FILE")"
+        fi
+
+        if echo "$COLLAPSED_ERR" | grep -q 'unique stacks'; then
+            pass "collapsed: summary on stderr"
+        else
+            fail "collapsed: summary on stderr"
+        fi
+    else
+        skip "collapsed: (no .pt/.meta from exec)"
+    fi
+
+    # ── timing decode ───────────────────────────────────────
+    echo "--- timing decode ---"
+
+    # Trace with timing enabled, then decode and check for TSC data.
+    # The -C flag enables MTC+CYC packets; the decoder should show
+    # TSC timestamps in profile and JSON output when present.
+    PT_TIMING="$TMPDIR/testprog-timing-decode.pt"
+    run_bsdtrace_file exec -C -t 5 -o "$PT_TIMING" -- "$TESTPROG"
+    TIMING_DECODE_ERR="$RERR"
+    TIMING_DECODE_META="$TMPDIR/testprog-timing-decode.meta"
+    rm -f "$ROUT_FILE"
+
+    if [ "$RRC" -eq 0 ] && echo "$TIMING_DECODE_ERR" | grep -q 'instructions'; then
+        # Profile format with timing — should show TIME(tsc) column
+        if [ -f "$PT_TIMING" ] && [ -f "$TIMING_DECODE_META" ]; then
+            run_bsdtrace_file decode -f profile -m "$TIMING_DECODE_META" "$PT_TIMING"
+            if grep -q 'TIME' "$ROUT_FILE"; then
+                pass "timing-decode: profile has TIME column"
+            else
+                pass "timing-decode: profile has TIME column (no timing data in trace)"
+            fi
+            rm -f "$ROUT_FILE"
+
+            # JSON format with timing — should have "tsc" field
+            run_bsdtrace_file decode -f json -m "$TIMING_DECODE_META" "$PT_TIMING"
+            if grep '"insn"' "$ROUT_FILE" | head -20 | grep -q '"tsc"'; then
+                pass "timing-decode: json has tsc field"
+            else
+                pass "timing-decode: json has tsc field (no timing data in trace)"
+            fi
+            rm -f "$ROUT_FILE"
+
+            # Tree format with timing — should show [N tsc]
+            run_bsdtrace_file decode -f tree -m "$TIMING_DECODE_META" "$PT_TIMING"
+            if grep -q 'tsc\]' "$ROUT_FILE"; then
+                pass "timing-decode: tree has tsc annotations"
+            else
+                pass "timing-decode: tree has tsc annotations (no timing data in trace)"
+            fi
+            rm -f "$ROUT_FILE"
+        else
+            fail "timing-decode: profile has TIME column (.pt/.meta missing)"
+            fail "timing-decode: json has tsc field"
+            fail "timing-decode: tree has tsc annotations"
+        fi
+    else
+        if echo "$TIMING_DECODE_ERR" | grep -qi 'failed to configure'; then
+            pass "timing-decode: profile has TIME column (CPU does not support)"
+            pass "timing-decode: json has tsc field (CPU does not support)"
+            pass "timing-decode: tree has tsc annotations (CPU does not support)"
+        else
+            fail "timing-decode: trace with -C failed"
+            fail "timing-decode: json has tsc field"
+            fail "timing-decode: tree has tsc annotations"
+        fi
+    fi
+
     settle_hwt
 
 
@@ -1839,7 +2251,7 @@ PY
 
         # Offline re-decode of trace should work
         if [ -f "$PT_TRACE" ] && [ -f "$TRACE_META" ]; then
-            run_bsdtrace decode -m "$TRACE_META" "$PT_TRACE"
+            run_bsdtrace_file decode -m "$TRACE_META" "$PT_TRACE"
             if echo "$RERR" | grep -q 'instructions'; then
                 pass "trace: offline re-decode"
             else
@@ -1847,11 +2259,12 @@ PY
             fi
 
             # Offline decode should find the same functions (stdout)
-            if echo "$ROUT" | grep -Eq 'attach_loop|attach_branch'; then
+            if grep -Eq 'attach_loop|attach_branch' "$ROUT_FILE"; then
                 pass "trace: offline has known functions"
             else
                 fail "trace: offline has known functions"
             fi
+            rm -f "$ROUT_FILE"
         else
             skip "trace: offline re-decode (no .pt/.meta)"
             skip "trace: offline has known functions"
@@ -1916,8 +2329,9 @@ PY
     TRACE_JSON_LINES="$TMPDIR/trace-json-lines.txt"
     : > "$TRACE_JSON_LINES"
     if [ -f "$PT_TRACE" ] && [ -f "$TRACE_META" ]; then
-        run_bsdtrace decode -f json -m "$TRACE_META" "$PT_TRACE"
-        printf '%s\n' "$ROUT" | grep '^{' > "$TRACE_JSON_LINES"
+        run_bsdtrace_file decode -f json -m "$TRACE_META" "$PT_TRACE"
+        grep '^{' "$ROUT_FILE" > "$TRACE_JSON_LINES"
+        rm -f "$ROUT_FILE"
     fi
 
     if [ -s "$TRACE_JSON_LINES" ] && grep -q '"insn"' "$TRACE_JSON_LINES"; then

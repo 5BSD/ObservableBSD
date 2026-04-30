@@ -284,10 +284,14 @@ With `-T all`, additional per-thread files are saved:
 | `-d seconds` | exec, trace | Trace duration (`-t` also accepted; exec default: 30) |
 | `-s size` | exec, trace | PT buffer size, e.g. 8m, 64m (default: 64m) |
 | `-o file` | exec, trace | Output path for .pt file |
-| `-r range` | exec, trace | IP filter: `0xstart:0xend` or `function_name` (up to 2) |
+| `-r range` | exec, trace | IP filter: `0xstart:0xend` or `function_name` (up to 2); prefix with `stop:` for TraceStop |
 | `-T tid` | exec, trace | Thread index (default: 0), comma list (`0,1,3`), or `all` |
 | `-P freq` | exec, trace | PSB sync frequency 0-15 (lower = more sync points, 0 = default) |
 | `-C` | exec, trace | Enable timing packets (MTC + cycle-accurate) |
+| `-M freq` | exec, trace | Explicit MTC frequency 1-15 |
+| `-Y thresh` | exec, trace | Explicit CYC threshold 1-15 |
+| `-W` | exec, trace | Enable PTWRITE trace markers |
+| `-K` | exec, trace | Include OS/kernel-mode tracing |
 | `-m count` | exec, trace | Stop after N HWT records |
 | `-b backend` | exec, trace | HWT backend (default: auto-detect) |
 | `-A` | exec | Disable ASLR for the child process |
@@ -301,28 +305,29 @@ With `-T all`, additional per-thread files are saved:
 | Format | Flag | Description |
 |--------|------|-------------|
 | Text | `-f text` (default) | Symbolized control-flow events (CALL, RETURN, CJMP, SYSCALL) |
-| JSON | `-f json` | One JSON object per event, with `sym`, `ip`, `off`, `bin`, `tid`, `tsc` fields |
+| JSON | `-f json` | Line-oriented JSON. Live tracing emits HWT records (`kind`) followed by decoded instruction events (`insn`). |
 | Profile | `-f profile` | Per-function call/return/branch counts with TSC timing when `-C` is used |
 | Tree | `-f tree` | Indented call tree with counts and TSC timing |
 | Collapsed | `-f collapsed` | Folded stacks for [flamegraph.pl](https://github.com/brendangregg/FlameGraph) / Speedscope |
 
-**ARM (CoreSight ETM) — not currently planned:**
+Typical decoded instruction JSON includes fields such as `insn`, `ip`,
+`sym`, `off`, `bin`, `tid`, and `tsc` when timing data is available.
 
-FreeBSD 15 ships ~2,500 lines of CoreSight driver code
-(`sys/arm64/coresight/`) covering ETM4x, TMC, funnels, and replicators,
-with both FDT and ACPI discovery.  However these drivers are a standalone
-subsystem — they predate the HWT framework and are **not wired to
-`hwt_backend_register()`**.  Bridging them would require a ~800-line
-kernel module (similar in scope to `pt.c`) plus OpenCSD integration for
-trace decoding on the userspace side.
+### PTWRITE helper
 
-The blocker is hardware: Raspberry Pi boards do not expose CoreSight
-register blocks in their device tree or firmware, so they cannot be used
-for testing.  Suitable boards (Ampere Altra, Qualcomm Snapdragon dev
-kits, NXP i.MX8M, ARM N1SDP) are not available to us.  The bsdtrace
-userspace code already detects `coresight` and `spe` backends
-(`hwt.c`, `cmd_list.c`), so if a kernel backend appears the tool will
-pick it up with minimal changes.
+The source tree includes [`Sources/bsdtrace/bsdtrace_ptwrite.h`](Sources/bsdtrace/bsdtrace_ptwrite.h),
+a small x86_64 helper for emitting PTWRITE markers from traced code:
+
+```c
+#include "bsdtrace_ptwrite.h"
+
+bsdtrace_ptwrite(0x123456789abcdef0ULL);
+bsdtrace_ptwrite32(0x89abcdefU);
+```
+
+Use it only from code you know will run under `bsdtrace -W`.  The
+instruction will fault if PTWRITE is not supported by the CPU or if the
+current process is not being traced with PTWRITE enabled.
 
 ### Using bsdtrace with other tools
 
@@ -384,9 +389,9 @@ doas sh reload-hwt.sh
 
 #### Kernel patches (required)
 
-The stock hwt.ko and pt.ko modules have race conditions, data-loss
-bugs, and missing features.  All patches are applied by a single
-idempotent script:
+The stock `hwt.ko` and `pt.ko` modules need local fixes for stable
+tracing.  The project keeps them in `KernelConf/`, and the normal way to
+apply them is the idempotent helper script:
 
 ```sh
 # Apply remaining patches (TAILQ_FIRST fix + timing) and rebuild
@@ -403,100 +408,17 @@ doas sh KernelConf/apply-remaining-patches.sh
 doas sh reload-hwt.sh
 ```
 
-**Applied patches:**
+Today those patches cover:
 
-1. **hwt_owner.c** — TOCTOU fix: set `ctx->state = 0` before
-   `hwt_contexthash_remove()` to prevent use-after-free on teardown.
-
-2. **pt_cpu_start** — NULL check replacing MPASS assertion.
-
-3. **pt_send_buffer_record** — NULL guard for PMI/SWI teardown race.
-
-4. **pt_backend_enable** — Removed the TAILQ_FIRST restore that
-   always picked thread 0's pt_ctx, clobbering the correct per-thread
-   value set by pt_backend_configure.  This was the root cause of
-   GPF panics and cross-thread PT data contamination in multi-threaded
-   traces.
-
-5. **pt_update_buffer** — Read buffer position from XSAVE save area
-   instead of MSR (Intel SDM 36.3.5.2: XSAVES sets MaskOrTableOffset
-   to max value).
-
-6. **pt_topa_intr** — Runtime NULL checks replacing KASSERTs for
-   ctx and topa_hw teardown races.
-
-7. **pt_backend_stop_op** — Stop implementation enabling HWT_IOC_STOP.
-
-8. **pt_backend_configure** — PSB/MTC/CYC timing support: validates
-   frequency values against CPUID leaf 0x14 capability bitmaps and
-   encodes into RTIT_CTL bit fields.  Enables `-P` and `-C` flags.
-
-9. **PT_SUPPORTED_FLAGS** — Widened to include RTIT_CTL_CYCEN,
-   MTC_FREQ_M, CYC_THRESH_M, PSB_FREQ_M so timing bits survive the
-   initial mask in pt_backend_configure.
-
-### PT kernel roadmap
-
-`bsdtrace` already has the basic PT backend shape in place: thread-mode
-tracing via HWT, ToPA buffers, 2-range IP filtering, PSB/MTC/CYC
-configuration, per-thread save files, and offline replay.  The
-remaining PT work is mostly kernel-side feature enablement and cleanup.
-
-**Immediate priority: unlock decoded TSC timestamps**
-
-`-C` already requests timing and the packet stream now contains `MTC`
-and `CYC`, but decoded `tsc` output still depends on actual `TSC`
-packets being emitted.  libipt will not return time until a `TSC`
-packet has been seen.  The current running `pt.ko` still needs:
-
-- `RTIT_CTL_TSCEN` added to `PT_SUPPORTED_FLAGS`
-- `RTIT_CTL_TSCEN` preserved through `pt_backend_configure()`
-- `RTIT_CTL_TSCEN` ORed in when `mtc_freq` or `cyc_thresh` is enabled
-
-Once that patched module is rebuilt and reloaded, the existing
-userspace decoder path should start filling `tsc` in JSON, profile,
-and tree output without further format changes.
-
-**Kernel/PT features we can realistically implement**
-
-- `TSCEN` / `TSC` packets: required for decoded timestamp output.
-- `PTWRITE` (`PTW` packets): user-directed trace markers from software.
-- `FUPONPTW`: emit `FUP` context with `PTWRITE` so markers carry IP context.
-- `OS` tracing: allow kernel-space tracing in addition to user-space-only runs.
-- Richer address-filter modes: the current backend uses simple
-  “trace within range” filtering; hardware also supports TraceStop-style
-  address configuration.
-- Better overflow / wrap reporting: make `OVF`, partial buffers, and
-  lost timing packets first-class diagnostics instead of indirect warnings.
-- Explicit timing controls: surface `mtc_freq` and `cyc_thresh`
-  separately in the CLI instead of treating `-C` as one fixed preset.
-- Single-range output backend: larger backend project; current driver
-  hard-requires ToPA even on CPUs that support single-range mode.
-
-**Features that exist in Intel PT but are CPU-gated**
-
-Availability is determined by CPUID leaf `0x14`, not just by decoder
-support.  The kernel exposes those capability bits in
-`x86/include/specialreg.h`.
-
-- Power event tracing (`PWREVTEN` -> `PWRE` / `PWRX` / `MWAIT` packets):
-  useful for low-power and sleep-state analysis, but only on CPUs with
-  `CPUPT_PWR`.
-- `PTWRITE` requires `CPUPT_PRW`.
-- TNT suppression (`DIS_TNT`) requires `CPUPT_DIS_TNT`.
-- Trace Transport output requires `CPUPT_TT_OUT`; current driver does
-  not target that output path.
-
-**Current test hardware note**
-
-On the 12th Gen Intel test host used during bring-up, CPUID reports:
-
-- supported: ToPA, multiple ToPA outputs, configurable PSB, MTC,
-  cycle-accurate mode, CR3/IP filtering, PTWRITE
-- not supported: power event tracing, TNT suppression, Trace Transport output
-
-So the highest-value next PT feature after `TSCEN` is `PTWRITE`, not
-power-management packets.
+- teardown and race fixes in `hwt_owner.c` and `pt.c`
+- reliable stop/snapshot support for `HWT_IOC_STOP`
+- correct PT buffer position tracking from XSAVE state
+- per-thread tracing fixes for `-T all` and explicit thread lists
+- timing control support for `-P`, `-C`, `-M`, and `-Y`
+- PTWRITE / FUPONPTW support for `-W`
+- TraceStop / per-range filter modes for `stop:...`
+- overflow and wrap reporting improvements
+- hooks and metadata fixes needed for offline replay
 
 #### Crash dump inspection
 
@@ -562,9 +484,11 @@ sudo bsdinstruments watch syscall-counts --format otel --duration 60
 swift build
 ```
 
-Builds all executables into `.build/debug/`:
-`bsdinstruments`, `hwtlm`, `bsdtrace`, and the test helper programs
-(`bsdtrace-testprog`, `bsdtrace-attachprog`, `bsdtrace-floodprog`).
+Builds the main executables into `.build/debug/`:
+`bsdinstruments`, `hwtlm`, and `bsdtrace`.
+
+The `bsdtrace` integration script compiles its helper targets directly
+with `cc` during `test-bsdtrace.sh` rather than through SwiftPM.
 
 ## Testing
 
@@ -583,9 +507,9 @@ sudo chown -R $(id -un):$(id -gn) .build
 doas sh test-bsdtrace.sh
 ```
 
-The bsdtrace test suite (`test-bsdtrace.sh`) has two tiers:
-- **No-root**: version, list, decode error handling
-- **Root**: exec, trace, decode, threads, timing with real PT hardware
+The `bsdtrace` integration suite (`test-bsdtrace.sh`) has two tiers:
+- **No-root**: CLI/help surface, list output, header compile checks, decode error handling
+- **Root**: exec, trace, offline replay, threads, timing, PTWRITE, overflow, and TraceStop on real PT hardware
 
 ## Dependencies
 

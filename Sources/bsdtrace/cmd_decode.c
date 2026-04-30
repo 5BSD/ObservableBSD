@@ -37,6 +37,7 @@ cmd_decode(int argc, char **argv)
 	const char *pt_path;
 	char meta_path[MAXPATHLEN] = "";
 	void *buf;
+	bool meta_explicit;
 	int rc;
 	int nsections;
 	int fd;
@@ -45,6 +46,7 @@ cmd_decode(int argc, char **argv)
 	fmt = FMT_TEXT;
 	sections = NULL;
 	nsections = 0;
+	meta_explicit = false;
 	memset(&dopts, 0, sizeof(dopts));
 
 	optind = 1;
@@ -71,6 +73,7 @@ cmd_decode(int argc, char **argv)
 		case 'm':
 			/* Explicit .meta file path. */
 			strlcpy(meta_path, optarg, sizeof(meta_path));
+			meta_explicit = true;
 			if (meta_read_sections(optarg,
 			    &sections, &nsections) != 0)
 				return (1);
@@ -104,7 +107,7 @@ cmd_decode(int argc, char **argv)
 	pt_path = argv[0];
 
 	/* If no explicit -m, derive .meta path from .pt path. */
-	if (sections == NULL) {
+	if (!meta_explicit) {
 		size_t len = strlen(pt_path);
 
 		if (len > 3 && strcmp(pt_path + len - 3, ".pt") == 0) {

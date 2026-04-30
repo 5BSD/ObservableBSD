@@ -1585,6 +1585,11 @@ decode_pt_insn(const void *buf, size_t len,
 		    nomaps, errors);
 	}
 
+	if (errors > 0)
+		fprintf(stderr,
+		    "warning: decoder encountered %d error(s) — "
+		    "possible PT buffer wrap/overflow or truncated trace\n",
+		    errors);
 	if (ovf_count > 0)
 		fprintf(stderr,
 		    "warning: %d overflow event(s) — trace data was lost\n",

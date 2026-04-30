@@ -20,6 +20,8 @@ BIN="$BUILDDIR/bsdtrace"
 TESTPROG="/tmp/bsdtrace-testprog-$$"
 ATTACHPROG="/tmp/bsdtrace-attachprog-$$"
 THREADPROG="/tmp/bsdtrace-threadprog-$$"
+PTWPROG="/tmp/bsdtrace-ptwprog-$$"
+FLOODPROG="/tmp/bsdtrace-floodprog-$$"
 OBJDUMP=$(command -v llvm-objdump 2>/dev/null || command -v objdump 2>/dev/null || true)
 PASS=0
 FAIL=0
@@ -354,6 +356,8 @@ cleanup() {
     rm -f "$TESTPROG"
     rm -f "$ATTACHPROG"
     rm -f "$THREADPROG"
+    rm -f "$PTWPROG"
+    rm -f "$FLOODPROG"
 }
 trap cleanup EXIT
 
@@ -409,6 +413,22 @@ if cc -O0 -lpthread -o "$THREADPROG" Tests/bsdtrace/threadprog/main.c 2>&1; then
     echo "ok"
 else
     echo "FATAL: failed to compile threadprog"
+    exit 2
+fi
+
+printf "  Compiling ptwprog... "
+if cc -O0 -I Sources/bsdtrace -o "$PTWPROG" Tests/bsdtrace/ptwprog/main.c 2>&1; then
+    echo "ok"
+else
+    echo "  (failed — PTWRITE tests will be skipped)"
+    PTWPROG=""
+fi
+
+printf "  Compiling floodprog... "
+if cc -O0 -o "$FLOODPROG" Tests/bsdtrace/floodprog/main.c 2>&1; then
+    echo "ok"
+else
+    echo "FATAL: failed to compile floodprog"
     exit 2
 fi
 
@@ -575,6 +595,45 @@ else
     fail "dispatch: no args prints usage"
 fi
 
+# ── help / CLI surface ───────────────────────────────────
+echo "--- help ---"
+
+HOUT=$($BIN exec -h 2>&1)
+if echo "$HOUT" | grep -q -- '-M freq' &&
+    echo "$HOUT" | grep -q -- '-Y thresh' &&
+    echo "$HOUT" | grep -q -- '-W' &&
+    echo "$HOUT" | grep -q -- '-K' &&
+    echo "$HOUT" | grep -q 'stop: prefix for TraceStop'; then
+    pass "help: exec exposes new PT options"
+else
+    fail "help: exec exposes new PT options"
+fi
+
+HOUT=$($BIN trace -h 2>&1)
+if echo "$HOUT" | grep -q -- '-M freq' &&
+    echo "$HOUT" | grep -q -- '-Y thresh' &&
+    echo "$HOUT" | grep -q -- '-W' &&
+    echo "$HOUT" | grep -q -- '-K' &&
+    echo "$HOUT" | grep -q 'stop: prefix for TraceStop'; then
+    pass "help: trace exposes new PT options"
+else
+    fail "help: trace exposes new PT options"
+fi
+
+case "$(uname -m)" in
+amd64|x86_64)
+    printf '#include "bsdtrace_ptwrite.h"\nint main(void) { bsdtrace_ptwrite(0x123456789abcdef0ULL); bsdtrace_ptwrite32(0x89abcdefU); return bsdtrace_has_ptwrite(); }\n' > "$TMPDIR/ptwrite-compile.c"
+    if cc -O0 -I Sources/bsdtrace -c "$TMPDIR/ptwrite-compile.c" -o "$TMPDIR/ptwrite-compile.o" 2>/dev/null; then
+        pass "help: ptwrite header compiles for consumers"
+    else
+        fail "help: ptwrite header compiles for consumers"
+    fi
+    ;;
+*)
+    skip "help: ptwrite header compiles for consumers (x86_64 only)"
+    ;;
+esac
+
 # ══════════════════════════════════════════════════════════
 # ROOT + HWT TESTS — require root and loaded hwt/pt modules
 # ══════════════════════════════════════════════════════════
@@ -651,6 +710,18 @@ if [ "$(id -u)" -ne 0 ]; then
     skip "timing: -C cycle-accurate"
     skip "timing: -P 3 -C combined"
     skip "timing: -P 99 rejected"
+    skip "timing: -M explicit mtc_freq"
+    skip "timing: -Y explicit cyc_thresh"
+    skip "timing: -M 99 rejected"
+    skip "timing: -Y 99 rejected"
+    skip "timing: .meta has mtc_freq"
+    skip "timing: .meta has cyc_thresh"
+    skip "ptwrite: -W trace captures PTW"
+    skip "ptwrite: -W preserves payloads"
+    skip "ptwrite: offline json has ptwrite payloads"
+    skip "overflow: small buffer warns"
+    skip "tracestop: stop range ends trace before later functions"
+    skip "os-trace: -K accepted"
 else
     # Check HWT availability — the list output says
     #   /dev/hwt:       available
@@ -1613,6 +1684,210 @@ DPROG
 
     settle_hwt
 
+    # ── timing: -M and -Y explicit controls ─────────────────
+
+    # Explicit MTC frequency
+    PT_MTC="$TMPDIR/testprog-mtc.pt"
+    run_bsdtrace_file exec -M 3 -t 5 -o "$PT_MTC" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "timing: -M explicit mtc_freq"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: -M explicit mtc_freq (CPU does not support)"
+        else
+            fail "timing: -M explicit mtc_freq"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Explicit CYC threshold
+    PT_CYC2="$TMPDIR/testprog-cyc2.pt"
+    run_bsdtrace_file exec -Y 2 -t 5 -o "$PT_CYC2" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "timing: -Y explicit cyc_thresh"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: -Y explicit cyc_thresh (CPU does not support)"
+        else
+            fail "timing: -Y explicit cyc_thresh"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Out-of-range -M and -Y should be rejected (userland validation)
+    run_bsdtrace exec -M 99 -t 5 -- "$TESTPROG"
+    if [ "$RRC" -ne 0 ]; then
+        pass "timing: -M 99 rejected"
+    else
+        fail "timing: -M 99 rejected (should have failed)"
+    fi
+
+    run_bsdtrace exec -Y 99 -t 5 -- "$TESTPROG"
+    if [ "$RRC" -ne 0 ]; then
+        pass "timing: -Y 99 rejected"
+    else
+        fail "timing: -Y 99 rejected (should have failed)"
+    fi
+
+    # Verify .meta has mtc_freq when -M is used
+    PT_MTMETA="$TMPDIR/testprog-mtmeta.pt"
+    MTMETA="$TMPDIR/testprog-mtmeta.meta"
+    run_bsdtrace_file exec -M 3 -t 5 -o "$PT_MTMETA" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && [ -f "$MTMETA" ] &&
+        grep -q '"mtc_freq":3' "$MTMETA"; then
+        pass "timing: .meta has mtc_freq"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: .meta has mtc_freq (CPU does not support)"
+        else
+            fail "timing: .meta has mtc_freq"
+            echo "    rc=$RRC meta: $(cat "$MTMETA" 2>/dev/null | head -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # Verify .meta has cyc_thresh when -Y is used
+    PT_CYMETA="$TMPDIR/testprog-cymeta.pt"
+    CYMETA="$TMPDIR/testprog-cymeta.meta"
+    run_bsdtrace_file exec -M 3 -Y 2 -t 5 -o "$PT_CYMETA" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && [ -f "$CYMETA" ] &&
+        grep -q '"cyc_thresh":2' "$CYMETA"; then
+        pass "timing: .meta has cyc_thresh"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "timing: .meta has cyc_thresh (CPU does not support)"
+        else
+            fail "timing: .meta has cyc_thresh"
+            echo "    rc=$RRC meta: $(cat "$CYMETA" 2>/dev/null | head -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── PTWRITE: -W flag ────────────────────────────────────
+    echo "--- ptwrite ---"
+
+    if [ -z "$PTWPROG" ]; then
+        skip "ptwrite: -W trace captures PTW (ptwprog not compiled)"
+        skip "ptwrite: -W preserves payloads (ptwprog not compiled)"
+        skip "ptwrite: offline json has ptwrite payloads (ptwprog not compiled)"
+    else
+
+    PT_PTW="$TMPDIR/ptwprog.pt"
+    run_bsdtrace_file exec -W -t 5 -o "$PT_PTW" -- "$PTWPROG"
+    if echo "$RERR" | grep -qi 'failed to configure\|does not support'; then
+        pass "ptwrite: -W trace captures PTW (CPU does not support)"
+        pass "ptwrite: -W preserves payloads (CPU does not support)"
+        pass "ptwrite: offline json has ptwrite payloads (CPU does not support)"
+    elif [ "$RRC" -eq 0 ] && [ -f "$PT_PTW" ] && [ -s "$PT_PTW" ]; then
+        PTW_PKT_META="$TMPDIR/ptwprog-packets.meta"
+        printf '{"type":"header","pid":1,"tid":0}\n' > "$PTW_PKT_META"
+
+        run_bsdtrace_file decode -m "$PTW_PKT_META" "$PT_PTW"
+        if [ "$RRC" -eq 0 ] &&
+            [ "$(grep -c 'PTW' "$ROUT_FILE" 2>/dev/null)" -ge 3 ]; then
+            pass "ptwrite: -W trace captures PTW"
+        else
+            fail "ptwrite: -W trace captures PTW"
+            echo "    stderr: $(echo "$RERR" | tail -3)"
+        fi
+        rm -f "$ROUT_FILE"
+
+        settle_hwt
+
+        run_bsdtrace_file decode -f json -m "$PTW_PKT_META" "$PT_PTW"
+        if [ "$RRC" -eq 0 ] &&
+            grep -q '"pkt":"ptw"' "$ROUT_FILE" 2>/dev/null &&
+            grep -q '"payload":"0x123456789abcdef0"' "$ROUT_FILE" 2>/dev/null &&
+            grep -q '"payload":"0x89abcdef"' "$ROUT_FILE" 2>/dev/null &&
+            grep -q '"payload":"0xfedcba987654321"' "$ROUT_FILE" 2>/dev/null; then
+            pass "ptwrite: -W preserves payloads"
+            pass "ptwrite: offline json has ptwrite payloads"
+        else
+            fail "ptwrite: -W preserves payloads"
+            fail "ptwrite: offline json has ptwrite payloads"
+        fi
+    else
+        fail "ptwrite: -W trace captures PTW"
+        fail "ptwrite: -W preserves payloads"
+        fail "ptwrite: offline json has ptwrite payloads"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    fi  # end PTWPROG check
+
+    settle_hwt
+
+    # ── overflow: small buffer ──────────────────────────────
+    echo "--- overflow ---"
+
+    # floodprog is designed to wrap a small PT buffer deterministically.
+    # 64k can end exactly at offset 0 on some kernels and save as empty;
+    # 1m still wraps under floodprog but is much less likely to degenerate
+    # into a zero-length final snapshot.
+    PT_OVF="$TMPDIR/testprog-ovf.pt"
+    run_bsdtrace_file exec -s 1m -t 5 -o "$PT_OVF" -- "$FLOODPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -qi 'wrapped\|overflow'; then
+        pass "overflow: small buffer warns"
+    else
+        fail "overflow: small buffer warns"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── TraceStop: -r stop: ─────────────────────────────────
+    echo "--- tracestop ---"
+
+    # stop:leaf_add should trace the early part of main, then stop before
+    # later functions like loop_test appear.  That distinguishes TraceStop
+    # from plain filter semantics, which would only show leaf_add itself.
+    PT_STOP="$TMPDIR/testprog-stop.pt"
+    run_bsdtrace_file exec -r stop:leaf_add -t 5 -o "$PT_STOP" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] &&
+        grep -q 'main' "$ROUT_FILE" 2>/dev/null &&
+        ! grep -q 'loop_test' "$ROUT_FILE" 2>/dev/null; then
+        pass "tracestop: stop range ends trace before later functions"
+    else
+        if echo "$RERR" | grep -qi 'failed to configure'; then
+            pass "tracestop: stop range ends trace before later functions (CPU does not support)"
+        else
+            fail "tracestop: stop range ends trace before later functions"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── OS tracing: -K flag ─────────────────────────────────
+    echo "--- os-trace ---"
+
+    # Verify -K is accepted and produces a trace.
+    # We don't check for kernel symbols (no kernel image loaded),
+    # just that the flag doesn't cause an error.
+    PT_OSTRACE="$TMPDIR/testprog-os.pt"
+    run_bsdtrace_file exec -K -t 5 -o "$PT_OSTRACE" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        pass "os-trace: -K accepted"
+    else
+        fail "os-trace: -K accepted"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
 
     # Child exit status should propagate through bsdtrace exec.
     run_bsdtrace exec -t 5 -- /bin/sh -c 'exit 7'

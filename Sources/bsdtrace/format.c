@@ -199,8 +199,9 @@ fmt_record_text(const struct bsdtrace_record *rec, pid_t pid)
 		break;
 
 	case HWT_RECORD_OVERFLOW:
-		printf("  OVERFLOW  pid=%d  PT internal buffer overflow\n",
-		    (int)pid);
+		printf("  OVERFLOW  pid=%d  buf_id=%d  page=%d  offset=0x%lx\n",
+		    (int)pid, rec->buf_id, rec->curpage,
+		    (unsigned long)rec->offset);
 		break;
 
 	default:
@@ -263,6 +264,13 @@ fmt_record_json(const struct bsdtrace_record *rec, pid_t pid)
 		break;
 
 	case HWT_RECORD_BUFFER:
+		pos += snprintf(line + pos, sizeof(line) - pos,
+		    ",\"buf_id\":%d,\"page\":%d,\"offset\":%lu",
+		    rec->buf_id, rec->curpage,
+		    (unsigned long)rec->offset);
+		break;
+
+	case HWT_RECORD_OVERFLOW:
 		pos += snprintf(line + pos, sizeof(line) - pos,
 		    ",\"buf_id\":%d,\"page\":%d,\"offset\":%lu",
 		    rec->buf_id, rec->curpage,

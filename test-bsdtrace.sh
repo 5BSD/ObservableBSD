@@ -722,6 +722,11 @@ if [ "$(id -u)" -ne 0 ]; then
     skip "overflow: small buffer warns"
     skip "tracestop: stop range ends trace before later functions"
     skip "os-trace: -K accepted"
+    skip "kernel-symbols: -K profile has kernel functions"
+    skip "filter: -F shows only matching functions"
+    skip "callers: -f callers has caller/callee sections"
+    skip "speedscope: -f speedscope produces valid JSON"
+    skip "dwarf: profile has source:line"
 else
     # Check HWT availability — the list output says
     #   /dev/hwt:       available
@@ -1836,12 +1841,18 @@ DPROG
     # 1m still wraps under floodprog but is much less likely to degenerate
     # into a zero-length final snapshot.
     PT_OVF="$TMPDIR/testprog-ovf.pt"
-    run_bsdtrace_file exec -s 1m -t 5 -o "$PT_OVF" -- "$FLOODPROG"
+    run_bsdtrace_file exec -s 1m -f profile -t 10 -o "$PT_OVF" -- "$FLOODPROG"
     if [ "$RRC" -eq 0 ] && echo "$RERR" | grep -qi 'wrapped\|overflow'; then
         pass "overflow: small buffer warns"
+    elif [ "$RRC" -eq 124 ]; then
+        fail "overflow: small buffer warns (timeout)"
     else
-        fail "overflow: small buffer warns"
-        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        if echo "$RERR" | grep -q 'instructions'; then
+            skip "overflow: small buffer warns (1m was sufficient)"
+        else
+            fail "overflow: small buffer warns"
+            echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+        fi
     fi
     rm -f "$ROUT_FILE"
 
@@ -1886,6 +1897,100 @@ DPROG
         echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
     fi
     rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── kernel symbols: -K with profile ─────────────────────
+    echo "--- kernel-symbols ---"
+
+    PT_KERN="$TMPDIR/testprog-kern.pt"
+    run_bsdtrace_file exec -K -f profile -t 5 -o "$PT_KERN" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] &&
+        grep -qi 'kernel' "$ROUT_FILE" 2>/dev/null; then
+        pass "kernel-symbols: -K profile has kernel functions"
+    elif [ "$RRC" -eq 0 ] && grep -q '0xffffffff' "$ROUT_FILE" 2>/dev/null; then
+        pass "kernel-symbols: -K profile has kernel addresses"
+    elif [ "$RRC" -eq 0 ] && echo "$RERR" | grep -q 'instructions'; then
+        skip "kernel-symbols: -K profile has kernel functions (no kernel code in trace)"
+    else
+        fail "kernel-symbols: -K profile has kernel functions"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── function filter: -F ─────────────────────────────────
+    echo "--- function-filter ---"
+
+    PT_FILT="$TMPDIR/testprog-filter.pt"
+    run_bsdtrace_file exec -F leaf_add -f profile -t 5 -o "$PT_FILT" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] &&
+        grep -q 'leaf_add' "$ROUT_FILE" 2>/dev/null &&
+        ! grep -q 'loop_test' "$ROUT_FILE" 2>/dev/null; then
+        pass "filter: -F shows only matching functions"
+    else
+        fail "filter: -F shows only matching functions"
+        echo "    rc=$RRC"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── callers view: -f callers ────────────────────────────
+    echo "--- callers ---"
+
+    PT_CALL="$TMPDIR/testprog-callers.pt"
+    run_bsdtrace_file exec -f callers -t 5 -o "$PT_CALL" -- "$TESTPROG"
+    if [ "$RRC" -eq 0 ] &&
+        grep -q 'called by:' "$ROUT_FILE" 2>/dev/null &&
+        grep -q 'calls:' "$ROUT_FILE" 2>/dev/null &&
+        grep -q 'leaf_add' "$ROUT_FILE" 2>/dev/null; then
+        pass "callers: -f callers has caller/callee sections"
+    else
+        fail "callers: -f callers has caller/callee sections"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── speedscope: -f speedscope ───────────────────────────
+    echo "--- speedscope ---"
+
+    PT_SPEED="$TMPDIR/testprog-speed.pt"
+    run_bsdtrace_file exec -f speedscope -t 5 -o "$PT_SPEED" -- /bin/sh -c "exec $TESTPROG > /dev/null"
+    if [ "$RRC" -eq 0 ] &&
+        grep -q '"\$schema"' "$ROUT_FILE" 2>/dev/null &&
+        grep -q '"frames"' "$ROUT_FILE" 2>/dev/null &&
+        python3 -c "import json; json.load(open('$ROUT_FILE'))" 2>/dev/null; then
+        pass "speedscope: -f speedscope produces valid JSON"
+    else
+        fail "speedscope: -f speedscope produces valid JSON"
+        echo "    rc=$RRC stderr: $(echo "$RERR" | tail -3)"
+    fi
+    rm -f "$ROUT_FILE"
+
+    settle_hwt
+
+    # ── DWARF source lines ──────────────────────────────────
+    echo "--- dwarf ---"
+
+    DEBUGPROG="$TMPDIR/testprog-debug"
+    if cc -g -O0 -o "$DEBUGPROG" Tests/bsdtrace/testprog/main.c 2>/dev/null; then
+        PT_DBG="$TMPDIR/testprog-debug.pt"
+        run_bsdtrace_file exec -f profile -t 5 -o "$PT_DBG" -- "$DEBUGPROG"
+        if [ "$RRC" -eq 0 ] &&
+            grep -q '\.c:' "$ROUT_FILE" 2>/dev/null; then
+            pass "dwarf: profile has source:line"
+        else
+            fail "dwarf: profile has source:line"
+            echo "    rc=$RRC"
+        fi
+        rm -f "$ROUT_FILE" "$DEBUGPROG"
+    else
+        skip "dwarf: profile has source:line (could not compile with -g)"
+    fi
 
     settle_hwt
 

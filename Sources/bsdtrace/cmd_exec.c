@@ -124,6 +124,9 @@ cmd_exec(int argc, char **argv)
 	bool ptwrite;
 	bool os_trace;
 	bool dryrun;
+	char **filter_funcs;
+	int nfilter_funcs;
+	struct pt_decode_opts dopts;
 	bool pause_on_mmap;
 	bool child_done;
 	char **cmd_argv;
@@ -148,10 +151,12 @@ cmd_exec(int argc, char **argv)
 	ptwrite = false;
 	os_trace = false;
 	dryrun = false;
+	filter_funcs = NULL;
+	nfilter_funcs = 0;
 	pause_on_mmap = false;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:P:M:Y:AhnpCWK")) != -1) {
+	while ((ch = getopt(argc, argv, "f:b:s:d:t:m:o:r:T:P:M:Y:F:AhnpCWK")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -164,6 +169,10 @@ cmd_exec(int argc, char **argv)
 				fmt = FMT_TREE;
 			else if (strcmp(optarg, "collapsed") == 0)
 				fmt = FMT_COLLAPSED;
+			else if (strcmp(optarg, "speedscope") == 0)
+				fmt = FMT_SPEEDSCOPE;
+			else if (strcmp(optarg, "callers") == 0)
+				fmt = FMT_CALLERS;
 			else {
 				fprintf(stderr,
 				    "bsdtrace exec: unknown format '%s'\n",
@@ -271,6 +280,27 @@ cmd_exec(int argc, char **argv)
 		case 'K':
 			os_trace = true;
 			break;
+		case 'F': {
+			char *fstr = strdup(optarg);
+			char *tok, *saveptr;
+			nfilter_funcs = 0;
+			tok = strtok_r(fstr, ",", &saveptr);
+			while (tok != NULL) {
+				nfilter_funcs++;
+				tok = strtok_r(NULL, ",", &saveptr);
+			}
+			filter_funcs = calloc(nfilter_funcs, sizeof(char *));
+			nfilter_funcs = 0;
+			free(fstr);
+			fstr = strdup(optarg);
+			tok = strtok_r(fstr, ",", &saveptr);
+			while (tok != NULL) {
+				filter_funcs[nfilter_funcs++] = strdup(tok);
+				tok = strtok_r(NULL, ",", &saveptr);
+			}
+			free(fstr);
+			break;
+		}
 		case 'h':
 			fprintf(stderr,
 			    "usage: bsdtrace exec [options] -- command [args...]\n"
@@ -567,8 +597,12 @@ cmd_exec(int argc, char **argv)
 			exitcode = 128 + WTERMSIG(status);
 	}
 
+	memset(&dopts, 0, sizeof(dopts));
+	dopts.tid = ctx.tid;
+	dopts.filter_funcs = (const char **)filter_funcs;
+	dopts.nfilter_funcs = nfilter_funcs;
 	totalrecords = trace_finalize(&ctx, &ts, meta, pt_output,
-	    child, fmt, totalrecords);
+	    child, fmt, totalrecords, &dopts);
 
 	if (fmt == FMT_TEXT)
 		fprintf(stderr, "\n%d records collected, exit code %d\n",

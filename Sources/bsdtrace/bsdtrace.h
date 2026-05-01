@@ -134,7 +134,9 @@ enum bsdtrace_fmt {
 	FMT_JSON,
 	FMT_PROFILE,
 	FMT_TREE,
-	FMT_COLLAPSED
+	FMT_COLLAPSED,
+	FMT_SPEEDSCOPE,
+	FMT_CALLERS
 };
 
 /*
@@ -275,6 +277,7 @@ struct pt_image_info {
 struct sym_entry {
 	uint64_t	addr;		/* runtime virtual address */
 	uint64_t	size;		/* symbol size (0 if unknown) */
+	int64_t		slide;		/* runtime - file address offset */
 	char		*name;		/* function name (strdup'd) */
 	char		*binary;	/* binary basename (strdup'd) */
 };
@@ -338,6 +341,8 @@ struct pt_decode_opts {
 	int		tid;
 	uint8_t		mtc_freq;
 	uint8_t		cyc_thresh;
+	const char	**filter_funcs;	/* -F func1,func2 (NULL = no filter) */
+	int		nfilter_funcs;
 };
 
 bool	 is_user_addr(uint64_t addr);
@@ -362,7 +367,7 @@ const char *find_binary_for_ip(const struct bin_range *ranges, int nranges,
 
 void	 sym_table_init(struct sym_table *st);
 void	 sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
-	    const char *name, const char *binary);
+	    const char *name, const char *binary, int64_t slide);
 void	 sym_table_add_elf(struct sym_table *st, const char *path,
 	    int64_t slide);
 void	 sym_table_sort(struct sym_table *st);
@@ -400,6 +405,16 @@ int	 decode_pt_probe(const void *buf, size_t len,
 	    struct decode_probe_result *result);
 
 /* ------------------------------------------------------------------ */
+/* dwarf.c — DWARF source-line resolution                              */
+/* ------------------------------------------------------------------ */
+
+struct dwarf_cache;
+struct dwarf_cache *dwarf_cache_open(const char *binary_path, int64_t slide);
+int	 dwarf_addr_to_line(struct dwarf_cache *dc, uint64_t addr,
+	    char *file_out, size_t filesz, int *line_out);
+void	 dwarf_cache_close_all(void);
+
+/* ------------------------------------------------------------------ */
 /* meta.c — .meta sidecar writer/reader                                */
 /* ------------------------------------------------------------------ */
 
@@ -432,7 +447,8 @@ int	 trace_state_drain_post_stop(struct hwt_ctx *ctx,
 int	 trace_state_seed_process_mmaps(struct trace_state *ts, pid_t pid);
 void	 trace_state_free(struct trace_state *ts);
 ssize_t	 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
-	    const char *pt_output, enum bsdtrace_fmt fmt, int tid);
+	    const char *pt_output, enum bsdtrace_fmt fmt,
+	    const struct pt_decode_opts *opts);
 
 void	 emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
 	    enum bsdtrace_fmt fmt, bool pause_on_mmap, struct hwt_ctx *ctx,
@@ -444,7 +460,8 @@ void	 derive_meta_path(const char *pt_output, char *meta_path,
 	    size_t meta_pathsz);
 int	 trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
 	    struct meta_writer *meta, const char *pt_output, pid_t pid,
-	    enum bsdtrace_fmt fmt, int totalrecords);
+	    enum bsdtrace_fmt fmt, int totalrecords,
+	    const struct pt_decode_opts *opts);
 
 /* ------------------------------------------------------------------ */
 /* Commands                                                            */

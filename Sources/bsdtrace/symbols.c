@@ -30,7 +30,7 @@ sym_table_init(struct sym_table *st)
 
 void
 sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
-    const char *name, const char *binary)
+    const char *name, const char *binary, int64_t slide)
 {
 	struct sym_entry *e;
 	struct sym_entry *newentries;
@@ -52,6 +52,7 @@ sym_table_add(struct sym_table *st, uint64_t addr, uint64_t size,
 	e = &st->entries[st->count++];
 	e->addr = addr;
 	e->size = size;
+	e->slide = slide;
 	e->name = strdup(name);
 	e->binary = strdup(binary);
 	if (e->name == NULL || e->binary == NULL) {
@@ -122,7 +123,7 @@ sym_table_add_elf(struct sym_table *st, const char *path, int64_t slide)
 				name = elf_strptr(elf, shdr.sh_link,
 				    sym.st_name);
 				sym_table_add(st, sym.st_value + slide,
-				    sym.st_size, name, bn);
+				    sym.st_size, name, bn, slide);
 			}
 		}
 	}

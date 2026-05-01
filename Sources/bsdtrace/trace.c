@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <sys/param.h>
+#include <sys/sysctl.h>
 
 #include <err.h>
 #include <fcntl.h>
@@ -98,7 +99,8 @@ trace_state_process(struct trace_state *ts,
 		ts->overflow_count++;
 
 	if ((rec->type == HWT_RECORD_EXECUTABLE ||
-	    rec->type == HWT_RECORD_MMAP) &&
+	    rec->type == HWT_RECORD_MMAP ||
+	    rec->type == HWT_RECORD_KERNEL) &&
 	    rec->fullpath[0] != '\0') {
 		/*
 		 * EXECUTABLE denotes a fresh exec image load.  Any mappings
@@ -265,7 +267,8 @@ choose_snapshot_len(const uint8_t *buf, size_t bufsz, size_t base_len,
 
 ssize_t
 snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
-    const char *pt_output, enum bsdtrace_fmt fmt, int tid)
+    const char *pt_output, enum bsdtrace_fmt fmt,
+    const struct pt_decode_opts *opts)
 {
 	const uint8_t *buf;
 	struct pt_decode_opts dopts;
@@ -313,8 +316,13 @@ snapshot_and_decode(struct hwt_ctx *ctx, struct trace_state *ts,
 		return (-1);
 
 	memset(&dopts, 0, sizeof(dopts));
-	dopts.tid = tid;
+	dopts.tid = opts != NULL ? opts->tid : ctx->tid;
 	dopts.mtc_freq = (uint8_t)ctx->mtc_freq;
+	dopts.cyc_thresh = (uint8_t)ctx->cyc_thresh;
+	if (opts != NULL) {
+		dopts.filter_funcs = opts->filter_funcs;
+		dopts.nfilter_funcs = opts->nfilter_funcs;
+	}
 
 	actual_len = choose_snapshot_len(buf, ctx->bufsize, known_end,
 	    ts->sections, ts->nsections);
@@ -487,7 +495,7 @@ emit_and_process(const struct bsdtrace_record *rec, pid_t pid,
 
 	if (fmt == FMT_JSON)
 		fmt_record_json(rec, pid);
-	else
+	else if (fmt == FMT_TEXT)
 		fmt_record_text(rec, pid);
 
 	if (pause_on_mmap &&
@@ -593,13 +601,39 @@ derive_meta_path(const char *pt_output, char *meta_path, size_t meta_pathsz)
 }
 
 /*
+ * Ensure the kernel ELF is in the sections array when -K is active.
+ * Older kernels may not emit HWT_RECORD_KERNEL records, so fall back
+ * to reading the base address from sysctl kern.base_address.
+ */
+static void
+trace_state_ensure_kernel(struct trace_state *ts)
+{
+	uint64_t kbase;
+	size_t klen;
+	int i;
+
+	for (i = 0; i < ts->nsections; i++) {
+		if (ts->sections[i].type == HWT_RECORD_KERNEL)
+			return;
+	}
+
+	klen = sizeof(kbase);
+	if (sysctlbyname("kern.base_address", &kbase, &klen, NULL, 0) != 0)
+		return;
+
+	(void)trace_state_add_section(ts, "/boot/kernel/kernel", kbase,
+	    0, HWT_RECORD_KERNEL);
+}
+
+/*
  * Final drain, stop, snapshot, wrap warning, and cleanup.
  * Called at the end of both cmd_exec and cmd_trace.
  */
 int
 trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
     struct meta_writer *meta, const char *pt_output, pid_t pid,
-    enum bsdtrace_fmt fmt, int totalrecords)
+    enum bsdtrace_fmt fmt, int totalrecords,
+    const struct pt_decode_opts *opts)
 {
 	struct bsdtrace_record records[POLL_RECORDS];
 	ssize_t saved;
@@ -624,7 +658,10 @@ trace_finalize(struct hwt_ctx *ctx, struct trace_state *ts,
 	hwt_ctx_stop(ctx);
 	totalrecords += trace_state_drain_post_stop(ctx, ts);
 
-	saved = snapshot_and_decode(ctx, ts, pt_output, fmt, ctx->tid);
+	if (ctx->os_trace)
+		trace_state_ensure_kernel(ts);
+
+	saved = snapshot_and_decode(ctx, ts, pt_output, fmt, opts);
 
 	if (ts->buf_wrapped)
 		fprintf(stderr,

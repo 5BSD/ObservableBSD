@@ -50,7 +50,7 @@ cmd_decode(int argc, char **argv)
 	memset(&dopts, 0, sizeof(dopts));
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "f:m:h")) != -1) {
+	while ((ch = getopt(argc, argv, "f:m:F:h")) != -1) {
 		switch (ch) {
 		case 'f':
 			if (strcmp(optarg, "json") == 0)
@@ -63,6 +63,10 @@ cmd_decode(int argc, char **argv)
 				fmt = FMT_TREE;
 			else if (strcmp(optarg, "collapsed") == 0)
 				fmt = FMT_COLLAPSED;
+			else if (strcmp(optarg, "speedscope") == 0)
+				fmt = FMT_SPEEDSCOPE;
+			else if (strcmp(optarg, "callers") == 0)
+				fmt = FMT_CALLERS;
 			else {
 				fprintf(stderr,
 				    "bsdtrace decode: unknown format '%s'\n",
@@ -78,6 +82,24 @@ cmd_decode(int argc, char **argv)
 			    &sections, &nsections) != 0)
 				return (1);
 			break;
+		case 'F': {
+			char *fstr = strdup(optarg);
+			char *tok, *saveptr;
+			int nf = 0;
+			tok = strtok_r(fstr, ",", &saveptr);
+			while (tok != NULL) { nf++; tok = strtok_r(NULL, ",", &saveptr); }
+			dopts.filter_funcs = calloc(nf, sizeof(char *));
+			dopts.nfilter_funcs = 0;
+			free(fstr);
+			fstr = strdup(optarg);
+			tok = strtok_r(fstr, ",", &saveptr);
+			while (tok != NULL) {
+				dopts.filter_funcs[dopts.nfilter_funcs++] = strdup(tok);
+				tok = strtok_r(NULL, ",", &saveptr);
+			}
+			free(fstr);
+			break;
+		}
 		case 'h':
 			fprintf(stderr,
 			    "usage: bsdtrace decode [options] file.pt\n"

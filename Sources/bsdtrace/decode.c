@@ -689,6 +689,8 @@ struct profile_entry {
 	int		branches;
 	uint64_t	cumulative_tsc;	/* sum of per-call TSC deltas */
 	uint64_t	entry_tsc;	/* TSC at most recent entry (transient) */
+	char		*source_file;	/* DWARF file path (strdup'd, or NULL) */
+	int		source_line;	/* DWARF line number (0 = unknown) */
 };
 
 struct profile {
@@ -717,7 +719,8 @@ profile_init(struct profile *p)
  */
 static void
 profile_record(struct profile *p, const struct sym_entry *sym,
-    uint64_t ip, enum pt_insn_class iclass, uint64_t tsc)
+    uint64_t ip, enum pt_insn_class iclass, uint64_t tsc,
+    const struct pt_image_info *sections, int nsections)
 {
 	struct profile_entry *e;
 	int i;
@@ -753,6 +756,37 @@ profile_record(struct profile *p, const struct sym_entry *sym,
 		e->name = sym->name;
 		e->binary = sym->binary;
 		p->count++;
+
+		/* DWARF lookup — once per function.
+		 * Find the section that contains this symbol's address
+		 * to get the full binary path and compute the slide.
+		 * The slide is load_addr - elf_base_vaddr, same as
+		 * build_pt_image uses for libipt. */
+		if (sections != NULL) {
+			struct dwarf_cache *dc;
+			char srcfile[MAXPATHLEN];
+			int srcline = 0;
+			int si;
+
+			for (si = 0; si < nsections; si++) {
+				const char *bn;
+				bn = strrchr(sections[si].path, '/');
+				bn = bn != NULL ? bn + 1 : sections[si].path;
+				if (strcmp(bn, sym->binary) == 0)
+					break;
+			}
+			if (si < nsections) {
+				dc = dwarf_cache_open(sections[si].path,
+				    sym->slide);
+				if (dc != NULL &&
+				    dwarf_addr_to_line(dc, sym->addr,
+				    srcfile, sizeof(srcfile),
+				    &srcline) == 0) {
+					e->source_file = strdup(srcfile);
+					e->source_line = srcline;
+				}
+			}
+		}
 	}
 
 	/*
@@ -788,6 +822,27 @@ profile_record(struct profile *p, const struct sym_entry *sym,
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* Filter helper                                                       */
+/* ------------------------------------------------------------------ */
+
+static bool
+filter_matches(const struct pt_decode_opts *opts, const char *name)
+{
+	int i;
+
+	if (opts == NULL || opts->nfilter_funcs == 0)
+		return (true);
+	if (name == NULL)
+		return (false);
+
+	for (i = 0; i < opts->nfilter_funcs; i++) {
+		if (strcmp(opts->filter_funcs[i], name) == 0)
+			return (true);
+	}
+	return (false);
+}
+
 static int
 profile_cmp_calls(const void *a, const void *b)
 {
@@ -798,7 +853,7 @@ profile_cmp_calls(const void *a, const void *b)
 }
 
 static void
-profile_print(struct profile *p)
+profile_print(struct profile *p, const struct pt_decode_opts *opts)
 {
 	bool have_tsc;
 	int i;
@@ -834,23 +889,31 @@ profile_print(struct profile *p)
 		struct profile_entry *e = &p->entries[i];
 		if (e->calls == 0 && e->returns == 0 && e->branches == 0)
 			continue;
+		if (!filter_matches(opts, e->name))
+			continue;
 		if (have_tsc) {
 			uint64_t dt = e->cumulative_tsc;
-			printf("%-8d %-8d %-8d  %-14lu  %-20s  %s\n",
+			printf("%-8d %-8d %-8d  %-14lu  %-20s  %s",
 			    e->calls, e->returns, e->branches,
 			    (unsigned long)dt, e->binary, e->name);
 		} else {
-			printf("%-8d %-8d %-8d  %-20s  %s\n",
+			printf("%-8d %-8d %-8d  %-20s  %s",
 			    e->calls, e->returns, e->branches,
 			    e->binary, e->name);
 		}
+		if (e->source_file != NULL)
+			printf("  (%s:%d)", e->source_file, e->source_line);
+		printf("\n");
 	}
 }
 
 static void
 profile_free(struct profile *p)
 {
+	int i;
 
+	for (i = 0; i < p->count; i++)
+		free(p->entries[i].source_file);
 	free(p->entries);
 	p->entries = NULL;
 	p->count = 0;
@@ -1228,16 +1291,43 @@ collapsed_cmp_count(const void *a, const void *b)
 	return (eb->count - ea->count);
 }
 
+static bool
+collapsed_stack_matches(const char *stack, const struct pt_decode_opts *opts)
+{
+	char *s, *tok, *saveptr;
+
+	if (opts == NULL || opts->nfilter_funcs == 0)
+		return (true);
+
+	s = strdup(stack);
+	tok = strtok_r(s, ";", &saveptr);
+	while (tok != NULL) {
+		/* tok may be "binary:func" — check the func part. */
+		const char *colon = strrchr(tok, ':');
+		const char *name = colon != NULL ? colon + 1 : tok;
+		if (filter_matches(opts, name)) {
+			free(s);
+			return (true);
+		}
+		tok = strtok_r(NULL, ";", &saveptr);
+	}
+	free(s);
+	return (false);
+}
+
 static void
-collapsed_print(struct collapsed *col)
+collapsed_print(struct collapsed *col, const struct pt_decode_opts *opts)
 {
 
 	qsort(col->entries, col->count, sizeof(col->entries[0]),
 	    collapsed_cmp_count);
 
-	for (int i = 0; i < col->count; i++)
+	for (int i = 0; i < col->count; i++) {
+		if (!collapsed_stack_matches(col->entries[i].stack, opts))
+			continue;
 		printf("%s %d\n", col->entries[i].stack,
 		    col->entries[i].count);
+	}
 }
 
 static void
@@ -1251,6 +1341,298 @@ collapsed_free(struct collapsed *col)
 	col->entries = NULL;
 	col->count = 0;
 	col->capacity = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Speedscope JSON export                                              */
+/* ------------------------------------------------------------------ */
+
+static int
+speedscope_frame_idx(char ***frames, int *nframes, int *cap,
+    const char *name)
+{
+	int i;
+
+	for (i = 0; i < *nframes; i++) {
+		if (strcmp((*frames)[i], name) == 0)
+			return (i);
+	}
+	if (*nframes >= *cap) {
+		*cap = *cap == 0 ? 64 : *cap * 2;
+		*frames = realloc(*frames, *cap * sizeof(char *));
+	}
+	(*frames)[*nframes] = strdup(name);
+	return ((*nframes)++);
+}
+
+static void
+speedscope_print(struct collapsed *col)
+{
+	char **frames;
+	int nframes, frames_cap;
+	char escaped[256];
+	int i, j;
+
+	frames = NULL;
+	nframes = 0;
+	frames_cap = 0;
+
+	printf("{\n");
+	printf("  \"$schema\": \"https://www.speedscope.app/"
+	    "file-format-spec.json\",\n");
+
+	/* Phase 1: collect unique frames from all stacks. */
+	for (i = 0; i < col->count; i++) {
+		char *s, *tok, *saveptr;
+		s = strdup(col->entries[i].stack);
+		tok = strtok_r(s, ";", &saveptr);
+		while (tok != NULL) {
+			speedscope_frame_idx(&frames, &nframes,
+			    &frames_cap, tok);
+			tok = strtok_r(NULL, ";", &saveptr);
+		}
+		free(s);
+	}
+
+	/* Emit shared frames. */
+	printf("  \"shared\": {\"frames\": [\n");
+	for (i = 0; i < nframes; i++) {
+		json_escape(escaped, sizeof(escaped), frames[i]);
+		printf("    {\"name\": \"%s\"}%s\n",
+		    escaped, i < nframes - 1 ? "," : "");
+	}
+	printf("  ]},\n");
+
+	/* Phase 2: build samples and weights. */
+	printf("  \"profiles\": [{\n");
+	printf("    \"type\": \"sampled\",\n");
+	printf("    \"name\": \"bsdtrace\",\n");
+	printf("    \"unit\": \"none\",\n");
+	printf("    \"startValue\": 0,\n");
+
+	long total_weight = 0;
+	for (i = 0; i < col->count; i++)
+		total_weight += col->entries[i].count;
+	printf("    \"endValue\": %ld,\n", total_weight);
+
+	printf("    \"samples\": [\n");
+	for (i = 0; i < col->count; i++) {
+		char *s, *tok, *saveptr;
+		printf("      [");
+		s = strdup(col->entries[i].stack);
+		tok = strtok_r(s, ";", &saveptr);
+		j = 0;
+		while (tok != NULL) {
+			int idx = speedscope_frame_idx(&frames, &nframes,
+			    &frames_cap, tok);
+			if (j > 0)
+				printf(",");
+			printf("%d", idx);
+			j++;
+			tok = strtok_r(NULL, ";", &saveptr);
+		}
+		free(s);
+		printf("]%s\n", i < col->count - 1 ? "," : "");
+	}
+	printf("    ],\n");
+
+	printf("    \"weights\": [");
+	for (i = 0; i < col->count; i++) {
+		printf("%d%s", col->entries[i].count,
+		    i < col->count - 1 ? "," : "");
+	}
+	printf("]\n");
+	printf("  }],\n");
+	printf("  \"name\": \"bsdtrace trace\",\n");
+	printf("  \"exporter\": \"bsdtrace\"\n");
+	printf("}\n");
+
+	for (i = 0; i < nframes; i++)
+		free(frames[i]);
+	free(frames);
+}
+
+/* ------------------------------------------------------------------ */
+/* Caller/callee view                                                  */
+/* ------------------------------------------------------------------ */
+
+struct caller_edge {
+	const char	*name;
+	const char	*binary;
+	int		count;
+	uint64_t	tsc;
+};
+
+struct func_summary {
+	const char	*name;
+	const char	*binary;
+	int		total_calls;
+	uint64_t	total_tsc;
+	struct caller_edge *callers;
+	int		ncallers;
+	int		callers_cap;
+	struct caller_edge *callees;
+	int		ncallees;
+	int		callees_cap;
+};
+
+static struct func_summary *
+callers_find_or_add(struct func_summary **funcs, int *nfuncs, int *cap,
+    const char *name, const char *binary)
+{
+	int i;
+	struct func_summary *f;
+
+	for (i = 0; i < *nfuncs; i++) {
+		if (strcmp((*funcs)[i].name, name) == 0 &&
+		    strcmp((*funcs)[i].binary, binary) == 0)
+			return (&(*funcs)[i]);
+	}
+	if (*nfuncs >= *cap) {
+		*cap = *cap == 0 ? 64 : *cap * 2;
+		*funcs = realloc(*funcs, *cap * sizeof(struct func_summary));
+	}
+	f = &(*funcs)[*nfuncs];
+	memset(f, 0, sizeof(*f));
+	f->name = name;
+	f->binary = binary;
+	(*nfuncs)++;
+	return (f);
+}
+
+static void
+callers_add_edge(struct caller_edge **edges, int *n, int *cap,
+    const char *name, const char *binary, int count, uint64_t tsc)
+{
+	int i;
+
+	for (i = 0; i < *n; i++) {
+		if (strcmp((*edges)[i].name, name) == 0 &&
+		    strcmp((*edges)[i].binary, binary) == 0) {
+			(*edges)[i].count += count;
+			(*edges)[i].tsc += tsc;
+			return;
+		}
+	}
+	if (*n >= *cap) {
+		*cap = *cap == 0 ? 16 : *cap * 2;
+		*edges = realloc(*edges, *cap * sizeof(struct caller_edge));
+	}
+	(*edges)[*n].name = name;
+	(*edges)[*n].binary = binary;
+	(*edges)[*n].count = count;
+	(*edges)[*n].tsc = tsc;
+	(*n)++;
+}
+
+static void
+ct_collect_edges(struct ct_node *parent, struct ct_node *node,
+    struct func_summary **funcs, int *nfuncs, int *cap)
+{
+	struct func_summary *f;
+	int i;
+
+	if (node->name != NULL) {
+		f = callers_find_or_add(funcs, nfuncs, cap,
+		    node->name, node->binary ? node->binary : "???");
+		f->total_calls += node->count;
+		f->total_tsc += node->total_tsc;
+
+		if (parent != NULL && parent->name != NULL)
+			callers_add_edge(&f->callers, &f->ncallers,
+			    &f->callers_cap,
+			    parent->name,
+			    parent->binary ? parent->binary : "???",
+			    node->count, node->total_tsc);
+	}
+
+	for (i = 0; i < node->nchildren; i++) {
+		struct ct_node *child = &node->children[i];
+		if (node->name != NULL && child->name != NULL) {
+			struct func_summary *pf;
+			pf = callers_find_or_add(funcs, nfuncs, cap,
+			    node->name,
+			    node->binary ? node->binary : "???");
+			callers_add_edge(&pf->callees, &pf->ncallees,
+			    &pf->callees_cap,
+			    child->name,
+			    child->binary ? child->binary : "???",
+			    child->count, child->total_tsc);
+		}
+		ct_collect_edges(node, child, funcs, nfuncs, cap);
+	}
+}
+
+static int
+callers_cmp(const void *a, const void *b)
+{
+	const struct func_summary *fa = a, *fb = b;
+	return (fb->total_calls - fa->total_calls);
+}
+
+static int
+edge_cmp(const void *a, const void *b)
+{
+	const struct caller_edge *ea = a, *eb = b;
+	return (eb->count - ea->count);
+}
+
+static void
+callers_print(struct calltree *ct, const struct pt_decode_opts *opts)
+{
+	struct func_summary *funcs;
+	int nfuncs, funcs_cap;
+	int i, j;
+
+	funcs = NULL;
+	nfuncs = 0;
+	funcs_cap = 0;
+
+	ct_collect_edges(NULL, &ct->root, &funcs, &nfuncs, &funcs_cap);
+	qsort(funcs, nfuncs, sizeof(struct func_summary), callers_cmp);
+
+	for (i = 0; i < nfuncs; i++) {
+		struct func_summary *f = &funcs[i];
+
+		if (!filter_matches(opts, f->name))
+			continue;
+
+		printf("--- %s:%s  (%d calls",
+		    f->binary, f->name, f->total_calls);
+		if (f->total_tsc > 0)
+			printf(", %lu tsc",
+			    (unsigned long)f->total_tsc);
+		printf(")\n");
+
+		if (f->ncallers > 0) {
+			qsort(f->callers, f->ncallers,
+			    sizeof(struct caller_edge), edge_cmp);
+			printf("  called by:\n");
+			for (j = 0; j < f->ncallers; j++)
+				printf("    %s:%s  (%d)\n",
+				    f->callers[j].binary,
+				    f->callers[j].name,
+				    f->callers[j].count);
+		}
+
+		if (f->ncallees > 0) {
+			qsort(f->callees, f->ncallees,
+			    sizeof(struct caller_edge), edge_cmp);
+			printf("  calls:\n");
+			for (j = 0; j < f->ncallees; j++)
+				printf("    %s:%s  (%d)\n",
+				    f->callees[j].binary,
+				    f->callees[j].name,
+				    f->callees[j].count);
+		}
+		printf("\n");
+	}
+
+	for (i = 0; i < nfuncs; i++) {
+		free(funcs[i].callers);
+		free(funcs[i].callees);
+	}
+	free(funcs);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1291,8 +1673,17 @@ decode_pt_insn(const void *buf, size_t len,
 	}
 
 	if (nsections <= 0) {
-		warnx("no image sections — falling back to packet decode");
-		return (decode_pt_buffer(buf, len, fmt));
+		if (fmt == FMT_TEXT || fmt == FMT_JSON) {
+			warnx("no image sections — falling back to packet decode");
+			return (decode_pt_buffer(buf, len, fmt));
+		}
+		warnx("no image sections — cannot produce %s output",
+		    fmt == FMT_PROFILE ? "profile" :
+		    fmt == FMT_TREE ? "tree" :
+		    fmt == FMT_COLLAPSED ? "collapsed" :
+		    fmt == FMT_SPEEDSCOPE ? "speedscope" :
+		    fmt == FMT_CALLERS ? "callers" : "aggregate");
+		return (-1);
 	}
 
 	sym_table_init(&st);
@@ -1440,12 +1831,13 @@ decode_pt_insn(const void *buf, size_t len,
 		 * at offset 0.
 		 */
 		if (fmt == FMT_PROFILE || fmt == FMT_TREE ||
-		    fmt == FMT_COLLAPSED) {
+		    fmt == FMT_COLLAPSED || fmt == FMT_SPEEDSCOPE ||
+		    fmt == FMT_CALLERS) {
 			sym = sym_table_lookup(&st, insn.ip);
 			if (fmt == FMT_PROFILE)
 				profile_record(&prof, sym, insn.ip,
-				    insn.iclass, tsc);
-			else if (fmt == FMT_TREE)
+				    insn.iclass, tsc, sections, nsections);
+			else if (fmt == FMT_TREE || fmt == FMT_CALLERS)
 				calltree_record(&ct, sym, insn.ip,
 				    insn.iclass, tsc);
 			else
@@ -1458,6 +1850,10 @@ decode_pt_insn(const void *buf, size_t len,
 			continue;
 
 		sym = sym_table_lookup(&st, insn.ip);
+
+		if (!filter_matches(opts, sym != NULL ? sym->name : NULL))
+			continue;
+
 		bn = NULL;
 		boff = 0;
 		if (sym == NULL)
@@ -1558,7 +1954,7 @@ decode_pt_insn(const void *buf, size_t len,
 	if (fmt == FMT_PROFILE) {
 		if (tid >= 0)
 			printf("Thread %d:\n", tid);
-		profile_print(&prof);
+		profile_print(&prof, opts);
 		fprintf(stderr,
 		    "%d instructions, %d functions profiled\n",
 		    total, prof.count);
@@ -1572,10 +1968,22 @@ decode_pt_insn(const void *buf, size_t len,
 	} else if (fmt == FMT_COLLAPSED) {
 		if (tid >= 0)
 			fprintf(stderr, "Thread %d:\n", tid);
-		collapsed_print(&col);
+		collapsed_print(&col, opts);
 		fprintf(stderr,
 		    "%d instructions, %d unique stacks\n",
 		    total, col.count);
+	} else if (fmt == FMT_SPEEDSCOPE) {
+		speedscope_print(&col);
+		fprintf(stderr,
+		    "%d instructions, %d unique stacks\n",
+		    total, col.count);
+	} else if (fmt == FMT_CALLERS) {
+		if (tid >= 0)
+			printf("Thread %d:\n", tid);
+		callers_print(&ct, opts);
+		fprintf(stderr,
+		    "%d instructions, %d call tree nodes\n",
+		    total, ct_node_count(&ct.root));
 	} else if (fmt == FMT_TEXT) {
 		fflush(stdout);
 		fprintf(stderr,
@@ -1603,5 +2011,6 @@ decode_pt_insn(const void *buf, size_t len,
 	calltree_free(&ct);
 	profile_free(&prof);
 	sym_table_free(&st);
+	dwarf_cache_close_all();
 	return (total > 0 ? 0 : -1);
 }

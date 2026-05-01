@@ -98,6 +98,15 @@ meta_writer_record(struct meta_writer *mw, const struct bsdtrace_record *rec)
 		    (unsigned long)rec->addr,
 		    (unsigned long)rec->baseaddr);
 		break;
+	case HWT_RECORD_KERNEL:
+		json_escape(epath, sizeof(epath), rec->fullpath);
+		fprintf(mw->fp,
+		    "{\"type\":\"kernel\",\"path\":\"%s\","
+		    "\"addr\":\"0x%lx\",\"base\":\"0x%lx\"}\n",
+		    epath,
+		    (unsigned long)rec->addr,
+		    (unsigned long)rec->baseaddr);
+		break;
 	case HWT_RECORD_THREAD_CREATE:
 		fprintf(mw->fp,
 		    "{\"type\":\"thread_create\",\"tid\":%d}\n",
@@ -127,7 +136,9 @@ meta_writer_sections(struct meta_writer *mw,
 		const char *type;
 
 		type = sections[i].type == HWT_RECORD_EXECUTABLE ?
-		    "exec" : "mmap";
+		    "exec" :
+		    sections[i].type == HWT_RECORD_KERNEL ?
+		    "kernel" : "mmap";
 		json_escape(epath, sizeof(epath), sections[i].path);
 		fprintf(mw->fp,
 		    "{\"type\":\"%s\",\"path\":\"%s\","
@@ -263,7 +274,8 @@ meta_read_sections(const char *path,
 		    "\"addr\":\"0x%lx\",\"base\":\"0x%lx\"}",
 		    type, fpath, &addr, &base) == 4) {
 			if (strcmp(type, "exec") != 0 &&
-			    strcmp(type, "mmap") != 0)
+			    strcmp(type, "mmap") != 0 &&
+			    strcmp(type, "kernel") != 0)
 				continue;
 
 			/*
@@ -300,7 +312,9 @@ meta_read_sections(const char *path,
 			sections[nsections].base_addr = base;
 			sections[nsections].type =
 			    strcmp(type, "exec") == 0 ?
-			    HWT_RECORD_EXECUTABLE : HWT_RECORD_MMAP;
+			    HWT_RECORD_EXECUTABLE :
+			    strcmp(type, "kernel") == 0 ?
+			    HWT_RECORD_KERNEL : HWT_RECORD_MMAP;
 			nsections++;
 		}
 	}
